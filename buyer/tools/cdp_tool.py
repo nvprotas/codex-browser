@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse, urlunparse
+
+import httpx
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
+
+
+def parser() -> argparse.ArgumentParser:
+    cli = argparse.ArgumentParser(description='Утилита управления browser-sidecar через Playwright CDP')
+    cli.add_argument('--endpoint', default=os.getenv('BROWSER_CDP_ENDPOINT', 'http://browser:9223'))
+    cli.add_argument('--timeout-ms', type=int, default=15000)
+    cli.add_argument('--recovery-window-sec', type=float, default=float(os.getenv('CDP_RECOVERY_WINDOW_SEC', '20')))
+    cli.add_argument('--recovery-interval-ms', type=int, default=int(os.getenv('CDP_RECOVERY_INTERVAL_MS', '500')))
+
+    sub = cli.add_subparsers(dest='command', required=True)
+
+    goto = sub.add_parser('goto')
+    goto.add_argument('--url', required=True)
+
+    click = sub.add_parser('click')
+    click.add_argument('--selector', required=True)
+
+    fill = sub.add_parser('fill')
+    fill.add_argument('--selector', required=True)
+    fill.add_argument('--value', required=True)
+
+    press = sub.add_parser('press')
+    press.add_argument('--key', required=True)
+
+    wait_cmd = sub.add_parser('wait')
+    wait_cmd.add_argument('--seconds', type=float, required=True)
+
+    text = sub.add_parser('text')
+    text.add_argument('--selector', required=True)
+
+    title = sub.add_parser('title')
+
+    current = sub.add_parser('url')
+
+    screenshot = sub.add_parser('screenshot')
+    screenshot.add_argument('--path', required=True)
+
+    html = sub.add_parser('html')
+    html.add_argument('--path', required=False)
+
+    return cli
+
+
+TRANSIENT_CONTEXT_MARKERS = (
+    'execution context was destroyed',
+    'target page, context or browser has been closed',
+    'target closed',
+    'page closed',
+    'context closed',
+    'browser has been closed',
+)
+
+
+def normalize_error_text(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return 'unknown error'
+    return ' '.join(text.replace('\n', ' ').split())
+
+
+def is_transient_context_error(error_text: str) -> bool:
+    lowered = error_text.lower()
+    return any(marker in lowered for marker in TRANSIENT_CONTEXT_MARKERS)
+
+
+def recovery_interval_sec(args: argparse.Namespace) -> float:
+    return max(args.recovery_interval_ms, 1) / 1000.0
+
+
+def _log_path() -> Path | None:
+    raw = os.getenv('BUYER_CDP_ACTIONS_LOG_PATH', '').strip()
+    if not raw:
+        return None
+    return Path(raw)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_command_details_for_log(args: argparse.Namespace) -> dict[str, Any]:
+    command = args.command
+    if command == 'goto':
+        return {'url': args.url}
+    if command == 'click':
+        return {'selector': args.selector}
+    if command == 'fill':
+        return {'selector': args.selector, 'value_length': len(args.value)}
+    if command == 'press':
+        return {'key': args.key}
+    if command == 'wait':
+        return {'seconds': args.seconds}
+    if command == 'text':
+        return {'selector': args.selector}
+    if command == 'screenshot':
+        return {'path': args.path}
+    if command == 'html':
+        return {'path': args.path}
+    return {}
+
+
+def _sanitize_result_for_log(result: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(result)
+    if isinstance(sanitized.get('html'), str):
+        html = sanitized.pop('html')
+        sanitized['html_size'] = len(html)
+    if isinstance(sanitized.get('text'), str):
+        text = sanitized['text']
+        if len(text) > 400:
+            sanitized['text'] = f'{text[:400]}...'
+    return sanitized
+
+
+def _append_action_log(event_type: str, payload: dict[str, Any]) -> None:
+    path = _log_path()
+    if path is None:
+        return
+
+    record = {
+        'ts': _utc_now(),
+        'event': event_type,
+        **payload,
+    }
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as fh:
+            fh.write(json.dumps(record, ensure_ascii=False))
+            fh.write('\n')
+    except OSError:
+        return
+
+
+async def ensure_page(browser):
+    if browser.contexts:
+        context = browser.contexts[0]
+    else:
+        context = await browser.new_context(viewport={'width': 1440, 'height': 900})
+
+    if context.pages:
+        page = context.pages[0]
+    else:
+        page = await context.new_page()
+
+    return page
+
+
+def _build_endpoint_candidates(endpoint: str) -> list[str]:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {'http', 'https'}:
+        return [endpoint]
+
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == 'https' else 80
+
+    candidates: list[str] = []
+
+    def add_candidate(raw: str) -> None:
+        if raw not in candidates:
+            candidates.append(raw)
+
+    add_candidate(endpoint)
+
+    if parsed.hostname not in {'localhost', '127.0.0.1'}:
+        add_candidate(f'{parsed.scheme}://localhost:{port}')
+        add_candidate(f'{parsed.scheme}://127.0.0.1:{port}')
+
+    if parsed.hostname != 'host.docker.internal':
+        add_candidate(f'{parsed.scheme}://host.docker.internal:{port}')
+
+    return candidates
+
+
+async def _resolve_single_http_endpoint(endpoint: str, *, client: httpx.AsyncClient) -> str:
+    parsed = urlparse(endpoint)
+    host_header = f'localhost:{parsed.port}' if parsed.port else 'localhost'
+    version_url = endpoint.rstrip('/') + '/json/version'
+    response = await client.get(version_url, headers={'Host': host_header})
+    response.raise_for_status()
+    payload = response.json()
+
+    raw_ws = payload.get('webSocketDebuggerUrl')
+    if not isinstance(raw_ws, str) or not raw_ws:
+        raise RuntimeError('CDP endpoint не вернул webSocketDebuggerUrl.')
+
+    ws_parsed = urlparse(raw_ws)
+    return urlunparse((ws_parsed.scheme, parsed.netloc, ws_parsed.path, ws_parsed.params, ws_parsed.query, ws_parsed.fragment))
+
+
+async def resolve_cdp_endpoint(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    if parsed.scheme in {'ws', 'wss'}:
+        return endpoint
+
+    if parsed.scheme not in {'http', 'https'}:
+        return endpoint
+
+    candidates = _build_endpoint_candidates(endpoint)
+    failures: list[str] = []
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for candidate in candidates:
+            try:
+                return await _resolve_single_http_endpoint(candidate, client=client)
+            except Exception as exc:  # noqa: BLE001 - собираем диагностический хвост по всем кандидатам
+                failures.append(f'{candidate}: {exc}')
+
+    details = '; '.join(failures[:4])
+    raise RuntimeError(
+        'Не удалось подключиться к browser-sidecar ни по одному CDP endpoint. '
+        f'Пробовали: {", ".join(candidates)}. Ошибки: {details}'
+    )
+
+
+async def connect_page_with_retry(
+    *,
+    playwright,
+    args: argparse.Namespace,
+    deadline: float,
+) -> tuple[Any, Any]:
+    attempts = 0
+    last_error = 'unknown error'
+    interval_sec = recovery_interval_sec(args)
+
+    while True:
+        attempts += 1
+        browser = None
+        try:
+            target = await resolve_cdp_endpoint(args.endpoint)
+            browser = await playwright.chromium.connect_over_cdp(target)
+            page = await ensure_page(browser)
+            page.set_default_timeout(args.timeout_ms)
+            return browser, page
+        except Exception as exc:  # noqa: BLE001 - нормализуем и возвращаем стабильный код ошибки
+            last_error = normalize_error_text(exc)
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:  # noqa: BLE001 - best effort cleanup
+                    pass
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(
+                    'CDP_CONNECT_ERROR: '
+                    f'recovery_window_sec={args.recovery_window_sec}; attempts={attempts}; last_error={last_error}'
+                ) from exc
+            await asyncio.sleep(interval_sec)
+
+
+async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -> dict:
+    deadline = asyncio.get_running_loop().time() + max(args.recovery_window_sec, 0.0)
+    attempts = 0
+    last_error = 'unknown error'
+    interval_sec = recovery_interval_sec(args)
+
+    while True:
+        attempts += 1
+        browser, page = await connect_page_with_retry(playwright=playwright, args=args, deadline=deadline)
+        try:
+            if args.command == 'title':
+                return {'ok': True, 'title': await page.title()}
+            if args.command == 'url':
+                return {'ok': True, 'url': page.url}
+            value = await page.text_content(args.selector)
+            return {'ok': True, 'selector': args.selector, 'text': value}
+        except Exception as exc:  # noqa: BLE001 - приводим transient-ошибки к единому формату
+            last_error = normalize_error_text(exc)
+            if not is_transient_context_error(last_error):
+                raise RuntimeError(f'CDP_COMMAND_ERROR: {last_error}') from exc
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(
+                    'CDP_TRANSIENT_ERROR: '
+                    f'command={args.command}; recovery_window_sec={args.recovery_window_sec}; attempts={attempts}; last_error={last_error}'
+                ) from exc
+            await asyncio.sleep(interval_sec)
+        finally:
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                pass
+
+
+async def run_command(args: argparse.Namespace) -> dict:
+    started = asyncio.get_running_loop().time()
+    command_details = _extract_command_details_for_log(args)
+    _append_action_log(
+        'browser_command_started',
+        {
+            'command': args.command,
+            'endpoint': args.endpoint,
+            'details': command_details,
+        },
+    )
+
+    if args.recovery_window_sec < 0:
+        result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-window-sec не может быть отрицательным.'}
+        _append_action_log(
+            'browser_command_finished',
+            {
+                'command': args.command,
+                'ok': False,
+                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                'details': command_details,
+                'result': result,
+            },
+        )
+        return result
+    if args.recovery_interval_ms <= 0:
+        result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-interval-ms должен быть > 0.'}
+        _append_action_log(
+            'browser_command_finished',
+            {
+                'command': args.command,
+                'ok': False,
+                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                'details': command_details,
+                'result': result,
+            },
+        )
+        return result
+
+    playwright = await async_playwright().start()
+    try:
+        if args.command in {'title', 'text', 'url'}:
+            result = await run_read_command_with_retry(playwright=playwright, args=args)
+            _append_action_log(
+                'browser_command_finished',
+                {
+                    'command': args.command,
+                    'ok': bool(result.get('ok')),
+                    'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                    'details': command_details,
+                    'result': _sanitize_result_for_log(result),
+                },
+            )
+            return result
+
+        deadline = asyncio.get_running_loop().time() + max(args.recovery_window_sec, 0.0)
+        browser, page = await connect_page_with_retry(playwright=playwright, args=args, deadline=deadline)
+
+        try:
+            if args.command == 'goto':
+                await page.goto(args.url, wait_until='domcontentloaded')
+                result = {'ok': True, 'url': page.url, 'title': await page.title()}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'click':
+                await page.click(args.selector)
+                result = {'ok': True, 'selector': args.selector, 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'fill':
+                await page.fill(args.selector, args.value)
+                result = {'ok': True, 'selector': args.selector, 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'press':
+                await page.keyboard.press(args.key)
+                result = {'ok': True, 'key': args.key, 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'wait':
+                await asyncio.sleep(args.seconds)
+                result = {'ok': True, 'seconds': args.seconds, 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'screenshot':
+                path = Path(args.path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(path), full_page=True)
+                result = {'ok': True, 'path': str(path), 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            if args.command == 'html':
+                content = await page.content()
+                if args.path:
+                    path = Path(args.path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding='utf-8')
+                    result = {'ok': True, 'path': str(path), 'size': len(content), 'url': page.url}
+                    _append_action_log(
+                        'browser_command_finished',
+                        {
+                            'command': args.command,
+                            'ok': True,
+                            'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                            'details': command_details,
+                            'result': _sanitize_result_for_log(result),
+                        },
+                    )
+                    return result
+                result = {'ok': True, 'html': content, 'url': page.url}
+                _append_action_log(
+                    'browser_command_finished',
+                    {
+                        'command': args.command,
+                        'ok': True,
+                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                        'details': command_details,
+                        'result': _sanitize_result_for_log(result),
+                    },
+                )
+                return result
+
+            result = {'ok': False, 'error': f'Неизвестная команда: {args.command}'}
+            _append_action_log(
+                'browser_command_finished',
+                {
+                    'command': args.command,
+                    'ok': False,
+                    'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                    'details': command_details,
+                    'result': result,
+                },
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001 - унифицируем текст ошибок на уровне CLI
+            normalized = normalize_error_text(exc)
+            if is_transient_context_error(normalized):
+                raise RuntimeError(f'CDP_TRANSIENT_ERROR: {normalized}') from exc
+            raise RuntimeError(f'CDP_COMMAND_ERROR: {normalized}') from exc
+        finally:
+            try:
+                await browser.close()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                pass
+    except Exception as exc:  # noqa: BLE001 - единая запись в аудит при любой ошибке
+        _append_action_log(
+            'browser_command_failed',
+            {
+                'command': args.command,
+                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                'details': command_details,
+                'error': normalize_error_text(exc),
+            },
+        )
+        raise
+    finally:
+        await playwright.stop()
+
+
+async def main() -> int:
+    args = parser().parse_args()
+    try:
+        result = await run_command(args)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get('ok') else 1
+    except PlaywrightTimeoutError as exc:
+        print(json.dumps({'ok': False, 'error': f'CDP_COMMAND_TIMEOUT: {normalize_error_text(exc)}'}, ensure_ascii=False))
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI должен вернуть читаемую ошибку
+        print(json.dumps({'ok': False, 'error': normalize_error_text(exc)}, ensure_ascii=False))
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(asyncio.run(main()))

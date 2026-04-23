@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BuyerAgentStepOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "message", "order_id"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["needs_user_input", "completed", "failed"]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "order_id": {
+      "type": ["string", "null"]
+    }
+  }
+}
