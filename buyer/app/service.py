@@ -655,6 +655,8 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     fields = (
+        'trace_date',
+        'trace_time',
         'prompt_path',
         'prompt_sha256',
         'trace_file',

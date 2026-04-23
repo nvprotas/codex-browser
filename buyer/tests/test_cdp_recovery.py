@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
-from buyer.app.runner import AgentRunner
+from buyer.app.runner import AgentRunner, _trace_date_dir_name
 from buyer.app.service import BuyerService
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
@@ -66,6 +68,34 @@ class _NoopAuthScriptRunner:
 
 
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trace_context_uses_date_and_time_directory(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            runner = AgentRunner(Settings(buyer_trace_dir=tmpdir))
+
+            trace = runner._prepare_trace_context(session_id='session-123', step_index=7)
+
+            expected_session_dir = Path(tmpdir) / trace['trace_date'] / trace['trace_time'] / 'session-123'
+            self.assertEqual(trace['session_dir'], expected_session_dir)
+            self.assertEqual(trace['trace_date'], _trace_date_dir_name())
+            self.assertRegex(trace['trace_time'], r'^\d{2}-\d{2}-\d{2}$')
+            self.assertTrue(expected_session_dir.is_dir())
+            self.assertEqual(trace['prompt_path'], expected_session_dir / 'step-007-prompt.txt')
+            self.assertEqual(trace['browser_actions_log_path'], expected_session_dir / 'step-007-browser-actions.jsonl')
+            self.assertEqual(trace['step_trace_path'], expected_session_dir / 'step-007-trace.json')
+
+    async def test_trace_context_reuses_existing_session_directory(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            existing_session_dir = Path(tmpdir) / '2026-04-24' / '10-20-30' / 'session-123'
+            existing_session_dir.mkdir(parents=True)
+            runner = AgentRunner(Settings(buyer_trace_dir=tmpdir))
+
+            trace = runner._prepare_trace_context(session_id='session-123', step_index=8)
+
+            self.assertEqual(trace['session_dir'], existing_session_dir)
+            self.assertEqual(trace['trace_date'], '2026-04-24')
+            self.assertEqual(trace['trace_time'], '10-20-30')
+            self.assertEqual(trace['prompt_path'], existing_session_dir / 'step-008-prompt.txt')
+
     async def test_preflight_recovers_after_two_failures(self) -> None:
         settings = Settings(
             cdp_recovery_window_sec=0.2,

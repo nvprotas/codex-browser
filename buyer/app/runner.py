@@ -454,12 +454,22 @@ class AgentRunner:
         return True, stdout_text, 'none'
 
     def _prepare_trace_context(self, *, session_id: str, step_index: int) -> dict[str, Any]:
-        session_dir = Path(self._settings.buyer_trace_dir).expanduser() / session_id
+        trace_root = Path(self._settings.buyer_trace_dir).expanduser()
+        session_dir = _find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
+        if session_dir is None:
+            trace_date = _trace_date_dir_name()
+            trace_time = _trace_time_dir_name()
+            session_dir = trace_root / trace_date / trace_time / session_id
+        else:
+            trace_time = session_dir.parent.name
+            trace_date = session_dir.parent.parent.name
         session_dir.mkdir(parents=True, exist_ok=True)
         step_tag = f'step-{step_index:03d}'
         return {
             'session_id': session_id,
             'step_index': step_index,
+            'trace_date': trace_date,
+            'trace_time': trace_time,
             'session_dir': session_dir,
             'prompt_path': session_dir / f'{step_tag}-prompt.txt',
             'browser_actions_log_path': session_dir / f'{step_tag}-browser-actions.jsonl',
@@ -487,6 +497,8 @@ class AgentRunner:
         payload: dict[str, Any] = {
             'session_id': trace['session_id'],
             'step': trace['step_index'],
+            'trace_date': trace['trace_date'],
+            'trace_time': trace['trace_time'],
             'preflight_summary': preflight_summary,
             'prompt_path': str(trace['prompt_path']) if trace['prompt_path'].is_file() else None,
             'prompt_sha256': prompt_hash,
@@ -509,6 +521,41 @@ class AgentRunner:
 def _duration_ms_since(started_at: datetime) -> int:
     delta = datetime.now(timezone.utc) - started_at
     return max(int(delta.total_seconds() * 1000), 0)
+
+
+def _trace_date_dir_name(now: datetime | None = None) -> str:
+    current = now or datetime.now().astimezone()
+    return current.strftime('%Y-%m-%d')
+
+
+def _trace_time_dir_name(now: datetime | None = None) -> str:
+    current = now or datetime.now().astimezone()
+    return current.strftime('%H-%M-%S')
+
+
+def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
+    if not trace_root.is_dir():
+        return None
+
+    matches: list[Path] = []
+    try:
+        date_dirs = [item for item in trace_root.iterdir() if item.is_dir()]
+    except OSError:
+        return None
+
+    for date_dir in date_dirs:
+        try:
+            time_dirs = [item for item in date_dir.iterdir() if item.is_dir()]
+        except OSError:
+            continue
+        for time_dir in time_dirs:
+            candidate = time_dir / session_id
+            if candidate.is_dir():
+                matches.append(candidate)
+
+    if not matches:
+        return None
+    return sorted(matches)[-1]
 
 
 def _preview_text(text: str, *, limit: int) -> str:

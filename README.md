@@ -121,7 +121,7 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 
 Если `buyer` получает transient CDP-failure от агента, он не завершает сессию мгновенно: в пределах recovery-окна шаг перезапускается с системным маркером `[CDP_RECOVERY_RESTART_FROM_START_URL]`, и агент должен начать шаг заново с `goto start_url`.
 
-Файлы observability по шагам пишутся в `BUYER_TRACE_DIR/<session_id>/`:
+Файлы observability по шагам пишутся в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`:
 
 - `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
