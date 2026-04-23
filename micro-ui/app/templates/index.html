@@ -44,6 +44,15 @@
             <textarea id="task-metadata" rows="3" placeholder='{"city":"Москва","budget":2500}'>{}</textarea>
           </label>
 
+          <label class="full">
+            auth (JSON, optional)
+            <textarea
+              id="task-auth"
+              rows="6"
+              placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
+            ></textarea>
+          </label>
+
           <button type="submit" class="full">Запустить сессию</button>
         </form>
         <pre id="task-result" class="result"></pre>

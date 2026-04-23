@@ -21,6 +21,9 @@ RUN pip install -r /tmp/requirements.txt
 # можно передать альтернативный бинарь через CODEX_BIN.
 RUN npm install -g @openai/codex || true
 
+COPY buyer/scripts/package.json buyer/scripts/package-lock.json /app/scripts/
+RUN cd /app/scripts && npm ci
+
 COPY buyer /app
 RUN chmod +x /app/docker/entrypoint.sh
 

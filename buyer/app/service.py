@@ -6,8 +6,18 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from .auth_scripts import (
+    AUTH_FAILED_INVALID_SESSION,
+    AUTH_FAILED_PAYLOAD,
+    AUTH_FAILED_REDIRECT_LOOP,
+    AUTH_OK,
+    AUTH_REFRESH_REQUESTED,
+    SberIdScriptRunner,
+    domain_from_url,
+    is_domain_in_allowlist,
+)
 from .callback import CallbackClient, CallbackDeliveryError
-from .models import AgentOutput, EventEnvelope, SessionStatus
+from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .runner import AgentRunner
 from .state import (
     ReplyValidationError,
@@ -31,6 +41,9 @@ class BuyerService:
         default_callback_url: str,
         cdp_recovery_window_sec: float,
         cdp_recovery_interval_ms: int,
+        sberid_allowlist: set[str],
+        sberid_auth_retry_budget: int,
+        auth_script_runner: SberIdScriptRunner,
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -39,14 +52,25 @@ class BuyerService:
         self._default_callback_url = default_callback_url
         self._cdp_recovery_window_sec = max(cdp_recovery_window_sec, 0.0)
         self._cdp_recovery_interval_sec = max(cdp_recovery_interval_ms, 1) / 1000.0
+        self._sberid_allowlist = {item for item in sberid_allowlist if item}
+        self._sberid_auth_retry_budget = max(sberid_auth_retry_budget, 0)
+        self._auth_script_runner = auth_script_runner
 
-    async def create_session(self, task: str, start_url: str, callback_url: str | None, metadata: dict[str, Any]) -> SessionState:
+    async def create_session(
+        self,
+        task: str,
+        start_url: str,
+        callback_url: str | None,
+        metadata: dict[str, Any],
+        auth: TaskAuthPayload | None,
+    ) -> SessionState:
         state = await self._store.create_session(
             task=task,
             start_url=start_url,
             callback_url=callback_url or self._default_callback_url,
             novnc_url=self._novnc_url,
             metadata=metadata,
+            auth=auth,
         )
         await self._store.set_status(state.session_id, SessionStatus.RUNNING)
 
@@ -65,6 +89,7 @@ class BuyerService:
 
     async def _run_session(self, session_id: str) -> None:
         latest_user_reply: str | None = None
+        auth_summary: dict[str, Any] = {}
         step_index = 0
         recovery_started_at: float | None = None
         recovery_attempts = 0
@@ -85,6 +110,13 @@ class BuyerService:
 
             await self._store.add_agent_memory(session_id, 'system', f'Start URL: {state.start_url}')
             await self._store.add_agent_memory(session_id, 'user', state.task)
+            auth_summary = await self._run_sberid_auth_flow(state)
+            if auth_summary:
+                await self._store.add_agent_memory(
+                    session_id,
+                    'system',
+                    f'[SBERID_AUTH_SUMMARY] {json.dumps(auth_summary, ensure_ascii=False)}',
+                )
 
             while True:
                 state = await self._store.get(session_id)
@@ -106,6 +138,8 @@ class BuyerService:
                     task=state.task,
                     start_url=state.start_url,
                     metadata=state.metadata,
+                    auth=state.auth,
+                    auth_context=auth_summary,
                     memory=memory,
                     latest_user_reply=latest_user_reply,
                 )
@@ -124,30 +158,19 @@ class BuyerService:
                     recovery_started_at = None
                     recovery_attempts = 0
                     last_recovery_error_tail = 'none'
-                    reply_id = str(uuid4())
-                    await self._store.set_waiting_question(session_id, result.message, reply_id)
-                    state = await self._store.get(session_id)
-                    await self._emit_event(
+                    latest_user_reply = await self._ask_user_for_reply(
                         state,
-                        event_type='ask_user',
-                        payload={
-                            'message': result.message,
-                            'reply_id': reply_id,
-                        },
-                        idempotency_suffix=reply_id,
+                        result.message,
+                        reason_code=None,
+                        extra_context={'step': step_index},
                     )
-                    logger.info('session_waiting_user session_id=%s step=%s reply_id=%s', session_id, step_index, reply_id)
-
-                    await state.wake_event.wait()
-                    latest_user_reply = await self._store.pop_reply(session_id)
-                    await self._store.add_agent_memory(session_id, 'user', latest_user_reply)
                     continue
 
                 if result.status == 'completed':
                     recovery_started_at = None
                     recovery_attempts = 0
                     last_recovery_error_tail = 'none'
-                    await self._handle_completed(state, result)
+                    await self._handle_completed(state, result, auth_summary=auth_summary)
                     return
 
                 if _looks_like_transient_cdp_failure(result.message, result.artifacts):
@@ -182,10 +205,10 @@ class BuyerService:
                         'window_sec': self._cdp_recovery_window_sec,
                         'last_error_tail': last_recovery_error_tail,
                     }
-                    await self._handle_failed(state, failure_reason, failure_artifacts)
+                    await self._handle_failed(state, failure_reason, failure_artifacts, auth_summary=auth_summary)
                     return
 
-                await self._handle_failed(state, result.message, result.artifacts)
+                await self._handle_failed(state, result.message, result.artifacts, auth_summary=auth_summary)
                 return
 
         except (SessionNotFoundError, SessionConflictError, ReplyValidationError):
@@ -206,7 +229,7 @@ class BuyerService:
         except Exception as exc:  # noqa: BLE001 - последняя защита сессии
             state = await self._store.get(session_id)
             try:
-                await self._handle_failed(state, f'Непредвиденная ошибка: {exc}', artifacts={})
+                await self._handle_failed(state, f'Непредвиденная ошибка: {exc}', artifacts={}, auth_summary=auth_summary)
             except CallbackDeliveryError as delivery_exc:
                 await self._store.set_status(session_id, SessionStatus.FAILED, error=str(delivery_exc))
                 fallback_event = self._callback_client.build_envelope(
@@ -220,7 +243,16 @@ class BuyerService:
                 )
                 await self._store.append_event(session_id, fallback_event)
 
-    async def _handle_completed(self, state: SessionState, result: AgentOutput) -> None:
+    async def _handle_completed(
+        self,
+        state: SessionState,
+        result: AgentOutput,
+        *,
+        auth_summary: dict[str, Any] | None,
+    ) -> None:
+        artifacts = dict(result.artifacts)
+        if auth_summary:
+            artifacts['auth'] = auth_summary
         if result.order_id:
             await self._emit_event(
                 state,
@@ -240,26 +272,259 @@ class BuyerService:
                 'status': 'completed',
                 'message': result.message,
                 'order_id': result.order_id,
-                'artifacts': result.artifacts,
+                'artifacts': artifacts,
             },
             idempotency_suffix='scenario-finished',
         )
         await self._store.set_status(state.session_id, SessionStatus.COMPLETED)
         logger.info('session_completed session_id=%s', state.session_id)
 
-    async def _handle_failed(self, state: SessionState, reason: str, artifacts: dict[str, Any]) -> None:
+    async def _handle_failed(
+        self,
+        state: SessionState,
+        reason: str,
+        artifacts: dict[str, Any],
+        *,
+        auth_summary: dict[str, Any] | None,
+    ) -> None:
+        merged_artifacts = dict(artifacts)
+        if auth_summary:
+            merged_artifacts['auth'] = auth_summary
         await self._emit_event(
             state,
             event_type='scenario_finished',
             payload={
                 'status': 'failed',
                 'message': reason,
-                'artifacts': artifacts,
+                'artifacts': merged_artifacts,
             },
             idempotency_suffix='scenario-failed',
         )
         await self._store.set_status(state.session_id, SessionStatus.FAILED, error=reason)
         logger.error('session_failed session_id=%s reason=%s', state.session_id, _tail_text(reason, limit=700))
+
+    async def _run_sberid_auth_flow(self, state: SessionState) -> dict[str, Any]:
+        domain = domain_from_url(state.start_url)
+        summary: dict[str, Any] = {
+            'provider': None,
+            'domain': domain,
+            'mode': 'guest',
+            'path': 'guest',
+            'reason_code': None,
+            'attempts': 0,
+            'context_prepared': False,
+            'allowlist': sorted(self._sberid_allowlist),
+            'script_registry': self._auth_script_runner.registry_snapshot(),
+        }
+        auth = state.auth
+        if auth is None:
+            summary['reason_code'] = 'auth_not_provided'
+            return summary
+
+        provider = (auth.provider or '').strip().lower()
+        if not provider:
+            provider = 'sberid'
+        summary['provider'] = provider
+        if provider != 'sberid':
+            summary['reason_code'] = 'auth_provider_not_supported'
+            return summary
+
+        if not is_domain_in_allowlist(domain, self._sberid_allowlist):
+            summary['reason_code'] = 'auth_domain_not_in_allowlist'
+            return summary
+
+        summary['mode'] = 'sberid'
+        current_auth = auth
+        max_attempts = self._sberid_auth_retry_budget + 1
+        last_script_artifacts: dict[str, Any] = {}
+
+        for attempt in range(1, max_attempts + 1):
+            summary['attempts'] = attempt
+            storage_state = current_auth.storage_state
+            if not _is_valid_storage_state(storage_state):
+                summary['path'] = 'script'
+                summary['reason_code'] = AUTH_FAILED_PAYLOAD
+                if attempt < max_attempts:
+                    user_reply = await self._ask_user_for_reply(
+                        state,
+                        'Нужен корректный auth-пакет SberId (JSON с storageState). Отправьте новый пакет.',
+                        reason_code=AUTH_FAILED_PAYLOAD,
+                        extra_context={
+                            'attempt': attempt,
+                            'max_attempts': max_attempts,
+                        },
+                    )
+                    parsed_auth = self._parse_auth_from_user_reply(user_reply)
+                    if parsed_auth is not None:
+                        current_auth = parsed_auth
+                        await self._store.set_auth(state.session_id, current_auth)
+                    else:
+                        current_auth = TaskAuthPayload(provider='sberid', storage_state=None)
+                    continue
+
+                await self._emit_handoff_and_wait(
+                    state,
+                    reason_code=AUTH_FAILED_PAYLOAD,
+                    message='Автоматический auth-пакет невалиден после повторной попытки.',
+                )
+                summary['path'] = 'handoff'
+                summary['handoff'] = True
+                return summary
+
+            script_result = await self._auth_script_runner.run(
+                session_id=state.session_id,
+                domain=domain,
+                start_url=state.start_url,
+                storage_state=storage_state,
+                attempt=attempt,
+            )
+            summary['script_status'] = script_result.status
+            summary['reason_code'] = script_result.reason_code
+            summary['script_message'] = script_result.message
+            last_script_artifacts = script_result.artifacts
+            if script_result.reason_code == AUTH_OK and script_result.status == 'completed':
+                summary['path'] = 'script'
+                summary['artifacts'] = last_script_artifacts
+                summary['context_prepared'] = bool(last_script_artifacts.get('context_prepared_for_reuse'))
+                return summary
+
+            if (
+                attempt < max_attempts
+                and script_result.reason_code
+                in {
+                    AUTH_REFRESH_REQUESTED,
+                    AUTH_FAILED_REDIRECT_LOOP,
+                    AUTH_FAILED_INVALID_SESSION,
+                }
+            ):
+                user_reply = await self._ask_user_for_reply(
+                    state,
+                    (
+                        'SberId-авторизация не подтвердилась. '
+                        'Отправьте новый auth-пакет (JSON с storageState) для повтора.'
+                    ),
+                    reason_code=AUTH_REFRESH_REQUESTED,
+                    extra_context=_build_auth_retry_context(
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        script_result=script_result,
+                    ),
+                )
+                parsed_auth = self._parse_auth_from_user_reply(user_reply)
+                if parsed_auth is not None:
+                    current_auth = parsed_auth
+                    await self._store.set_auth(state.session_id, current_auth)
+                else:
+                    current_auth = TaskAuthPayload(provider='sberid', storage_state=None)
+                continue
+
+            break
+
+        summary['path'] = 'heuristic'
+        summary['artifacts'] = last_script_artifacts
+        await self._store.add_agent_memory(
+            state.session_id,
+            'system',
+            (
+                '[SBERID_AUTH_HEURISTIC_REQUIRED] '
+                'Скриптовая SberId-авторизация не завершилась успешно. '
+                'Попробуй эвристический вход; если блокер сохраняется, запроси handoff.'
+            ),
+        )
+        return summary
+
+    async def _ask_user_for_reply(
+        self,
+        state: SessionState,
+        message: str,
+        *,
+        reason_code: str | None,
+        extra_context: dict[str, Any] | None,
+    ) -> str:
+        reply_id = str(uuid4())
+        await self._store.set_waiting_question(state.session_id, message, reply_id)
+        refreshed_state = await self._store.get(state.session_id)
+        payload: dict[str, Any] = {
+            'message': message,
+            'reply_id': reply_id,
+        }
+        if reason_code:
+            payload['reason_code'] = reason_code
+        if extra_context:
+            payload['context'] = extra_context
+        await self._emit_event(
+            refreshed_state,
+            event_type='ask_user',
+            payload=payload,
+            idempotency_suffix=reply_id,
+        )
+        logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
+
+        await refreshed_state.wake_event.wait()
+        reply_text = await self._store.pop_reply(state.session_id)
+        await self._store.add_agent_memory(state.session_id, 'user', reply_text)
+        return reply_text
+
+    async def _emit_handoff_and_wait(
+        self,
+        state: SessionState,
+        *,
+        reason_code: str,
+        message: str,
+    ) -> None:
+        await self._emit_event(
+            state,
+            event_type='handoff_requested',
+            payload={
+                'message': message,
+                'reason_code': reason_code,
+                'novnc_url': state.novnc_url,
+            },
+            idempotency_suffix=f'handoff-requested-{reason_code}',
+        )
+        operator_reply = await self._ask_user_for_reply(
+            state,
+            (
+                'Переключитесь в noVNC, выполните ручной шаг авторизации и '
+                'подтвердите ответом в этом диалоге.'
+            ),
+            reason_code=reason_code,
+            extra_context={'handoff': True, 'novnc_url': state.novnc_url},
+        )
+        refreshed_state = await self._store.get(state.session_id)
+        await self._emit_event(
+            refreshed_state,
+            event_type='handoff_resumed',
+            payload={
+                'message': 'Ручной этап handoff завершен, buyer продолжает сценарий.',
+                'reason_code': reason_code,
+                'operator_reply': operator_reply,
+            },
+            idempotency_suffix=f'handoff-resumed-{reason_code}',
+        )
+
+    @staticmethod
+    def _parse_auth_from_user_reply(raw: str) -> TaskAuthPayload | None:
+        text = (raw or '').strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        candidate = payload.get('auth') if isinstance(payload.get('auth'), dict) else payload
+        if not isinstance(candidate, dict):
+            return None
+        if 'storageState' not in candidate and 'storage_state' not in candidate:
+            if isinstance(candidate.get('cookies'), list) and isinstance(candidate.get('origins'), list):
+                candidate = {'provider': 'sberid', 'storageState': candidate}
+        try:
+            auth = TaskAuthPayload.model_validate(candidate)
+        except Exception:
+            return None
+        return auth
 
     async def _emit_event(
         self,
@@ -308,6 +573,25 @@ def _looks_like_transient_cdp_failure(message: str, artifacts: dict[str, Any]) -
         chunks.append(json.dumps(artifacts, ensure_ascii=False))
     haystack = ' '.join(chunks).lower()
     return any(marker in haystack for marker in TRANSIENT_CDP_MARKERS)
+
+
+def _is_valid_storage_state(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    cookies = payload.get('cookies')
+    origins = payload.get('origins')
+    return isinstance(cookies, list) and isinstance(origins, list)
+
+
+def _build_auth_retry_context(*, attempt: int, max_attempts: int, script_result: Any) -> dict[str, Any]:
+    artifacts = script_result.artifacts if isinstance(getattr(script_result, 'artifacts', None), dict) else {}
+    return {
+        'attempt': attempt,
+        'max_attempts': max_attempts,
+        'script_reason_code': getattr(script_result, 'reason_code', None),
+        'script_message': _tail_text(getattr(script_result, 'message', ''), limit=220),
+        'stderr_tail': _tail_text(str(artifacts.get('stderr_tail', '')), limit=220),
+    }
 
 
 def _tail_text(text: str, limit: int = 500) -> str:

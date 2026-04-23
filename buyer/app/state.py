@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from .models import EventEnvelope, SessionStatus
+from .models import EventEnvelope, SessionStatus, TaskAuthPayload
 
 
 def utcnow() -> datetime:
@@ -21,6 +21,7 @@ class SessionState:
     callback_url: str
     novnc_url: str
     metadata: dict[str, Any]
+    auth: TaskAuthPayload | None = None
     status: SessionStatus = SessionStatus.CREATED
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
@@ -63,6 +64,7 @@ class SessionStore:
         callback_url: str,
         novnc_url: str,
         metadata: dict[str, Any],
+        auth: TaskAuthPayload | None,
     ) -> SessionState:
         async with self._lock:
             active = [
@@ -81,9 +83,19 @@ class SessionStore:
                 callback_url=callback_url,
                 novnc_url=novnc_url,
                 metadata=metadata,
+                auth=auth,
                 status=SessionStatus.CREATED,
             )
             self._sessions[session_id] = state
+            return state
+
+    async def set_auth(self, session_id: str, auth: TaskAuthPayload | None) -> SessionState:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
+            state.auth = auth
+            state.touch()
             return state
 
     async def get(self, session_id: str) -> SessionState:

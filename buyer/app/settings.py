@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     callback_retries: int = 3
     callback_backoff_sec: float = 0.8
 
+    sberid_allowlist: str = 'litres.ru,kuper.ru,samokat.ru,okko.tv'
+    sberid_auth_retry_budget: int = Field(default=1, ge=0)
+    auth_scripts_dir: str = '/app/scripts'
+    auth_script_timeout_sec: int = Field(default=90, ge=5)
+
     max_active_sessions: int = 1
 
     status_ttl_sec: int = Field(default=86400, ge=60)

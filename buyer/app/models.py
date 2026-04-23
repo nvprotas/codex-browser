@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionStatus(StrEnum):
@@ -15,11 +15,27 @@ class SessionStatus(StrEnum):
     FAILED = 'failed'
 
 
+class AuthProvider(StrEnum):
+    SBERID = 'sberid'
+
+
+class TaskAuthPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra='ignore')
+
+    provider: str = Field(default=AuthProvider.SBERID.value, description='Провайдер авторизации')
+    storage_state: dict[str, Any] | None = Field(
+        default=None,
+        alias='storageState',
+        description='Playwright storageState для восстановления сессии',
+    )
+
+
 class TaskCreateRequest(BaseModel):
     task: str = Field(min_length=1, description='Текст задачи для агента buyer')
     start_url: str = Field(min_length=1, description='URL магазина для начала сценария')
     callback_url: str | None = Field(default=None, description='Куда buyer отправляет callback-события')
     metadata: dict[str, Any] = Field(default_factory=dict)
+    auth: TaskAuthPayload | None = Field(default=None, description='Опциональный auth-пакет для SberId')
 
 
 class TaskCreateResponse(BaseModel):

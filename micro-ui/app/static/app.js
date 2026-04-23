@@ -12,6 +12,7 @@ const taskForm = document.getElementById('task-form');
 const taskTextInput = document.getElementById('task-text');
 const taskStartUrlInput = document.getElementById('task-start-url');
 const taskMetadataInput = document.getElementById('task-metadata');
+const taskAuthInput = document.getElementById('task-auth');
 const taskResultNode = document.getElementById('task-result');
 
 const replyForm = document.getElementById('reply-form');
@@ -231,11 +232,19 @@ taskForm.addEventListener('submit', async (event) => {
 
   try {
     const rawMetadata = taskMetadataInput.value.trim();
+    const rawAuth = taskAuthInput.value.trim();
     let metadata = {};
+    let auth = null;
     if (rawMetadata) {
       metadata = JSON.parse(rawMetadata);
       if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
         throw new Error('metadata должен быть JSON-объектом, например {"city":"Москва"}');
+      }
+    }
+    if (rawAuth) {
+      auth = JSON.parse(rawAuth);
+      if (!auth || typeof auth !== 'object' || Array.isArray(auth)) {
+        throw new Error('auth должен быть JSON-объектом, например {"provider":"sberid","storageState":{"cookies":[],"origins":[]}}');
       }
     }
 
@@ -243,6 +252,7 @@ taskForm.addEventListener('submit', async (event) => {
       task: taskTextInput.value.trim(),
       start_url: taskStartUrlInput.value.trim(),
       metadata,
+      auth,
     };
 
     const data = await fetchJson('/api/tasks', {

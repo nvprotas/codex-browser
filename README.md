@@ -16,6 +16,8 @@
 - Отдельный контейнер `browser` с noVNC + CDP (`http://browser:9223`).
 - Утилита `buyer/tools/cdp_tool.py` для управления sidecar-браузером через Playwright.
 - Трассировка шагов `codex`: сохраняются prompt, stdout/stderr tail, итог шага и лог браузерных команд.
+- SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
+- Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
 - Ограничение MVP: только 1 активная сессия одновременно.
 
 ## Запуск
@@ -40,6 +42,14 @@ cp .env.example .env
 
 # Куда писать trace-логи buyer (примонтированная папка)
 # BUYER_TRACE_DIR=/workspace/.tmp/buyer-observability
+
+# Домены SberId allowlist и retry-бюджет auth-пакета
+# SBERID_ALLOWLIST=litres.ru,kuper.ru,samokat.ru,okko.tv
+# SBERID_AUTH_RETRY_BUDGET=1
+
+# Параметры запуска TS auth-скриптов
+# AUTH_SCRIPTS_DIR=/app/scripts
+# AUTH_SCRIPT_TIMEOUT_SEC=90
 ```
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
@@ -65,6 +75,13 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
   -d '{
     "task": "Открой сайт и подготовь путь до шага оплаты без реального платежа",
     "start_url": "https://www.litres.ru/",
+    "auth": {
+      "provider": "sberid",
+      "storageState": {
+        "cookies": [],
+        "origins": []
+      }
+    },
     "metadata": {
       "budget": 2500,
       "city": "Москва"
@@ -74,7 +91,9 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
 
 2. `buyer` отправляет callbacks в `micro-ui` (`/callbacks`), в панели появляются события.
 
-3. Если приходит `ask_user`, оператор в `micro-ui` вводит ответ. Панель отправляет его в `buyer` как:
+3. В `micro-ui` форму запуска задачи можно передавать `auth` JSON (опционально), чтобы запускать SberId-flow без `curl`.
+
+4. Если приходит `ask_user`, оператор в `micro-ui` вводит ответ. Панель отправляет его в `buyer` как:
 
 ```json
 {
@@ -84,7 +103,7 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
 }
 ```
 
-4. После завершения `buyer` отправляет `scenario_finished`.
+5. После завершения `buyer` отправляет `scenario_finished`.
 
 ## Playwright через sidecar
 
@@ -131,6 +150,8 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 - `agent_step_started`
 - `agent_step_finished`
 - `ask_user`
+- `handoff_requested`
+- `handoff_resumed`
 - `payment_ready`
 - `scenario_finished`
 

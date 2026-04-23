@@ -35,6 +35,7 @@ class TaskCreateRequest(BaseModel):
     task: str = Field(min_length=1)
     start_url: str = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    auth: dict[str, Any] | None = None
 
 
 class TaskCreateResponse(BaseModel):

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import AgentOutput
+from .models import AgentOutput, TaskAuthPayload
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
 
@@ -30,6 +30,8 @@ class AgentRunner:
         task: str,
         start_url: str,
         metadata: dict[str, Any],
+        auth: TaskAuthPayload | None,
+        auth_context: dict[str, Any] | None,
         memory: list[dict[str, str]],
         latest_user_reply: str | None,
     ) -> AgentOutput:
@@ -76,6 +78,8 @@ class AgentRunner:
             browser_cdp_endpoint=self._settings.browser_cdp_endpoint,
             cdp_preflight_summary=probe_summary,
             metadata=metadata,
+            auth_payload=_build_redacted_auth_payload(auth),
+            auth_context=auth_context,
             memory=memory,
             latest_user_reply=latest_user_reply,
         )
@@ -605,3 +609,21 @@ def _tail_text(text: str, limit: int = 500) -> str:
     if len(compact) <= limit:
         return compact
     return compact[-limit:]
+
+
+def _build_redacted_auth_payload(auth: TaskAuthPayload | None) -> dict[str, Any] | None:
+    if auth is None:
+        return None
+
+    storage_state = auth.storage_state if isinstance(auth.storage_state, dict) else None
+    cookies = storage_state.get('cookies') if storage_state is not None else None
+    origins = storage_state.get('origins') if storage_state is not None else None
+
+    return {
+        'provider': (auth.provider or '').strip().lower() or 'sberid',
+        'has_storage_state': storage_state is not None,
+        'storage_state_stats': {
+            'cookies_count': len(cookies) if isinstance(cookies, list) else 0,
+            'origins_count': len(origins) if isinstance(origins, list) else 0,
+        },
+    }

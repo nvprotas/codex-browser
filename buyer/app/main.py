@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
+from .auth_scripts import SberIdScriptRunner, parse_allowlist
 from .callback import CallbackClient
 from .models import (
     SessionDetail,
@@ -20,6 +21,12 @@ settings = get_settings()
 store = SessionStore(max_active_sessions=settings.max_active_sessions)
 callback_client = CallbackClient(settings)
 runner = AgentRunner(settings)
+auth_script_runner = SberIdScriptRunner(
+    scripts_dir=settings.auth_scripts_dir,
+    cdp_endpoint=settings.browser_cdp_endpoint,
+    timeout_sec=settings.auth_script_timeout_sec,
+    trace_dir=settings.buyer_trace_dir,
+)
 service = BuyerService(
     store=store,
     callback_client=callback_client,
@@ -28,6 +35,9 @@ service = BuyerService(
     default_callback_url=settings.middle_callback_url,
     cdp_recovery_window_sec=settings.cdp_recovery_window_sec,
     cdp_recovery_interval_ms=settings.cdp_recovery_interval_ms,
+    sberid_allowlist=parse_allowlist(settings.sberid_allowlist),
+    sberid_auth_retry_budget=settings.sberid_auth_retry_budget,
+    auth_script_runner=auth_script_runner,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')
@@ -46,6 +56,7 @@ async def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
             start_url=request.start_url,
             callback_url=request.callback_url,
             metadata=request.metadata,
+            auth=request.auth,
         )
     except SessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

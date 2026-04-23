@@ -57,6 +57,14 @@ class _RecordingCallbackClient:
         self.delivered.append(envelope)
 
 
+class _NoopAuthScriptRunner:
+    def registry_snapshot(self) -> list[dict[str, str]]:
+        return []
+
+    async def run(self, **_: Any) -> Any:
+        return None
+
+
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_preflight_recovers_after_two_failures(self) -> None:
         settings = Settings(
@@ -112,6 +120,9 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             default_callback_url='http://callback',
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
         state = await service.create_session(
@@ -119,6 +130,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             start_url='https://example.com',
             callback_url='http://callback',
             metadata={},
+            auth=None,
         )
         await state.task_ref
 
@@ -158,6 +170,9 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             default_callback_url='http://callback',
             cdp_recovery_window_sec=0.001,
             cdp_recovery_interval_ms=2,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
         state = await service.create_session(
@@ -165,6 +180,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             start_url='https://example.com',
             callback_url='http://callback',
             metadata={},
+            auth=None,
         )
         await state.task_ref
 

@@ -11,11 +11,15 @@ def build_agent_prompt(
     browser_cdp_endpoint: str,
     cdp_preflight_summary: str,
     metadata: dict[str, Any],
+    auth_payload: dict[str, Any] | None,
+    auth_context: dict[str, Any] | None,
     memory: list[dict[str, str]],
     latest_user_reply: str | None,
 ) -> str:
     memory_dump = json.dumps(memory[-12:], ensure_ascii=False, indent=2)
     metadata_dump = json.dumps(metadata, ensure_ascii=False, indent=2)
+    auth_payload_dump = json.dumps(auth_payload, ensure_ascii=False, indent=2) if auth_payload is not None else 'null'
+    auth_context_dump = json.dumps(auth_context, ensure_ascii=False, indent=2) if auth_context is not None else 'null'
 
     latest_reply_block = latest_user_reply or 'Нет новых ответов от пользователя на этом шаге.'
 
@@ -41,6 +45,8 @@ def build_agent_prompt(
 - task: {task}
 - start_url: {start_url}
 - metadata: {metadata_dump}
+- auth_payload: {auth_payload_dump}
+- auth_context: {auth_context_dump}
 - cdp_preflight: {cdp_preflight_summary}
 
 История диалога (последние шаги):
