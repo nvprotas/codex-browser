@@ -1,0 +1,554 @@
+import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { URL } from 'node:url';
+
+type ScriptResult = {
+  status: 'completed' | 'failed';
+  reason_code: string;
+  message: string;
+  artifacts: Record<string, unknown>;
+};
+
+type TraceEvent = {
+  ts: string;
+  event: string;
+  url?: string;
+  host?: string;
+  details?: Record<string, unknown>;
+};
+
+function arg(name: string): string {
+  const index = process.argv.indexOf(name);
+  if (index < 0 || index + 1 >= process.argv.length) {
+    throw new Error(`Missing argument: ${name}`);
+  }
+  return process.argv[index + 1]!;
+}
+
+function normalizeHost(value: string): string {
+  const host = value.trim().toLowerCase();
+  return host.startsWith('www.') ? host.slice(4) : host;
+}
+
+function hostFromUrl(value: string): string {
+  try {
+    return normalizeHost(new URL(value).hostname);
+  } catch {
+    return '';
+  }
+}
+
+function isSameOrSubdomain(host: string, expected: string): boolean {
+  if (!host || !expected) {
+    return false;
+  }
+  return host === expected || host.endsWith(`.${expected}`);
+}
+
+function isSberIdHost(host: string): boolean {
+  return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
+}
+
+function authEntryUrl(startUrl: string): string {
+  const url = new URL(startUrl);
+  const host = normalizeHost(url.hostname);
+  if (!isSameOrSubdomain(host, 'litres.ru')) {
+    return startUrl;
+  }
+  url.pathname = '/auth/login/';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function cookieCount(storageState: unknown): number {
+  if (!storageState || typeof storageState !== 'object') {
+    return 0;
+  }
+  const cookies = (storageState as { cookies?: unknown }).cookies;
+  return Array.isArray(cookies) ? cookies.length : 0;
+}
+
+function storageCookies(storageState: unknown): Parameters<BrowserContext['addCookies']>[0] {
+  if (!storageState || typeof storageState !== 'object') {
+    return [];
+  }
+  const cookies = (storageState as { cookies?: unknown }).cookies;
+  return Array.isArray(cookies) ? (cookies as Parameters<BrowserContext['addCookies']>[0]) : [];
+}
+
+function cookieSummary(storageState: unknown): Record<string, unknown> {
+  if (!storageState || typeof storageState !== 'object') {
+    return { cookies_count: 0, domains: [], names: [] };
+  }
+  const cookies = (storageState as { cookies?: unknown }).cookies;
+  if (!Array.isArray(cookies)) {
+    return { cookies_count: 0, domains: [], names: [] };
+  }
+  const domains = new Set<string>();
+  const names = new Set<string>();
+  for (const cookie of cookies) {
+    if (!cookie || typeof cookie !== 'object') {
+      continue;
+    }
+    const item = cookie as { domain?: unknown; name?: unknown; path?: unknown };
+    if (typeof item.domain === 'string') {
+      domains.add(item.domain);
+    }
+    if (typeof item.name === 'string') {
+      names.add(item.name);
+    }
+  }
+  return {
+    cookies_count: cookies.length,
+    domains: [...domains].sort(),
+    names: [...names].sort(),
+  };
+}
+
+function save(path: string, payload: ScriptResult): void {
+  writeFileSync(path, JSON.stringify(payload, null, 2), { encoding: 'utf-8' });
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function appendTrace(path: string, event: TraceEvent): void {
+  writeFileSync(path, `${JSON.stringify(event)}\n`, { encoding: 'utf-8', flag: 'a' });
+}
+
+async function tracePage(
+  page: Page,
+  tracePath: string,
+  event: string,
+  details: Record<string, unknown> = {},
+): Promise<void> {
+  const url = page.url();
+  const htmlSize = await page.content().then((html) => html.length).catch(() => null);
+  const bodyText = await page
+    .locator('body')
+    .innerText({ timeout: 1000 })
+    .then((text) => text.slice(0, 1500))
+    .catch(() => null);
+  appendTrace(tracePath, {
+    ts: new Date().toISOString(),
+    event,
+    url,
+    host: hostFromUrl(url),
+    details: {
+      ...details,
+      html_size: htmlSize,
+      body_text_head: bodyText,
+    },
+  });
+}
+
+type ClickTarget = {
+  label: string;
+  locator: (page: Page) => Locator;
+};
+
+type ClickResult = {
+  label: string;
+  page: Page;
+};
+
+async function clickFirstVisible(
+  page: Page,
+  targets: ClickTarget[],
+  options: {
+    timeoutMs?: number;
+    popupContext?: BrowserContext;
+  } = {},
+): Promise<ClickResult | null> {
+  const timeoutMs = options.timeoutMs ?? 2500;
+  for (const target of targets) {
+    const locator = target.locator(page).first();
+    try {
+      await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+      const popupPromise = options.popupContext
+        ? options.popupContext.waitForEvent('page', { timeout: 5000 }).catch(() => null)
+        : Promise.resolve(null);
+      await locator.click({ timeout: timeoutMs });
+      const popup = await popupPromise;
+      if (popup) {
+        await popup.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined);
+      }
+      return {
+        label: target.label,
+        page: popup ?? page,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function clickOptionalChrome(page: Page): Promise<void> {
+  await clickFirstVisible(
+    page,
+    [
+      { label: 'accept-cookies', locator: (target) => target.getByRole('button', { name: /принять|соглас/i }) },
+      { label: 'close-dialog', locator: (target) => target.getByRole('button', { name: /закрыть|close/i }) },
+      { label: 'close-modal', locator: (target) => target.locator('[aria-label*="Закрыть"], [aria-label*="Close"]').first() },
+    ],
+    { timeoutMs: 900 },
+  ).catch(() => null);
+}
+
+function loginTargets(): ClickTarget[] {
+  return [
+    { label: 'role-button-login', locator: (page) => page.getByRole('button', { name: /^войти$/i }) },
+    { label: 'role-link-login', locator: (page) => page.getByRole('link', { name: /^войти$/i }) },
+    { label: 'text-login', locator: (page) => page.getByText(/^Войти$/i) },
+    { label: 'css-login', locator: (page) => page.locator('button:has-text("Войти"), a:has-text("Войти")') },
+  ];
+}
+
+function otherWaysTargets(): ClickTarget[] {
+  return [
+    { label: 'role-button-other-ways', locator: (page) => page.getByRole('button', { name: /другие способы/i }) },
+    { label: 'role-link-other-ways', locator: (page) => page.getByRole('link', { name: /другие способы/i }) },
+    { label: 'text-other-ways', locator: (page) => page.getByText(/другие способы/i) },
+    { label: 'css-other-ways', locator: (page) => page.locator('button:has-text("Другие способы"), a:has-text("Другие способы")') },
+  ];
+}
+
+function sberIdTargets(): ClickTarget[] {
+  return [
+    { label: 'role-button-sber-id', locator: (page) => page.getByRole('button', { name: /sber\s*id|сбер\s*id|сберid/i }) },
+    { label: 'role-link-sber-id', locator: (page) => page.getByRole('link', { name: /sber\s*id|сбер\s*id|сберid/i }) },
+    { label: 'text-sber-id', locator: (page) => page.getByText(/sber\s*id|сбер\s*id|сберid/i) },
+    {
+      label: 'litres-sb-icon',
+      locator: (page) => page.locator('[data-testid="authorization-popup"] [data-testid="icon"]:has(img[alt="sb"])'),
+    },
+    {
+      label: 'litres-sb-img',
+      locator: (page) => page.locator('[data-testid="authorization-popup"] img[alt="sb"]'),
+    },
+    {
+      label: 'css-sber-id',
+      locator: (page) =>
+        page.locator(
+          'button:has-text("Sber ID"), a:has-text("Sber ID"), button:has-text("Сбер"), a:has-text("Сбер"), [aria-label*="Sber"], [aria-label*="Сбер"], a[href*="sber"], button[data-testid*="sber"], [data-testid*="sber"], img[alt="sb"]',
+        ),
+    },
+  ];
+}
+
+async function main(): Promise<void> {
+  const endpoint = arg('--endpoint');
+  const startUrl = arg('--start-url');
+  const storageStatePath = arg('--storage-state-path');
+  const outputPath = arg('--output-path');
+  const traceDir = dirname(outputPath);
+  mkdirSync(traceDir, { recursive: true });
+  const tracePath = join(traceDir, 'auth-script-litres-trace.jsonl');
+
+  const targetHost = hostFromUrl(startUrl);
+  if (!targetHost) {
+    save(outputPath, {
+      status: 'failed',
+      reason_code: 'auth_failed_invalid_session',
+      message: `Некорректный start_url: ${startUrl}`,
+      artifacts: { start_url: startUrl },
+    });
+    return;
+  }
+
+  let storageState: unknown = null;
+  try {
+    storageState = JSON.parse(readFileSync(storageStatePath, 'utf-8'));
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'storage_state_loaded',
+      details: cookieSummary(storageState),
+    });
+  } catch (error) {
+    save(outputPath, {
+      status: 'failed',
+      reason_code: 'auth_failed_payload',
+      message: `Не удалось прочитать storageState: ${String(error)}`,
+      artifacts: { storage_state_path: storageStatePath },
+    });
+    return;
+  }
+
+  let browser;
+  let context;
+  let createdContext = false;
+  let keepAuthContext = false;
+  try {
+    browser = await chromium.connectOverCDP(endpoint);
+    const existingContexts = browser.contexts();
+    context = existingContexts[0];
+    if (!context) {
+      context = await browser.newContext({
+        viewport: { width: 1440, height: 900 },
+      });
+      createdContext = true;
+    }
+    const contextsToClose = existingContexts.length > 1 ? existingContexts.slice(1) : [];
+    for (const existingContext of contextsToClose) {
+      await existingContext.close().catch(() => undefined);
+    }
+    const cookiesLoaded = cookieCount(storageState);
+    await context.addCookies(storageCookies(storageState));
+    const existingPages = context.pages();
+    const page = existingPages[0] ?? (await context.newPage());
+    for (const extraPage of existingPages.slice(1)) {
+      await extraPage.close().catch(() => undefined);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 }).catch(() => undefined);
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'browser_context_prepared',
+      details: {
+        reused_existing_context: !createdContext,
+        existing_contexts: existingContexts.length,
+        closed_extra_contexts: contextsToClose.length,
+        existing_pages: existingPages.length,
+        closed_extra_pages: Math.max(existingPages.length - 1, 0),
+        cookies_added: cookiesLoaded,
+      },
+    });
+
+    let sberLoops = 0;
+    page.on('framenavigated', (frame) => {
+      if (frame !== page.mainFrame()) {
+        return;
+      }
+      if (isSberIdHost(hostFromUrl(frame.url()))) {
+        sberLoops += 1;
+      }
+    });
+
+    const entryUrl = authEntryUrl(startUrl);
+    await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForLoadState('networkidle', { timeout: 7000 }).catch(() => undefined);
+    await clickOptionalChrome(page);
+    await tracePage(page, tracePath, 'after_auth_entry_url', {
+      start_url: startUrl,
+      auth_entry_url: entryUrl,
+      cookies_loaded: cookiesLoaded,
+    });
+
+    let loginClickLabel = 'direct-auth-login-url';
+    let otherWaysClick = await clickFirstVisible(page, otherWaysTargets(), { timeoutMs: 4000 });
+    if (!otherWaysClick) {
+      const loginClick = await clickFirstVisible(page, loginTargets(), { timeoutMs: 4000 });
+      if (!loginClick) {
+        const currentUrl = page.url();
+        const currentHost = hostFromUrl(currentUrl);
+        save(outputPath, {
+          status: 'failed',
+          reason_code: 'auth_failed_invalid_session',
+          message: 'Не найдена кнопка входа на Litres после загрузки cookies.',
+          artifacts: {
+            script: 'litres',
+            final_url: currentUrl,
+            final_host: currentHost,
+            expected_host: targetHost,
+            auth_entry_url: entryUrl,
+            cookies_loaded: cookiesLoaded,
+            trace_path: tracePath,
+            sber_loops: sberLoops,
+            context_prepared_for_reuse: false,
+          },
+        });
+        return;
+      }
+
+      loginClickLabel = loginClick.label;
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
+      await page.waitForTimeout(700);
+      await tracePage(page, tracePath, 'after_login_click', { login_click: loginClickLabel });
+
+      otherWaysClick = await clickFirstVisible(page, otherWaysTargets(), { timeoutMs: 4000 });
+    }
+    if (!otherWaysClick) {
+      const currentUrl = page.url();
+      const currentHost = hostFromUrl(currentUrl);
+      save(outputPath, {
+        status: 'failed',
+        reason_code: 'auth_failed_invalid_session',
+        message: 'Не найдена кнопка "Другие способы" в форме входа Litres.',
+        artifacts: {
+          script: 'litres',
+          final_url: currentUrl,
+          final_host: currentHost,
+          expected_host: targetHost,
+          auth_entry_url: entryUrl,
+          cookies_loaded: cookiesLoaded,
+          login_click: loginClickLabel,
+          trace_path: tracePath,
+          sber_loops: sberLoops,
+          context_prepared_for_reuse: false,
+        },
+      });
+      return;
+    }
+
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
+    await page.waitForTimeout(700);
+    await tracePage(page, tracePath, 'after_other_ways_click', {
+      login_click: loginClickLabel,
+      other_ways_click: otherWaysClick.label,
+    });
+
+    const sberClick = await clickFirstVisible(page, sberIdTargets(), { timeoutMs: 5000, popupContext: context });
+    if (!sberClick) {
+      const currentUrl = page.url();
+      const currentHost = hostFromUrl(currentUrl);
+      save(outputPath, {
+        status: 'failed',
+        reason_code: 'auth_failed_invalid_session',
+        message: 'Не найдена кнопка Sber ID после выбора других способов входа.',
+        artifacts: {
+          script: 'litres',
+          final_url: currentUrl,
+          final_host: currentHost,
+          expected_host: targetHost,
+          auth_entry_url: entryUrl,
+          cookies_loaded: cookiesLoaded,
+          login_click: loginClickLabel,
+          other_ways_click: otherWaysClick.label,
+          trace_path: tracePath,
+          sber_loops: sberLoops,
+          context_prepared_for_reuse: false,
+        },
+      });
+      return;
+    }
+
+    const authPage = sberClick.page;
+    await tracePage(authPage, tracePath, 'after_sber_id_click', {
+      login_click: loginClickLabel,
+      other_ways_click: otherWaysClick.label,
+      sber_id_click: sberClick.label,
+    });
+    if (authPage !== page) {
+      authPage.on('framenavigated', (frame) => {
+        if (frame !== authPage.mainFrame()) {
+          return;
+        }
+        if (isSberIdHost(hostFromUrl(frame.url()))) {
+          sberLoops += 1;
+        }
+      });
+    }
+
+    const deadline = Date.now() + 45000;
+    let finalUrl = authPage.url();
+    let finalHost = hostFromUrl(finalUrl);
+    while (Date.now() < deadline) {
+      await authPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => undefined);
+      finalUrl = authPage.url();
+      finalHost = hostFromUrl(finalUrl);
+
+      if (isSameOrSubdomain(finalHost, targetHost) && (sberLoops > 0 || finalUrl !== startUrl)) {
+        save(outputPath, {
+          status: 'completed',
+          reason_code: 'auth_ok',
+          message: 'SberId-сессия восстановлена скриптом litres через форму входа.',
+          artifacts: {
+            script: 'litres',
+            final_url: finalUrl,
+            final_host: finalHost,
+            auth_entry_url: entryUrl,
+            cookies_loaded: cookiesLoaded,
+            login_click: loginClickLabel,
+            other_ways_click: otherWaysClick.label,
+            sber_id_click: sberClick.label,
+            trace_path: tracePath,
+            sber_loops: sberLoops,
+            context_prepared_for_reuse: true,
+          },
+        });
+        keepAuthContext = true;
+        return;
+      }
+
+      if (sberLoops > 2) {
+        save(outputPath, {
+          status: 'failed',
+          reason_code: 'auth_failed_redirect_loop',
+          message: 'Обнаружен redirect loop на id.sber.ru.',
+          artifacts: {
+            script: 'litres',
+            final_url: finalUrl,
+            final_host: finalHost,
+            auth_entry_url: entryUrl,
+            cookies_loaded: cookiesLoaded,
+            login_click: loginClickLabel,
+            other_ways_click: otherWaysClick.label,
+            sber_id_click: sberClick.label,
+            trace_path: tracePath,
+            sber_loops: sberLoops,
+            context_prepared_for_reuse: false,
+          },
+        });
+        return;
+      }
+
+      await authPage.waitForTimeout(800);
+    }
+
+    save(outputPath, {
+      status: 'failed',
+      reason_code: 'auth_failed_invalid_session',
+      message: 'Sber ID не вернул браузер на Litres в авторизованном состоянии.',
+      artifacts: {
+        script: 'litres',
+        final_url: finalUrl,
+        final_host: finalHost,
+        expected_host: targetHost,
+        auth_entry_url: entryUrl,
+        cookies_loaded: cookiesLoaded,
+        login_click: loginClickLabel,
+        other_ways_click: otherWaysClick.label,
+        sber_id_click: sberClick.label,
+        trace_path: tracePath,
+        sber_loops: sberLoops,
+        context_prepared_for_reuse: false,
+      },
+    });
+  } catch (error) {
+    save(outputPath, {
+      status: 'failed',
+      reason_code: 'auth_failed_invalid_session',
+      message: `Сбой выполнения SberId-скрипта litres: ${String(error)}`,
+      artifacts: {
+        script: 'litres',
+        endpoint,
+        context_prepared_for_reuse: false,
+      },
+    });
+  } finally {
+    if (context && createdContext && !keepAuthContext) {
+      await context.close().catch(() => undefined);
+    }
+    if (browser) {
+      await browser.close().catch(() => undefined);
+    }
+  }
+}
+
+main().catch((error) => {
+  const outputPathIndex = process.argv.indexOf('--output-path');
+  const outputPath = outputPathIndex >= 0 ? process.argv[outputPathIndex + 1] : '';
+  const payload: ScriptResult = {
+    status: 'failed',
+    reason_code: 'auth_failed_invalid_session',
+    message: `Непредвиденный сбой скрипта litres: ${String(error)}`,
+    artifacts: {
+      script: 'litres',
+    },
+  };
+  if (outputPath) {
+    save(outputPath, payload);
+    return;
+  }
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+});

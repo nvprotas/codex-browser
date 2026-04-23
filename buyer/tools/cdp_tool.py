@@ -146,17 +146,83 @@ def _append_action_log(event_type: str, payload: dict[str, Any]) -> None:
         return
 
 
+def _page_priority(page: Any) -> int:
+    url = (getattr(page, 'url', '') or '').strip().lower()
+    if not url or url == 'about:blank':
+        return 0
+    if 'litres.ru' in url:
+        return 30
+    if url.startswith(('http://', 'https://')):
+        return 20
+    return 10
+
+
+def _describe_contexts(browser) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for context_index, context in enumerate(browser.contexts):
+        summary.append(
+            {
+                'context_index': context_index,
+                'pages': [
+                    {
+                        'page_index': page_index,
+                        'url': page.url,
+                    }
+                    for page_index, page in enumerate(context.pages)
+                ],
+            }
+        )
+    return summary
+
+
 async def ensure_page(browser):
+    best: tuple[int, int, int, Any, Any] | None = None
+    for context_index, context in enumerate(browser.contexts):
+        for page_index, page in enumerate(context.pages):
+            priority = _page_priority(page)
+            candidate = (priority, context_index, page_index, context, page)
+            if best is None or priority > best[0]:
+                best = candidate
+
+    if best is not None and best[0] > 0:
+        priority, context_index, page_index, _context, page = best
+        _append_action_log(
+            'browser_page_selected',
+            {
+                'strategy': 'existing_non_blank_page',
+                'priority': priority,
+                'context_index': context_index,
+                'page_index': page_index,
+                'url': page.url,
+                'contexts': _describe_contexts(browser),
+            },
+        )
+        return page
+
     if browser.contexts:
-        context = browser.contexts[0]
+        context = browser.contexts[-1]
+        context_index = len(browser.contexts) - 1
     else:
         context = await browser.new_context(viewport={'width': 1440, 'height': 900})
+        context_index = 0
 
     if context.pages:
-        page = context.pages[0]
+        page = context.pages[-1]
+        page_index = len(context.pages) - 1
     else:
         page = await context.new_page()
+        page_index = len(context.pages) - 1
 
+    _append_action_log(
+        'browser_page_selected',
+        {
+            'strategy': 'fallback_last_context',
+            'context_index': context_index,
+            'page_index': page_index,
+            'url': page.url,
+            'contexts': _describe_contexts(browser),
+        },
+    )
     return page
 
 
