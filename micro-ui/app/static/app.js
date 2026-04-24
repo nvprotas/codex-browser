@@ -4,9 +4,18 @@ const pollMs = Number(layout?.dataset.pollMs || 3000);
 const statusNode = document.getElementById('global-status');
 const sessionsNode = document.getElementById('sessions-list');
 const sessionsEmptyNode = document.getElementById('sessions-empty');
+const sessionsCountNode = document.getElementById('sessions-count');
 const eventsNode = document.getElementById('events-list');
 const eventsEmptyNode = document.getElementById('events-empty');
+const eventsCountNode = document.getElementById('events-count');
 const noVncFrame = document.getElementById('novnc-frame');
+const noVncSessionLabel = document.getElementById('novnc-session-label');
+const noVncPlaceholderNode = document.getElementById('novnc-placeholder');
+
+const metricSessionsNode = document.getElementById('metric-sessions');
+const metricWaitingNode = document.getElementById('metric-waiting');
+const metricOrdersNode = document.getElementById('metric-orders');
+const metricErrorsNode = document.getElementById('metric-errors');
 
 const taskForm = document.getElementById('task-form');
 const taskTextInput = document.getElementById('task-text');
@@ -24,10 +33,14 @@ const replyResultNode = document.getElementById('reply-result');
 let selectedSessionId = null;
 let selectedSession = null;
 let pendingSessionSelectionId = null;
+const noVncBlank = `<!doctype html>
+<html lang="ru">
+  <body style="margin:0;min-height:100vh;background:#0d0f12;"></body>
+</html>`;
 
 function normalizeUrl(url) {
   if (!url) {
-    return '';
+    return 'about:blank';
   }
   try {
     return new URL(url, window.location.origin).toString();
@@ -38,14 +51,25 @@ function normalizeUrl(url) {
 
 function setNoVncUrl(url) {
   if (!url) {
+    noVncFrame.removeAttribute('src');
+    noVncFrame.srcdoc = noVncBlank;
+    noVncPlaceholderNode.hidden = false;
     return;
   }
+
   const next = normalizeUrl(url);
   const current = normalizeUrl(noVncFrame.getAttribute('src') || noVncFrame.src);
   if (current === next) {
+    noVncPlaceholderNode.hidden = true;
     return;
   }
-  noVncFrame.src = url;
+  noVncFrame.removeAttribute('srcdoc');
+  noVncPlaceholderNode.hidden = true;
+  noVncFrame.src = next;
+}
+
+function setNoVncLabel(session) {
+  noVncSessionLabel.textContent = session?.session_id || 'session.novnc_url';
 }
 
 async function fetchJson(url, options = {}) {
@@ -60,7 +84,7 @@ async function fetchJson(url, options = {}) {
 
   if (!response.ok) {
     const detail = body?.detail || body?.raw || `HTTP ${response.status}`;
-    throw new Error(detail);
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
   }
 
   return body;
@@ -71,15 +95,97 @@ function fmtDate(value) {
     return '-';
   }
   const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
   return date.toLocaleString('ru-RU');
 }
 
-function shortenText(value, maxLength = 220) {
+function shortenText(value, maxLength = 180) {
   const text = String(value || '');
   if (text.length <= maxLength) {
     return text;
   }
   return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function node(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) {
+    element.className = className;
+  }
+  if (text !== undefined) {
+    element.textContent = text;
+  }
+  return element;
+}
+
+function meta(label, value) {
+  const item = node('div', 'session-meta');
+  const labelNode = document.createTextNode(`${label}: `);
+  const valueNode = node('span', 'code', value || '-');
+  item.append(labelNode, valueNode);
+  return item;
+}
+
+function statusClass(status) {
+  const normalized = String(status || 'running').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+  const known = new Set(['running', 'waiting_user', 'failed', 'error', 'completed', 'success']);
+  return known.has(normalized) ? normalized : 'unknown';
+}
+
+function isWaitingSession(session) {
+  return session.status === 'waiting_user' || Boolean(session.waiting_reply_id);
+}
+
+function isErrorSession(session) {
+  const status = String(session.status || '').toLowerCase();
+  const eventType = String(session.last_event_type || '').toLowerCase();
+  return status === 'failed' || status === 'error' || eventType.includes('failed') || eventType.includes('error');
+}
+
+function updateMetrics(sessions) {
+  metricSessionsNode.textContent = String(sessions.length);
+  metricWaitingNode.textContent = String(sessions.filter(isWaitingSession).length);
+  metricOrdersNode.textContent = String(sessions.filter((item) => item.order_id).length);
+  metricErrorsNode.textContent = String(sessions.filter(isErrorSession).length);
+  sessionsCountNode.textContent = `${sessions.length} active`;
+}
+
+function createSessionItem(session, sessions) {
+  const item = node('button', `session-item ${session.session_id === selectedSessionId ? 'active' : ''}`);
+  item.type = 'button';
+
+  const top = node('div', 'session-top');
+  top.append(
+    node('span', 'code', session.session_id),
+    node('span', `badge ${statusClass(session.status)}`, session.status || 'running'),
+  );
+
+  const eventMeta = node('div', 'session-meta');
+  eventMeta.append('Последнее событие: ', node('strong', null, session.last_event_type || '-'));
+
+  const message = node('div', 'session-message', shortenText(session.last_message || 'Без сообщения'));
+
+  const metaGrid = node('div', 'session-meta-grid');
+  metaGrid.append(
+    meta('reply_id', session.waiting_reply_id),
+    meta('order_id', session.order_id),
+    meta('Обновлено', fmtDate(session.updated_at)),
+  );
+
+  item.append(top, eventMeta, message, metaGrid);
+  item.addEventListener('click', () => {
+    selectedSessionId = session.session_id;
+    selectedSession = session;
+    hydrateReplyForm();
+    setNoVncUrl(session.novnc_url);
+    setNoVncLabel(session);
+    renderSessions(sessions);
+    refreshEvents().catch(showError);
+  });
+
+  return item;
 }
 
 function renderSessions(sessions) {
@@ -100,63 +206,53 @@ function renderSessions(sessions) {
     }
   }
 
-  sessionsNode.innerHTML = '';
+  sessionsNode.replaceChildren();
   sessionsEmptyNode.style.display = sessions.length ? 'none' : 'block';
+  updateMetrics(sessions);
 
   for (const session of sessions) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = `session-item ${session.session_id === selectedSessionId ? 'active' : ''}`;
-    item.innerHTML = `
-      <div class="session-top">
-        <span class="code">${session.session_id}</span>
-        <span class="badge ${session.status || 'running'}">${session.status || 'running'}</span>
-      </div>
-      <div>Последнее событие: <strong>${session.last_event_type}</strong></div>
-      <div class="session-message">${shortenText(session.last_message || 'Без сообщения')}</div>
-      <div>reply_id: <span class="code">${session.waiting_reply_id || '-'}</span></div>
-      <div>Обновлено: ${fmtDate(session.updated_at)}</div>
-    `;
-    item.addEventListener('click', () => {
-      selectedSessionId = session.session_id;
-      selectedSession = session;
-      hydrateReplyForm();
-      setNoVncUrl(session.novnc_url);
-      renderSessions(sessions);
-      refreshEvents().catch(showError);
-    });
-    sessionsNode.appendChild(item);
+    sessionsNode.appendChild(createSessionItem(session, sessions));
   }
 
   if (!selectedSessionId && sessions.length) {
     selectedSessionId = sessions[0].session_id;
     selectedSession = sessions[0];
-    hydrateReplyForm();
-    setNoVncUrl(selectedSession.novnc_url);
   }
+
+  hydrateReplyForm();
+  setNoVncUrl(selectedSession?.novnc_url);
+  setNoVncLabel(selectedSession);
 }
 
 function renderEvents(events) {
-  eventsNode.innerHTML = '';
+  eventsNode.replaceChildren();
+  eventsCountNode.textContent = `${events.length} events`;
+  eventsEmptyNode.textContent = selectedSessionId ? 'Пока нет событий в сессии.' : 'Выберите сессию.';
   eventsEmptyNode.style.display = events.length ? 'none' : 'block';
 
   for (const event of events) {
-    const item = document.createElement('div');
-    item.className = 'event-item';
-    item.innerHTML = `
-      <div class="event-top">
-        <strong>${event.event_type}</strong>
-        <span>${fmtDate(event.occurred_at)}</span>
-      </div>
-      <div class="code">event_id: ${event.event_id}</div>
-      <pre>${JSON.stringify(event.payload, null, 2)}</pre>
-    `;
+    const item = node('div', 'event-item');
+
+    const top = node('div', 'event-top');
+    top.append(
+      node('strong', null, event.event_type || '-'),
+      node('span', 'event-meta code', fmtDate(event.occurred_at)),
+    );
+
+    const eventId = node('div', 'event-meta');
+    eventId.append('event_id: ', node('span', 'code', event.event_id || '-'));
+
+    const payload = node('pre');
+    payload.textContent = JSON.stringify(event.payload || {}, null, 2);
+
+    item.append(top, eventId, payload);
     eventsNode.appendChild(item);
   }
 
   setNoVncUrl(selectedSession?.novnc_url);
+  setNoVncLabel(selectedSession);
 
-  const last = events.at(-1);
+  const last = events.length ? events[events.length - 1] : null;
   if (last && last.event_type === 'ask_user') {
     replyIdInput.value = last.payload?.reply_id || '';
   }
@@ -184,7 +280,9 @@ async function refreshSessions() {
 
 async function refreshEvents() {
   if (!selectedSessionId) {
-    eventsNode.innerHTML = '';
+    eventsNode.replaceChildren();
+    eventsCountNode.textContent = '0 events';
+    eventsEmptyNode.textContent = 'Выберите сессию.';
     eventsEmptyNode.style.display = 'block';
     return;
   }
@@ -200,7 +298,7 @@ async function refreshAll() {
 
 replyForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  replyResultNode.textContent = 'Отправка...';
+  replyResultNode.textContent = 'Отправка…';
 
   try {
     const payload = {
@@ -228,19 +326,21 @@ replyForm.addEventListener('submit', async (event) => {
 
 taskForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  taskResultNode.textContent = 'Запуск...';
+  taskResultNode.textContent = 'Запуск…';
 
   try {
     const rawMetadata = taskMetadataInput.value.trim();
     const rawAuth = taskAuthInput.value.trim();
     let metadata = {};
     let auth = null;
+
     if (rawMetadata) {
       metadata = JSON.parse(rawMetadata);
       if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
         throw new Error('metadata должен быть JSON-объектом, например {"city":"Москва"}');
       }
     }
+
     if (rawAuth) {
       auth = JSON.parse(rawAuth);
       if (!auth || typeof auth !== 'object' || Array.isArray(auth)) {

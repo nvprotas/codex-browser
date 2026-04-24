@@ -3,99 +3,150 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>buyer microUI</title>
+    <title>Ratatouille buyer · Micro UI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1724'/%3E%3Cpath d='M14 18h36v8H14zM14 30h22v8H14zM14 42h30v8H14z' fill='%23ff6b2d'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
-    <div class="backdrop"></div>
+    <div class="backdrop" aria-hidden="true"></div>
     <main class="layout" data-poll-ms="{{ poll_interval_ms }}">
-      <header class="panel hero">
-        <div>
+      <header class="topbar">
+        <div class="brand">
           <p class="kicker">Ratatouille / buyer</p>
-          <h1>Micro UI для callback и handoff</h1>
-          <p class="lead">
-            Панель получает события от buyer, позволяет отвечать пользователю по <code>reply_id</code>
-            и показывает live-браузер через noVNC.
-          </p>
+          <h1>Buyer Console</h1>
         </div>
-        <div class="status" id="global-status">Ожидание событий...</div>
+        <div class="status" id="global-status">Ожидание событий…</div>
       </header>
 
-      <section class="panel task">
-        <h2>Новая задача</h2>
-        <form id="task-form" class="task-form-grid">
-          <label class="full">
-            Задача
-            <textarea
-              id="task-text"
-              rows="3"
-              placeholder="Например: открой сайт и подготовь путь до шага оплаты без реального платежа"
-              required
-            ></textarea>
-          </label>
-
-          <label>
-            Start URL
-            <input type="url" id="task-start-url" value="https://example.com" required />
-          </label>
-
-          <label>
-            metadata (JSON)
-            <textarea id="task-metadata" rows="3" placeholder='{"city":"Москва","budget":2500}'>{}</textarea>
-          </label>
-
-          <label class="full">
-            auth (JSON, optional)
-            <textarea
-              id="task-auth"
-              rows="6"
-              placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
-            ></textarea>
-          </label>
-
-          <button type="submit" class="full">Запустить сессию</button>
-        </form>
-        <pre id="task-result" class="result"></pre>
+      <section class="metrics" aria-label="Сводка">
+        <article class="metric">
+          <span>Сессии</span>
+          <strong id="metric-sessions">0</strong>
+        </article>
+        <article class="metric">
+          <span>Ждут ответа</span>
+          <strong id="metric-waiting">0</strong>
+        </article>
+        <article class="metric">
+          <span>order_id</span>
+          <strong id="metric-orders">0</strong>
+        </article>
+        <article class="metric">
+          <span>Ошибки</span>
+          <strong id="metric-errors">0</strong>
+        </article>
       </section>
 
-      <section class="grid">
+      <section class="workspace">
+        <div class="stack">
+          <section class="panel task">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">POST /api/tasks</p>
+                <h2>Новая задача</h2>
+              </div>
+            </div>
+
+            <form id="task-form" class="task-form-grid">
+              <label class="full">
+                Задача
+                <textarea
+                  id="task-text"
+                  rows="3"
+                  placeholder="Открой сайт и подготовь путь до шага оплаты без реального платежа"
+                  required
+                ></textarea>
+              </label>
+
+              <label>
+                Start URL
+                <input type="url" id="task-start-url" value="https://example.com" required />
+              </label>
+
+              <label>
+                metadata (JSON)
+                <textarea id="task-metadata" rows="3" placeholder='{"city":"Москва","budget":2500}'>{}</textarea>
+              </label>
+
+              <details class="full auth-details">
+                <summary>auth (JSON, optional)</summary>
+                <label>
+                  <span class="sr-only">auth JSON</span>
+                  <textarea
+                    id="task-auth"
+                    rows="5"
+                    placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
+                  ></textarea>
+                </label>
+              </details>
+
+              <button type="submit" class="primary-action full">Запустить сессию</button>
+            </form>
+            <pre id="task-result" class="result" aria-live="polite"></pre>
+          </section>
+
+          <section class="panel reply">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">POST /api/reply</p>
+                <h2>Ответ пользователю</h2>
+              </div>
+            </div>
+
+            <form id="reply-form">
+              <label>
+                session_id
+                <input type="text" id="reply-session-id" readonly />
+              </label>
+              <label>
+                reply_id
+                <input type="text" id="reply-id" placeholder="Появится после ask_user" />
+              </label>
+              <label>
+                Сообщение
+                <textarea id="reply-message" rows="4" placeholder="Введите ответ пользователя"></textarea>
+              </label>
+              <button type="submit" class="primary-action">Отправить в buyer</button>
+            </form>
+            <pre id="reply-result" class="result" aria-live="polite"></pre>
+          </section>
+        </div>
+
+        <section class="panel novnc">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow" id="novnc-session-label">session.novnc_url</p>
+              <h2>Наблюдение noVNC</h2>
+            </div>
+          </div>
+          <div class="viewport-shell">
+            <iframe id="novnc-frame" title="noVNC"></iframe>
+            <div id="novnc-placeholder" class="novnc-placeholder">Iframe ожидает session.novnc_url</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="telemetry-grid">
         <article class="panel sessions">
-          <h2>Сессии</h2>
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow" id="sessions-count">0 active</p>
+              <h2>Сессии</h2>
+            </div>
+          </div>
           <div id="sessions-empty" class="empty">Пока нет активных сессий.</div>
           <div id="sessions-list" class="sessions-list"></div>
         </article>
 
         <article class="panel events">
-          <h2>Callback-лента</h2>
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow" id="events-count">0 events</p>
+              <h2>Callback-лента</h2>
+            </div>
+          </div>
           <div id="events-empty" class="empty">Выберите сессию.</div>
           <div id="events-list" class="events-list"></div>
-        </article>
-      </section>
-
-      <section class="grid bottom">
-        <article class="panel reply">
-          <h2>Ответ пользователю</h2>
-          <form id="reply-form">
-            <label>
-              session_id
-              <input type="text" id="reply-session-id" readonly />
-            </label>
-            <label>
-              reply_id
-              <input type="text" id="reply-id" placeholder="Появится после ask_user" />
-            </label>
-            <label>
-              Сообщение
-              <textarea id="reply-message" rows="4" placeholder="Введите ответ пользователя"></textarea>
-            </label>
-            <button type="submit">Отправить в buyer</button>
-          </form>
-          <pre id="reply-result" class="result"></pre>
-        </article>
-
-        <article class="panel novnc">
-          <h2>Наблюдение noVNC</h2>
-          <iframe id="novnc-frame" title="noVNC" src="about:blank"></iframe>
         </article>
       </section>
     </main>
