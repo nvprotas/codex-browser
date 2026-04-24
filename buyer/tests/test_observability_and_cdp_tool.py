@@ -134,3 +134,39 @@ class LitresPurchaseScriptSmokeTests(unittest.TestCase):
 
         payload = json.loads(completed.stdout)
         self.assertEqual(payload, {'query': 'одиссея гомера', 'order': '1585051118', 'sber': True, 'cart': True})
+
+
+class LitresAuthScriptSmokeTests(unittest.TestCase):
+    def test_litres_auth_helpers_when_tsx_is_installed(self) -> None:
+        buyer_root = Path(__file__).resolve().parents[1]
+        tsx = buyer_root / 'scripts' / 'node_modules' / '.bin' / 'tsx'
+        if not tsx.is_file():
+            self.skipTest('buyer/scripts/node_modules не установлен')
+
+        scripts_dir = buyer_root / 'scripts'
+        command = [
+            str(tsx),
+            '-e',
+            (
+                "import { authEntryUrl, hostFromUrl, isSameOrSubdomain, sberIdTargetLabels } from './sberid/litres.ts';"
+                "const labels = sberIdTargetLabels();"
+                "console.log(JSON.stringify({"
+                "entry: authEntryUrl('https://www.litres.ru/'),"
+                "host: hostFromUrl('https://www.litres.ru/auth/login/'),"
+                "same: isSameOrSubdomain('login.litres.ru', 'litres.ru'),"
+                "firstLabels: labels.slice(0, 2)"
+                "}));"
+            ),
+        ]
+        completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
+
+        payload = json.loads(completed.stdout)
+        self.assertEqual(
+            payload,
+            {
+                'entry': 'https://www.litres.ru/auth/login/',
+                'host': 'litres.ru',
+                'same': True,
+                'firstLabels': ['litres-sb-icon', 'litres-sb-img'],
+            },
+        )
