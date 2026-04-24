@@ -1,7 +1,7 @@
 import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { URL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, URL } from 'node:url';
 
 type ScriptResult = {
   status: 'completed' | 'failed';
@@ -31,7 +31,7 @@ function normalizeHost(value: string): string {
   return host.startsWith('www.') ? host.slice(4) : host;
 }
 
-function hostFromUrl(value: string): string {
+export function hostFromUrl(value: string): string {
   try {
     return normalizeHost(new URL(value).hostname);
   } catch {
@@ -39,7 +39,7 @@ function hostFromUrl(value: string): string {
   }
 }
 
-function isSameOrSubdomain(host: string, expected: string): boolean {
+export function isSameOrSubdomain(host: string, expected: string): boolean {
   if (!host || !expected) {
     return false;
   }
@@ -50,7 +50,7 @@ function isSberIdHost(host: string): boolean {
   return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
 }
 
-function authEntryUrl(startUrl: string): string {
+export function authEntryUrl(startUrl: string): string {
   const url = new URL(startUrl);
   const host = normalizeHost(url.hostname);
   if (!isSameOrSubdomain(host, 'litres.ru')) {
@@ -144,6 +144,7 @@ async function tracePage(
 
 type ClickTarget = {
   label: string;
+  timeoutMs?: number;
   locator: (page: Page) => Locator;
 };
 
@@ -157,31 +158,105 @@ async function clickFirstVisible(
   targets: ClickTarget[],
   options: {
     timeoutMs?: number;
+    popupTimeoutMs?: number;
     popupContext?: BrowserContext;
+    tracePath?: string;
   } = {},
 ): Promise<ClickResult | null> {
-  const timeoutMs = options.timeoutMs ?? 2500;
   for (const target of targets) {
+    const timeoutMs = target.timeoutMs ?? options.timeoutMs ?? 2500;
+    const startedAt = Date.now();
     const locator = target.locator(page).first();
+    if (options.tracePath) {
+      appendTrace(options.tracePath, {
+        ts: new Date().toISOString(),
+        event: 'locator_attempt_started',
+        url: page.url(),
+        host: hostFromUrl(page.url()),
+        details: {
+          label: target.label,
+          timeout_ms: timeoutMs,
+        },
+      });
+    }
     try {
       await locator.waitFor({ state: 'visible', timeout: timeoutMs });
       const popupPromise = options.popupContext
-        ? options.popupContext.waitForEvent('page', { timeout: 5000 }).catch(() => null)
+        ? options.popupContext.waitForEvent('page', { timeout: options.popupTimeoutMs ?? 5000 }).catch(() => null)
         : Promise.resolve(null);
       await locator.click({ timeout: timeoutMs });
       const popup = await popupPromise;
       if (popup) {
         await popup.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined);
       }
+      if (options.tracePath) {
+        appendTrace(options.tracePath, {
+          ts: new Date().toISOString(),
+          event: 'locator_attempt_finished',
+          url: page.url(),
+          host: hostFromUrl(page.url()),
+          details: {
+            label: target.label,
+            success: true,
+            elapsed_ms: Date.now() - startedAt,
+            popup_opened: Boolean(popup),
+          },
+        });
+      }
       return {
         label: target.label,
         page: popup ?? page,
       };
-    } catch {
+    } catch (error) {
+      if (options.tracePath) {
+        appendTrace(options.tracePath, {
+          ts: new Date().toISOString(),
+          event: 'locator_attempt_finished',
+          url: page.url(),
+          host: hostFromUrl(page.url()),
+          details: {
+            label: target.label,
+            success: false,
+            elapsed_ms: Date.now() - startedAt,
+            error: String(error).replace(/\s+/g, ' ').slice(0, 500),
+          },
+        });
+      }
       continue;
     }
   }
   return null;
+}
+
+async function waitForFirstVisible(page: Page, targets: ClickTarget[], timeoutMs: number): Promise<string | null> {
+  if (targets.length === 0) {
+    return null;
+  }
+
+  return new Promise((resolveMatch) => {
+    let resolved = false;
+    let pending = targets.length;
+
+    for (const target of targets) {
+      target
+        .locator(page)
+        .first()
+        .waitFor({ state: 'visible', timeout: target.timeoutMs ?? timeoutMs })
+        .then(() => {
+          if (!resolved) {
+            resolved = true;
+            resolveMatch(target.label);
+          }
+        })
+        .catch(() => {
+          pending -= 1;
+          if (!resolved && pending === 0) {
+            resolved = true;
+            resolveMatch(null);
+          }
+        });
+    }
+  });
 }
 
 async function clickOptionalChrome(page: Page): Promise<void> {
@@ -216,24 +291,55 @@ function otherWaysTargets(): ClickTarget[] {
 
 function sberIdTargets(): ClickTarget[] {
   return [
-    { label: 'role-button-sber-id', locator: (page) => page.getByRole('button', { name: /sber\s*id|сбер\s*id|сберid/i }) },
-    { label: 'role-link-sber-id', locator: (page) => page.getByRole('link', { name: /sber\s*id|сбер\s*id|сберid/i }) },
-    { label: 'text-sber-id', locator: (page) => page.getByText(/sber\s*id|сбер\s*id|сберid/i) },
     {
       label: 'litres-sb-icon',
+      timeoutMs: 1000,
       locator: (page) => page.locator('[data-testid="authorization-popup"] [data-testid="icon"]:has(img[alt="sb"])'),
     },
     {
       label: 'litres-sb-img',
+      timeoutMs: 1000,
       locator: (page) => page.locator('[data-testid="authorization-popup"] img[alt="sb"]'),
     },
     {
+      label: 'role-button-sber-id',
+      timeoutMs: 800,
+      locator: (page) => page.getByRole('button', { name: /sber\s*id|сбер\s*id|сберid/i }),
+    },
+    {
+      label: 'role-link-sber-id',
+      timeoutMs: 800,
+      locator: (page) => page.getByRole('link', { name: /sber\s*id|сбер\s*id|сберid/i }),
+    },
+    {
+      label: 'text-sber-id',
+      timeoutMs: 800,
+      locator: (page) => page.getByText(/sber\s*id|сбер\s*id|сберid/i),
+    },
+    {
       label: 'css-sber-id',
+      timeoutMs: 1000,
       locator: (page) =>
         page.locator(
           'button:has-text("Sber ID"), a:has-text("Sber ID"), button:has-text("Сбер"), a:has-text("Сбер"), [aria-label*="Sber"], [aria-label*="Сбер"], a[href*="sber"], button[data-testid*="sber"], [data-testid*="sber"], img[alt="sb"]',
         ),
     },
+  ];
+}
+
+export function sberIdTargetLabels(): string[] {
+  return sberIdTargets().map((target) => target.label);
+}
+
+function authEntryReadyTargets(): ClickTarget[] {
+  return [
+    ...otherWaysTargets(),
+    {
+      label: 'login-email-input',
+      locator: (page) => page.locator('input[name="email"], input[name="login"], input[type="email"]').first(),
+    },
+    { label: 'login-text-input', locator: (page) => page.locator('input[type="text"]').first() },
+    ...loginTargets(),
   ];
 }
 
@@ -325,8 +431,31 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'goto_auth_entry',
+      url: page.url(),
+      host: hostFromUrl(page.url()),
+      details: {
+        start_url: startUrl,
+        auth_entry_url: entryUrl,
+      },
+    });
     await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForLoadState('networkidle', { timeout: 7000 }).catch(() => undefined);
+    const entryReadyStartedAt = Date.now();
+    const entryReadyTarget = await waitForFirstVisible(page, authEntryReadyTargets(), 2500);
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'auth_entry_ready',
+      url: page.url(),
+      host: hostFromUrl(page.url()),
+      details: {
+        matched_target: entryReadyTarget,
+        ready: Boolean(entryReadyTarget),
+        timeout_ms: 2500,
+        elapsed_ms: Date.now() - entryReadyStartedAt,
+      },
+    });
     await clickOptionalChrome(page);
     await tracePage(page, tracePath, 'after_auth_entry_url', {
       start_url: startUrl,
@@ -397,7 +526,35 @@ async function main(): Promise<void> {
       other_ways_click: otherWaysClick.label,
     });
 
-    const sberClick = await clickFirstVisible(page, sberIdTargets(), { timeoutMs: 5000, popupContext: context });
+    const sberClickStartedAt = Date.now();
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'sber_click_started',
+      url: page.url(),
+      host: hostFromUrl(page.url()),
+      details: {
+        target_labels: sberIdTargetLabels(),
+        default_timeout_ms: 900,
+        popup_timeout_ms: 1200,
+      },
+    });
+    const sberClick = await clickFirstVisible(page, sberIdTargets(), {
+      timeoutMs: 900,
+      popupContext: context,
+      popupTimeoutMs: 1200,
+      tracePath,
+    });
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'sber_click_finished',
+      url: page.url(),
+      host: hostFromUrl(page.url()),
+      details: {
+        success: Boolean(sberClick),
+        selected_label: sberClick?.label ?? null,
+        elapsed_ms: Date.now() - sberClickStartedAt,
+      },
+    });
     if (!sberClick) {
       const currentUrl = page.url();
       const currentHost = hostFromUrl(currentUrl);
@@ -535,20 +692,27 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  const outputPathIndex = process.argv.indexOf('--output-path');
-  const outputPath = outputPathIndex >= 0 ? process.argv[outputPathIndex + 1] : '';
-  const payload: ScriptResult = {
-    status: 'failed',
-    reason_code: 'auth_failed_invalid_session',
-    message: `Непредвиденный сбой скрипта litres: ${String(error)}`,
-    artifacts: {
-      script: 'litres',
-    },
-  };
-  if (outputPath) {
-    save(outputPath, payload);
-    return;
-  }
-  process.stdout.write(`${JSON.stringify(payload)}\n`);
-});
+function isDirectRun(): boolean {
+  const currentPath = fileURLToPath(import.meta.url);
+  return process.argv[1] ? resolve(process.argv[1]) === currentPath : false;
+}
+
+if (isDirectRun()) {
+  main().catch((error) => {
+    const outputPathIndex = process.argv.indexOf('--output-path');
+    const outputPath = outputPathIndex >= 0 ? process.argv[outputPathIndex + 1] : '';
+    const payload: ScriptResult = {
+      status: 'failed',
+      reason_code: 'auth_failed_invalid_session',
+      message: `Непредвиденный сбой скрипта litres: ${String(error)}`,
+      artifacts: {
+        script: 'litres',
+      },
+    };
+    if (outputPath) {
+      save(outputPath, payload);
+      return;
+    }
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+  });
+}
