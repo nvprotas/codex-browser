@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 
 from .auth_scripts import SberIdScriptRunner, parse_allowlist
 from .callback import CallbackClient
+from .knowledge_analyzer import PostSessionKnowledgeAnalyzer
 from .models import (
     SessionDetail,
     SessionReplyRequest,
@@ -22,6 +23,7 @@ settings = get_settings()
 store = SessionStore(max_active_sessions=settings.max_active_sessions)
 callback_client = CallbackClient(settings)
 runner = AgentRunner(settings)
+knowledge_analyzer = PostSessionKnowledgeAnalyzer(settings)
 auth_script_runner = SberIdScriptRunner(
     scripts_dir=settings.auth_scripts_dir,
     cdp_endpoint=settings.browser_cdp_endpoint,
@@ -47,6 +49,7 @@ service = BuyerService(
     auth_script_runner=auth_script_runner,
     purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
     purchase_script_runner=purchase_script_runner,
+    knowledge_analyzer=knowledge_analyzer,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')
@@ -55,6 +58,11 @@ app = FastAPI(title='buyer-mvp', version='0.1.0')
 @app.get('/healthz')
 async def healthz() -> dict[str, str]:
     return {'status': 'ok'}
+
+
+@app.on_event('shutdown')
+async def shutdown() -> None:
+    await service.shutdown_post_session_analysis()
 
 
 @app.post('/v1/tasks', response_model=TaskCreateResponse, status_code=201)
