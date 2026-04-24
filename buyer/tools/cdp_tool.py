@@ -15,6 +15,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 HTML_STDOUT_LIMIT = 20_000
+TEXT_STDOUT_LIMIT = 4_000
 SNAPSHOT_TEXT_LIMIT = 160
 
 
@@ -45,6 +46,8 @@ def parser() -> argparse.ArgumentParser:
 
     text = sub.add_parser('text')
     text.add_argument('--selector', required=True)
+    text.add_argument('--max-chars', type=int, default=TEXT_STDOUT_LIMIT)
+    text.add_argument('--full', action='store_true')
 
     exists = sub.add_parser('exists')
     exists.add_argument('--selector', required=True)
@@ -126,7 +129,7 @@ def _extract_command_details_for_log(args: argparse.Namespace) -> dict[str, Any]
     if command == 'wait':
         return {'seconds': args.seconds}
     if command == 'text':
-        return {'selector': args.selector}
+        return {'selector': args.selector, 'max_chars': args.max_chars, 'full': args.full}
     if command == 'exists':
         return {'selector': args.selector}
     if command == 'attr':
@@ -375,7 +378,7 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
                 count = await page.locator(args.selector).count()
                 return {'ok': True, 'selector': args.selector, 'exists': count > 0, 'count': count, 'url': page.url}
             if args.command == 'attr':
-                locator = page.locator(args.selector).first()
+                locator = page.locator(args.selector).first
                 count = await page.locator(args.selector).count()
                 value = await locator.get_attribute(args.name) if count > 0 else None
                 return {
@@ -390,8 +393,7 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
                 return await _collect_links(page, args)
             if args.command == 'snapshot':
                 return await _collect_snapshot(page, args)
-            value = await page.text_content(args.selector)
-            return {'ok': True, 'selector': args.selector, 'text': value}
+            return await _collect_text(page, args)
         except Exception as exc:  # noqa: BLE001 - приводим transient-ошибки к единому формату
             last_error = normalize_error_text(exc)
             if not is_transient_context_error(last_error):
@@ -433,6 +435,24 @@ async def _collect_links(page: Any, args: argparse.Namespace) -> dict[str, Any]:
         limit,
     )
     return {'ok': True, 'selector': args.selector, 'limit': limit, 'links': links, 'url': page.url}
+
+
+async def _collect_text(page: Any, args: argparse.Namespace) -> dict[str, Any]:
+    locator = page.locator(args.selector).first
+    value = await locator.evaluate(
+        """(node) => {
+            const inner = typeof node.innerText === 'string' ? node.innerText : '';
+            if (inner.trim()) return inner;
+            return node.textContent || '';
+        }"""
+    )
+    return _format_text_result(
+        text=str(value or ''),
+        selector=args.selector,
+        url=page.url,
+        max_chars=args.max_chars,
+        full=args.full,
+    )
 
 
 async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, Any]:
@@ -723,6 +743,27 @@ def _format_html_result(*, content: str, url: str, max_chars: int = HTML_STDOUT_
         'ok': True,
         'html': content[:limit],
         'html_size': html_size,
+        'truncated': truncated,
+        'url': url,
+    }
+
+
+def _format_text_result(
+    *,
+    text: str,
+    selector: str,
+    url: str,
+    max_chars: int = TEXT_STDOUT_LIMIT,
+    full: bool = False,
+) -> dict[str, Any]:
+    text_size = len(text)
+    limit = text_size if full or max_chars == 0 else _normalize_limit(max_chars, default=TEXT_STDOUT_LIMIT, maximum=text_size)
+    truncated = text_size > limit
+    return {
+        'ok': True,
+        'selector': selector,
+        'text': text[:limit],
+        'text_size': text_size,
         'truncated': truncated,
         'url': url,
     }

@@ -130,6 +130,10 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 exists --selector '
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[href*="/book/"]' --name href
 ```
 
+Команда `text` предназначена для точечных селекторов. По умолчанию stdout ограничен 4 000 символами и возвращаются поля `text_size`/`truncated`.
+Для кастомного лимита используйте `text --max-chars <n>`, где `0` означает без ограничения; полный stdout доступен только через явный `text --full`.
+`text --selector body` стоит использовать только как fallback, когда структурных команд недостаточно.
+
 Команда `html` без `--path` возвращает только превью до 20 000 символов и поля `html_size`/`truncated`.
 Полный HTML предпочтительно сохранять в файл через `html --path <file>` и анализировать локальными командами.
 Если полный HTML нужен именно в stdout, доступен явный escape hatch `html --full`; для кастомного лимита используйте `html --max-chars <n>`, где `0` означает без ограничения.

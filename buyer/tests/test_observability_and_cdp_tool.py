@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from buyer.app.auth_scripts import SberIdScriptRunner
 from buyer.app.prompt_builder import build_agent_prompt
 from buyer.app.runner import _build_browser_actions_metrics
-from buyer.tools.cdp_tool import HTML_STDOUT_LIMIT, _format_html_result, parser
+from buyer.tools.cdp_tool import HTML_STDOUT_LIMIT, TEXT_STDOUT_LIMIT, _format_html_result, _format_text_result, parser
 
 
 class CdpToolOutputTests(unittest.TestCase):
@@ -32,15 +32,42 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertFalse(result['truncated'])
         self.assertEqual(len(result['html']), HTML_STDOUT_LIMIT + 7)
 
+    def test_text_stdout_is_truncated(self) -> None:
+        content = 'x' * (TEXT_STDOUT_LIMIT + 7)
+
+        result = _format_text_result(text=content, selector='body', url='https://www.litres.ru/')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['selector'], 'body')
+        self.assertEqual(result['text_size'], TEXT_STDOUT_LIMIT + 7)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(len(result['text']), TEXT_STDOUT_LIMIT)
+
+    def test_text_stdout_can_be_full_when_explicitly_requested(self) -> None:
+        content = 'x' * (TEXT_STDOUT_LIMIT + 7)
+
+        result = _format_text_result(text=content, selector='body', url='https://www.litres.ru/', full=True)
+
+        self.assertEqual(result['text_size'], TEXT_STDOUT_LIMIT + 7)
+        self.assertFalse(result['truncated'])
+        self.assertEqual(len(result['text']), TEXT_STDOUT_LIMIT + 7)
+
     def test_structured_commands_parse_stably(self) -> None:
         cli = parser()
 
+        text = cli.parse_args(['text', '--selector', 'body'])
+        text_limited = cli.parse_args(['text', '--selector', 'body', '--max-chars', '8000'])
+        text_full = cli.parse_args(['text', '--selector', 'body', '--full'])
         exists = cli.parse_args(['exists', '--selector', '[data-testid="x"]'])
         attr = cli.parse_args(['attr', '--selector', 'a', '--name', 'href'])
         links = cli.parse_args(['links', '--selector', 'main', '--limit', '12'])
         snapshot = cli.parse_args(['snapshot', '--selector', 'body', '--limit', '20'])
         html = cli.parse_args(['html', '--full'])
 
+        self.assertEqual(text.command, 'text')
+        self.assertEqual(text.max_chars, TEXT_STDOUT_LIMIT)
+        self.assertEqual(text_limited.max_chars, 8000)
+        self.assertTrue(text_full.full)
         self.assertEqual(exists.command, 'exists')
         self.assertEqual(attr.name, 'href')
         self.assertEqual(links.limit, 12)
@@ -62,6 +89,8 @@ class CdpToolOutputTests(unittest.TestCase):
 
         self.assertIn('snapshot', prompt)
         self.assertIn('links', prompt)
+        self.assertIn('`text` используй только точечно', prompt)
+        self.assertIn('`text --selector body` допускается только как fallback и с лимитом', prompt)
         self.assertIn('Не печатай полный HTML в stdout', prompt)
         self.assertIn('html --path', prompt)
 
