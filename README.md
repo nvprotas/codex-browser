@@ -23,7 +23,6 @@
 - Ограничение MVP: только 1 активная сессия одновременно.
 
 ## Запуск
-
 Перед запуском задайте авторизацию для `codex` (любой один вариант):
 
 ```bash
@@ -33,6 +32,11 @@ cp .env.example .env
 
 # Вариант 2: OAuth auth.json с host-машины
 # CODEX_AUTH_JSON_PATH=/absolute/path/to/auth.json
+
+# Абсолютный путь на host к user-buyer-info.md с постоянной информацией о пользователе.
+# Пример: /Users/<you>/Documents/user-buyer-info.md
+# Файл монтируется только в runtime и не попадает в image.
+USER_BUYER_INFO_PATH=
 
 # Режим sandbox для codex внутри buyer.
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
@@ -58,7 +62,8 @@ cp .env.example .env
 # PURCHASE_SCRIPT_TIMEOUT_SEC=120
 ```
 
-`CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
+`CODEX_AUTH_JSON_PATH` и `USER_BUYER_INFO_PATH` монтируются в `buyer` только на этапе runtime и не попадают в image.
+`buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
 
 ```bash
 docker compose up --build

@@ -13,6 +13,8 @@ def build_agent_prompt(
     metadata: dict[str, Any],
     auth_payload: dict[str, Any] | None,
     auth_context: dict[str, Any] | None,
+    user_profile_text: str | None,
+    user_profile_truncated: bool,
     memory: list[dict[str, str]],
     latest_user_reply: str | None,
 ) -> str:
@@ -20,6 +22,10 @@ def build_agent_prompt(
     metadata_dump = json.dumps(metadata, ensure_ascii=False, indent=2)
     auth_payload_dump = json.dumps(auth_payload, ensure_ascii=False, indent=2) if auth_payload is not None else 'null'
     auth_context_dump = json.dumps(auth_context, ensure_ascii=False, indent=2) if auth_context is not None else 'null'
+    user_profile_block = _build_user_profile_block(
+        user_profile_text=user_profile_text,
+        user_profile_truncated=user_profile_truncated,
+    )
 
     latest_reply_block = latest_user_reply or 'Нет новых ответов от пользователя на этом шаге.'
 
@@ -53,6 +59,8 @@ def build_agent_prompt(
 - auth_context: {auth_context_dump}
 - cdp_preflight: {cdp_preflight_summary}
 
+{user_profile_block}
+
 История диалога (последние шаги):
 {memory_dump}
 
@@ -61,3 +69,21 @@ def build_agent_prompt(
 
 Ответь только структурированным результатом по схеме.
 """.strip()
+
+
+def _build_user_profile_block(*, user_profile_text: str | None, user_profile_truncated: bool) -> str:
+    if not user_profile_text:
+        return 'Постоянная информация о пользователе:\n- Постоянный профиль пользователя пока не задан.'
+
+    truncation_note = ''
+    if user_profile_truncated:
+        truncation_note = '\n- Профиль обрезан по лимиту, учитывай только видимую часть.'
+
+    return (
+        'Постоянная информация о пользователе:\n'
+        '- Это отдельный долговременный контекст пользователя.\n'
+        '- Используй его как предпочтения и устойчивые ограничения по умолчанию.\n'
+        '- Если он конфликтует с текущей задачей или свежим ответом пользователя, приоритет у текущих данных.'
+        f'{truncation_note}\n\n'
+        f'```md\n{user_profile_text}\n```'
+    )

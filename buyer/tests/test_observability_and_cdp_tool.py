@@ -55,6 +55,8 @@ class CdpToolOutputTests(unittest.TestCase):
             metadata={},
             auth_payload=None,
             auth_context=None,
+            user_profile_text='Предпочитает электронные книги',
+            user_profile_truncated=False,
             memory=[],
             latest_user_reply=None,
         )

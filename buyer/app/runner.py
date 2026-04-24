@@ -13,6 +13,7 @@ from typing import Any
 from .models import AgentOutput, TaskAuthPayload
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
+from .user_profile import load_user_profile
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -72,6 +73,11 @@ class AgentRunner:
                 ),
             )
 
+        user_profile = load_user_profile(
+            self._settings.buyer_user_info_path,
+            max_chars=self._settings.buyer_user_info_max_chars,
+        )
+
         prompt = build_agent_prompt(
             task=task,
             start_url=start_url,
@@ -80,6 +86,8 @@ class AgentRunner:
             metadata=metadata,
             auth_payload=_build_redacted_auth_payload(auth),
             auth_context=auth_context,
+            user_profile_text=user_profile.text,
+            user_profile_truncated=user_profile.truncated,
             memory=memory,
             latest_user_reply=latest_user_reply,
         )
