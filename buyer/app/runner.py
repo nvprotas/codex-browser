@@ -12,6 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._utils import (
+    duration_ms_since as _duration_ms_since,
+    remove_file_quietly as _remove_file_quietly,
+    tail_text as _tail_text,
+    trace_date_dir_name as _trace_date_dir_name,
+    trace_time_dir_name as _trace_time_dir_name,
+)
 from .models import AgentOutput, TaskAuthPayload
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
@@ -630,20 +637,6 @@ class AgentRunner:
         return {'trace': payload}
 
 
-def _duration_ms_since(started_at: datetime) -> int:
-    delta = datetime.now(timezone.utc) - started_at
-    return max(int(delta.total_seconds() * 1000), 0)
-
-
-def _trace_date_dir_name(now: datetime | None = None) -> str:
-    current = now or datetime.now().astimezone()
-    return current.strftime('%Y-%m-%d')
-
-
-def _trace_time_dir_name(now: datetime | None = None) -> str:
-    current = now or datetime.now().astimezone()
-    return current.strftime('%H-%M-%S')
-
 
 def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
     if not trace_root.is_dir():
@@ -680,10 +673,7 @@ def _preview_text(text: str, *, limit: int) -> str:
 
 
 def _merge_artifacts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    merged.update(base)
-    merged.update(extra)
-    return merged
+    return {**base, **extra}
 
 
 def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
@@ -973,13 +963,6 @@ def _write_json_safely(path: Path, payload: dict[str, Any]) -> None:
         return
 
 
-def _remove_file_quietly(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        return
-
-
 def _format_codex_failure_message(*, returncode: int, stderr_text: str, stdout_text: str) -> str:
     combined = f'{stderr_text}\n{stdout_text}'
     compact_tail = (stderr_text or stdout_text).strip()
@@ -1014,13 +997,6 @@ def _extract_cdp_error_tail(*, stdout_text: str, stderr_text: str) -> str:
 
     source = parsed_error or stderr_text or stdout_text or 'unknown error'
     return _tail_text(source)
-
-
-def _tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]
 
 
 def _build_redacted_auth_payload(auth: TaskAuthPayload | None) -> dict[str, Any] | None:

@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from ._utils import head_text as _head_text, tail_text as _tail_text
 from .auth_scripts import (
     AUTH_FAILED_INVALID_SESSION,
     AUTH_FAILED_PAYLOAD,
@@ -748,13 +749,6 @@ def _build_auth_retry_context(*, attempt: int, max_attempts: int, script_result:
     }
 
 
-def _tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]
-
-
 def _build_agent_step_payload(*, step_index: int, result: AgentOutput) -> dict[str, Any]:
     payload: dict[str, Any] = {
         'step': step_index,
@@ -859,10 +853,3 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         trace['codex_attempts'] = codex_attempts[-3:]
 
     return trace
-
-
-def _head_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return f'{compact[:limit]}...'
