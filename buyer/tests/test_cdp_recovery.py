@@ -84,6 +84,22 @@ class _ThrowingPurchaseScriptRunner:
         raise OSError('purchase runtime unavailable')
 
 
+class _RecordingKnowledgeAnalyzer:
+    def __init__(self, *, callback_client: _RecordingCallbackClient | None = None, fail: bool = False) -> None:
+        self.callback_client = callback_client
+        self.fail = fail
+        self.snapshots: list[Any] = []
+        self.delivered_event_types_at_start: list[str] = []
+
+    async def analyze(self, snapshot: Any) -> dict[str, Any]:
+        self.snapshots.append(snapshot)
+        if self.callback_client is not None:
+            self.delivered_event_types_at_start = [event.event_type for event in self.callback_client.delivered]
+        if self.fail:
+            raise RuntimeError('analysis failed')
+        return {'status': 'completed'}
+
+
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_trace_context_uses_date_and_time_directory(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -191,6 +207,131 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'completed')
+
+    async def test_completed_session_schedules_knowledge_analysis_after_scenario_finished(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        analyzer = _RecordingKnowledgeAnalyzer(callback_client=callback_client)
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Шаг оплаты найден',
+                order_id='order-123',
+                artifacts={'trace': {'trace_file': '/tmp/trace.json'}},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            knowledge_analyzer=analyzer,  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test-task',
+            start_url='https://brandshop.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+        await service.wait_for_post_session_analysis()
+
+        self.assertEqual(len(analyzer.snapshots), 1)
+        self.assertEqual(analyzer.snapshots[0].outcome, 'completed')
+        self.assertIn('scenario_finished', analyzer.delivered_event_types_at_start)
+        self.assertEqual(callback_client.delivered[-1].event_type, 'scenario_finished')
+        self.assertNotIn('knowledge_analysis_finished', [event.event_type for event in callback_client.delivered])
+
+    async def test_knowledge_analysis_failure_does_not_change_completed_status(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        analyzer = _RecordingKnowledgeAnalyzer(fail=True)
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Шаг оплаты найден',
+                order_id='order-123',
+                artifacts={},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            knowledge_analyzer=analyzer,  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test-task',
+            start_url='https://brandshop.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+        await service.wait_for_post_session_analysis()
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
+        scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+        self.assertEqual(len(scenario_finished_events), 1)
+
+    async def test_knowledge_analysis_failure_does_not_change_failed_status(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        analyzer = _RecordingKnowledgeAnalyzer(fail=True)
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='failed',
+                message='Не удалось найти товар',
+                order_id=None,
+                artifacts={},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            knowledge_analyzer=analyzer,  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test-task',
+            start_url='https://brandshop.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+        await service.wait_for_post_session_analysis()
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.FAILED)
+        scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
     async def test_purchase_script_completion_skips_generic_runner(self) -> None:
         callback_client = _RecordingCallbackClient()

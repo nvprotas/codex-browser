@@ -84,6 +84,28 @@
   - прикладывает краткую рекомендацию по применению,
   - не включает автоприменение по умолчанию.
 
+## Post-session анализ знаний
+
+- После завершения сценария `buyer` сначала доставляет `scenario_finished` в `middle`.
+- После успешной доставки финального callback `buyer` запускает отдельный асинхронный `codex exec`, который анализирует завершенную сессию и trace-файлы.
+- Этот анализ не блокирует пользователя и не меняет статус завершенной сессии.
+- Результат сохраняется только как внутренний артефакт в trace-каталоге:
+  - `knowledge-analysis-prompt.txt`
+  - `knowledge-analysis.json`
+  - `knowledge-analysis-trace.json`
+- `knowledge-analysis.json` содержит domain-specific черновики:
+  - `site_domain`
+  - `session_outcome`
+  - `summary`
+  - `knowledge_candidates`
+  - `pitfalls`
+  - `playbook_candidate`
+  - `evidence_refs`
+- Все кандидаты создаются со статусом `draft`; следующий прогон не использует их без отдельной review/активации.
+- Для failed-сессий допускаются pitfalls/negative knowledge, но `playbook_candidate` не создается.
+- В отличие от общей MVP-политики логирования, knowledge-analysis артефакты не должны содержать auth-пакеты, cookies, `storageState`, токены, `orderId` и одноразовые платежные данные.
+- Внешний callback-контракт не расширяется отдельным событием о завершении анализа знаний.
+
 ## Handoff (VNC/noVNC)
 
 - Включается по гибридной политике:

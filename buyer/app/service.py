@@ -17,6 +17,7 @@ from .auth_scripts import (
     is_domain_in_allowlist,
 )
 from .callback import CallbackClient, CallbackDeliveryError
+from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
@@ -48,6 +49,7 @@ class BuyerService:
         auth_script_runner: SberIdScriptRunner,
         purchase_script_allowlist: set[str] | None = None,
         purchase_script_runner: PurchaseScriptRunner | None = None,
+        knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
         buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
     ) -> None:
         self._store = store
@@ -62,6 +64,9 @@ class BuyerService:
         self._auth_script_runner = auth_script_runner
         self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
         self._purchase_script_runner = purchase_script_runner
+        self._knowledge_analyzer = knowledge_analyzer
+        self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
+        self._post_session_analysis_semaphore = asyncio.Semaphore(1)
         self._buyer_user_info_path = buyer_user_info_path
 
     async def create_session(
@@ -94,6 +99,19 @@ class BuyerService:
 
     async def submit_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
         return await self._store.apply_reply(session_id, reply_id, message)
+
+    async def wait_for_post_session_analysis(self) -> None:
+        if not self._post_session_analysis_tasks:
+            return
+        await asyncio.gather(*list(self._post_session_analysis_tasks), return_exceptions=True)
+
+    async def shutdown_post_session_analysis(self) -> None:
+        tasks = list(self._post_session_analysis_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_session(self, session_id: str) -> None:
         latest_user_reply: str | None = None
@@ -275,7 +293,7 @@ class BuyerService:
                     'order_id': result.order_id,
                     'message': 'Получен orderId, шаг оплаты готов.',
                 },
-                idempotency_suffix=result.order_id,
+                idempotency_suffix='payment-ready',
             )
             logger.info('payment_ready session_id=%s order_id=%s', state.session_id, result.order_id)
 
@@ -292,6 +310,13 @@ class BuyerService:
         )
         await self._store.set_status(state.session_id, SessionStatus.COMPLETED)
         logger.info('session_completed session_id=%s', state.session_id)
+        await self._schedule_post_session_analysis(
+            state,
+            outcome='completed',
+            message=result.message,
+            order_id=result.order_id,
+            artifacts=artifacts,
+        )
 
     async def _handle_failed(
         self,
@@ -316,6 +341,59 @@ class BuyerService:
         )
         await self._store.set_status(state.session_id, SessionStatus.FAILED, error=reason)
         logger.error('session_failed session_id=%s reason=%s', state.session_id, _tail_text(reason, limit=700))
+        await self._schedule_post_session_analysis(
+            state,
+            outcome='failed',
+            message=reason,
+            order_id=None,
+            artifacts=merged_artifacts,
+        )
+
+    async def _schedule_post_session_analysis(
+        self,
+        state: SessionState,
+        *,
+        outcome: str,
+        message: str,
+        order_id: str | None,
+        artifacts: dict[str, Any],
+    ) -> None:
+        if self._knowledge_analyzer is None:
+            return
+        try:
+            refreshed = await self._store.get(state.session_id)
+        except SessionNotFoundError:
+            return
+        snapshot = PostSessionAnalysisSnapshot(
+            session_id=refreshed.session_id,
+            task=refreshed.task,
+            start_url=refreshed.start_url,
+            metadata=dict(refreshed.metadata),
+            outcome=outcome,
+            message=message,
+            order_id=order_id,
+            artifacts=dict(artifacts),
+            events=[event.model_dump(mode='json') for event in refreshed.events],
+        )
+        task = asyncio.create_task(
+            self._run_post_session_analysis(snapshot),
+            name=f'knowledge-analysis-{refreshed.session_id}',
+        )
+        self._post_session_analysis_tasks.add(task)
+        task.add_done_callback(self._post_session_analysis_tasks.discard)
+
+    async def _run_post_session_analysis(self, snapshot: PostSessionAnalysisSnapshot) -> None:
+        if self._knowledge_analyzer is None:
+            return
+        try:
+            async with self._post_session_analysis_semaphore:
+                await self._knowledge_analyzer.analyze(snapshot)
+        except Exception as exc:  # noqa: BLE001 - анализ знаний не меняет итог покупки
+            logger.exception(
+                'knowledge_analysis_failed session_id=%s error=%s',
+                snapshot.session_id,
+                _tail_text(str(exc), limit=700),
+            )
 
     async def _run_sberid_auth_flow(self, state: SessionState) -> dict[str, Any]:
         domain = domain_from_url(state.start_url)

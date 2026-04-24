@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BuyerPostSessionKnowledgeAnalysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "site_domain",
+    "session_outcome",
+    "summary",
+    "knowledge_candidates",
+    "pitfalls",
+    "playbook_candidate",
+    "evidence_refs"
+  ],
+  "properties": {
+    "site_domain": {
+      "type": "string"
+    },
+    "session_outcome": {
+      "type": "string",
+      "enum": ["completed", "failed"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "knowledge_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["kind", "key", "value", "confidence", "status"],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {},
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": ["draft"]
+          }
+        }
+      }
+    },
+    "pitfalls": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "playbook_candidate": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["status", "summary", "steps"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["draft"]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

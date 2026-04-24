@@ -78,6 +78,7 @@ class SberIdScriptRunner:
         self._timeout_sec = max(timeout_sec, 5)
         self._trace_dir = Path(trace_dir)
         self._registry: dict[str, ScriptSpec] = {
+            'brandshop.ru': ScriptSpec(domain='brandshop.ru', lifecycle='publish', relative_path='sberid/brandshop.ts'),
             'litres.ru': ScriptSpec(domain='litres.ru', lifecycle='publish', relative_path='sberid/litres.ts'),
             'kuper.ru': ScriptSpec(domain='kuper.ru', lifecycle='draft', relative_path='sberid/kuper.ts'),
             'samokat.ru': ScriptSpec(domain='samokat.ru', lifecycle='draft', relative_path='sberid/samokat.ts'),

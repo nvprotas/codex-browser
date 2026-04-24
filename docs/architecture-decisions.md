@@ -48,6 +48,7 @@
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
 - Ошибка формата `storageState`: `auth_failed_payload` + `ask_user` на новый пакет.
 - Вход через SberId: `scripts first` → эвристический fallback → handoff.
+- Опубликованные магазинные auth-скрипты SberId: `litres.ru`, `brandshop.ru`.
 - Критерий auth success: редирект обратно на магазин + маркер авторизованного состояния.
 - Redirect loop guard на `id.sber.ru`: максимум 2 цикла.
 - Retry budget auth: 1 повтор с новым auth-пакетом.
@@ -67,6 +68,20 @@
 - CAPTCHA решается через handoff человеком.
 - Lifecycle скриптов: `draft -> review -> publish`.
 - Автопубликация новых скриптов в v1 не допускается.
+
+## Post-session анализ знаний
+
+- Анализ знаний не находится на критическом пути покупки.
+- `buyer` сначала доставляет внешний `scenario_finished` callback и только после успешной доставки запускает отдельный асинхронный `codex exec` для анализа завершенной сессии.
+- Ошибка post-session анализа не меняет итоговый статус сессии покупки и не порождает внешний callback.
+- Результаты анализа сохраняются как внутренние артефакты в trace-каталоге сессии:
+  - `knowledge-analysis-prompt.txt`,
+  - `knowledge-analysis.json`,
+  - `knowledge-analysis-trace.json`.
+- Все кандидаты знаний создаются в статусе `draft` и не используются следующими прогонами без review/активации.
+- Для failed-сессий допускаются только pitfalls/negative knowledge; `playbook_candidate` должен быть `null`.
+- Анализ знаний не должен сохранять auth-пакеты, cookies, `storageState`, токены и одноразовые платежные данные.
+- Внешний callback-контракт v1 не расширяется событием `knowledge_analysis_finished`.
 
 ## Наблюдаемость, релиз и операционные ограничения
 
