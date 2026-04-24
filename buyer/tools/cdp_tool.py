@@ -14,6 +14,9 @@ import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
+HTML_STDOUT_LIMIT = 20_000
+SNAPSHOT_TEXT_LIMIT = 160
+
 
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description='Утилита управления browser-sidecar через Playwright CDP')
@@ -43,6 +46,21 @@ def parser() -> argparse.ArgumentParser:
     text = sub.add_parser('text')
     text.add_argument('--selector', required=True)
 
+    exists = sub.add_parser('exists')
+    exists.add_argument('--selector', required=True)
+
+    attr = sub.add_parser('attr')
+    attr.add_argument('--selector', required=True)
+    attr.add_argument('--name', required=True)
+
+    links = sub.add_parser('links')
+    links.add_argument('--selector', default='body')
+    links.add_argument('--limit', type=int, default=80)
+
+    snapshot = sub.add_parser('snapshot')
+    snapshot.add_argument('--selector', default='body')
+    snapshot.add_argument('--limit', type=int, default=120)
+
     title = sub.add_parser('title')
 
     current = sub.add_parser('url')
@@ -52,6 +70,8 @@ def parser() -> argparse.ArgumentParser:
 
     html = sub.add_parser('html')
     html.add_argument('--path', required=False)
+    html.add_argument('--max-chars', type=int, default=HTML_STDOUT_LIMIT)
+    html.add_argument('--full', action='store_true')
 
     return cli
 
@@ -107,10 +127,18 @@ def _extract_command_details_for_log(args: argparse.Namespace) -> dict[str, Any]
         return {'seconds': args.seconds}
     if command == 'text':
         return {'selector': args.selector}
+    if command == 'exists':
+        return {'selector': args.selector}
+    if command == 'attr':
+        return {'selector': args.selector, 'name': args.name}
+    if command == 'links':
+        return {'selector': args.selector, 'limit': args.limit}
+    if command == 'snapshot':
+        return {'selector': args.selector, 'limit': args.limit}
     if command == 'screenshot':
         return {'path': args.path}
     if command == 'html':
-        return {'path': args.path}
+        return {'path': args.path, 'max_chars': args.max_chars, 'full': args.full}
     return {}
 
 
@@ -118,7 +146,8 @@ def _sanitize_result_for_log(result: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(result)
     if isinstance(sanitized.get('html'), str):
         html = sanitized.pop('html')
-        sanitized['html_size'] = len(html)
+        sanitized.setdefault('html_size', len(html))
+        sanitized['html_preview_size'] = len(html)
     if isinstance(sanitized.get('text'), str):
         text = sanitized['text']
         if len(text) > 400:
@@ -342,6 +371,25 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
                 return {'ok': True, 'title': await page.title()}
             if args.command == 'url':
                 return {'ok': True, 'url': page.url}
+            if args.command == 'exists':
+                count = await page.locator(args.selector).count()
+                return {'ok': True, 'selector': args.selector, 'exists': count > 0, 'count': count, 'url': page.url}
+            if args.command == 'attr':
+                locator = page.locator(args.selector).first()
+                count = await page.locator(args.selector).count()
+                value = await locator.get_attribute(args.name) if count > 0 else None
+                return {
+                    'ok': True,
+                    'selector': args.selector,
+                    'name': args.name,
+                    'exists': count > 0,
+                    'value': value,
+                    'url': page.url,
+                }
+            if args.command == 'links':
+                return await _collect_links(page, args)
+            if args.command == 'snapshot':
+                return await _collect_snapshot(page, args)
             value = await page.text_content(args.selector)
             return {'ok': True, 'selector': args.selector, 'text': value}
         except Exception as exc:  # noqa: BLE001 - приводим transient-ошибки к единому формату
@@ -359,6 +407,87 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
                 await browser.close()
             except Exception:  # noqa: BLE001 - best effort cleanup
                 pass
+
+
+async def _collect_links(page: Any, args: argparse.Namespace) -> dict[str, Any]:
+    limit = _normalize_limit(args.limit, default=80, maximum=300)
+    links = await page.locator(args.selector).locator('a').evaluate_all(
+        """(nodes, limit) => {
+            const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const result = [];
+            const seen = new Set();
+            for (const node of nodes) {
+                if (result.length >= limit) break;
+                const href = node.href || node.getAttribute('href') || '';
+                const text = compact(node.innerText || node.textContent || '').slice(0, 180);
+                const title = compact(node.getAttribute('title') || '').slice(0, 180);
+                const ariaLabel = compact(node.getAttribute('aria-label') || '').slice(0, 180);
+                const key = `${href}\\n${text}\\n${title}\\n${ariaLabel}`;
+                if (!href && !text && !title && !ariaLabel) continue;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                result.push({ href, text, title, aria_label: ariaLabel });
+            }
+            return result;
+        }""",
+        limit,
+    )
+    return {'ok': True, 'selector': args.selector, 'limit': limit, 'links': links, 'url': page.url}
+
+
+async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, Any]:
+    limit = _normalize_limit(args.limit, default=120, maximum=500)
+    items = await page.locator(args.selector).evaluate(
+        """(root, options) => {
+            const limit = options.limit;
+            const textLimit = options.textLimit;
+            const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const selector = [
+                'a',
+                'button',
+                'input',
+                'textarea',
+                'select',
+                '[role]',
+                '[data-testid]',
+                'h1',
+                'h2',
+                'h3',
+                'label',
+                'p'
+            ].join(',');
+            const nodes = root.matches && root.matches(selector)
+                ? [root, ...root.querySelectorAll(selector)]
+                : [...root.querySelectorAll(selector)];
+            const result = [];
+            for (const node of nodes) {
+                if (result.length >= limit) break;
+                const rect = node.getBoundingClientRect();
+                const style = window.getComputedStyle(node);
+                const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                const tag = node.tagName.toLowerCase();
+                const item = {
+                    tag,
+                    role: node.getAttribute('role') || null,
+                    testid: node.getAttribute('data-testid') || null,
+                    text: compact(node.innerText || node.textContent || '').slice(0, textLimit),
+                    href: node.href || node.getAttribute('href') || null,
+                    aria_label: compact(node.getAttribute('aria-label') || '').slice(0, textLimit) || null,
+                    name: node.getAttribute('name') || null,
+                    type: node.getAttribute('type') || null,
+                    placeholder: compact(node.getAttribute('placeholder') || '').slice(0, textLimit) || null,
+                    visible,
+                };
+                if (!item.text && !item.href && !item.aria_label && !item.testid && !item.role && !item.placeholder) {
+                    continue;
+                }
+                result.push(item);
+            }
+            return result;
+        }""",
+        {'limit': limit, 'textLimit': SNAPSHOT_TEXT_LIMIT},
+    )
+    return {'ok': True, 'selector': args.selector, 'limit': limit, 'items': items, 'url': page.url}
 
 
 async def run_command(args: argparse.Namespace) -> dict:
@@ -402,7 +531,7 @@ async def run_command(args: argparse.Namespace) -> dict:
 
     playwright = await async_playwright().start()
     try:
-        if args.command in {'title', 'text', 'url'}:
+        if args.command in {'title', 'text', 'url', 'exists', 'attr', 'links', 'snapshot'}:
             result = await run_read_command_with_retry(playwright=playwright, args=args)
             _append_action_log(
                 'browser_command_finished',
@@ -530,7 +659,7 @@ async def run_command(args: argparse.Namespace) -> dict:
                         },
                     )
                     return result
-                result = {'ok': True, 'html': content, 'url': page.url}
+                result = _format_html_result(content=content, url=page.url, max_chars=args.max_chars, full=args.full)
                 _append_action_log(
                     'browser_command_finished',
                     {
@@ -578,6 +707,25 @@ async def run_command(args: argparse.Namespace) -> dict:
         raise
     finally:
         await playwright.stop()
+
+
+def _normalize_limit(value: int, *, default: int, maximum: int) -> int:
+    if value <= 0:
+        return default
+    return min(value, maximum)
+
+
+def _format_html_result(*, content: str, url: str, max_chars: int = HTML_STDOUT_LIMIT, full: bool = False) -> dict[str, Any]:
+    html_size = len(content)
+    limit = html_size if full or max_chars == 0 else _normalize_limit(max_chars, default=HTML_STDOUT_LIMIT, maximum=html_size)
+    truncated = html_size > limit
+    return {
+        'ok': True,
+        'html': content[:limit],
+        'html_size': html_size,
+        'truncated': truncated,
+        'url': url,
+    }
 
 
 async def main() -> int:

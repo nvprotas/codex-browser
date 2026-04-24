@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
+from buyer.app.purchase_scripts import PurchaseScriptResult
 from buyer.app.runner import AgentRunner, _trace_date_dir_name
 from buyer.app.service import BuyerService
 from buyer.app.settings import Settings
@@ -65,6 +66,22 @@ class _NoopAuthScriptRunner:
 
     async def run(self, **_: Any) -> Any:
         return None
+
+
+class _CompletedPurchaseScriptRunner:
+    async def run(self, **_: Any) -> PurchaseScriptResult:
+        return PurchaseScriptResult(
+            status='completed',
+            reason_code='purchase_ready',
+            message='Скрипт дошел до оплаты',
+            order_id='order-456',
+            artifacts={'source': 'purchase-script-test'},
+        )
+
+
+class _ThrowingPurchaseScriptRunner:
+    async def run(self, **_: Any) -> PurchaseScriptResult:
+        raise OSError('purchase runtime unavailable')
 
 
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -174,6 +191,91 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'completed')
+
+    async def test_purchase_script_completion_skips_generic_runner(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='failed',
+                message='generic runner should not be called',
+                order_id=None,
+                artifacts={},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            purchase_script_allowlist={'litres.ru'},
+            purchase_script_runner=_CompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='Открой litres. Ищи книгу одиссея гомера',
+            start_url='https://www.litres.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
+        self.assertEqual(runner.calls, 0)
+
+        payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']
+        self.assertEqual(len(payment_ready_events), 1)
+        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-456')
+
+    async def test_purchase_script_exception_falls_back_to_generic_runner(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Generic runner completed',
+                order_id='order-789',
+                artifacts={'source': 'generic'},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            purchase_script_allowlist={'litres.ru'},
+            purchase_script_runner=_ThrowingPurchaseScriptRunner(),  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='Открой litres. Ищи книгу одиссея гомера',
+            start_url='https://www.litres.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
+        self.assertEqual(runner.calls, 1)
+
+        memory = await store.get_agent_memory(state.session_id)
+        self.assertTrue(any('[PURCHASE_SCRIPT_FALLBACK]' in item['text'] for item in memory))
 
     async def test_transient_failure_after_window_finishes_as_failed(self) -> None:
         callback_client = _RecordingCallbackClient()

@@ -12,6 +12,7 @@ from .models import (
     TaskCreateRequest,
     TaskCreateResponse,
 )
+from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
 from .service import BuyerService
 from .settings import get_settings
@@ -27,6 +28,12 @@ auth_script_runner = SberIdScriptRunner(
     timeout_sec=settings.auth_script_timeout_sec,
     trace_dir=settings.buyer_trace_dir,
 )
+purchase_script_runner = PurchaseScriptRunner(
+    scripts_dir=settings.auth_scripts_dir,
+    cdp_endpoint=settings.browser_cdp_endpoint,
+    timeout_sec=settings.purchase_script_timeout_sec,
+    trace_dir=settings.buyer_trace_dir,
+)
 service = BuyerService(
     store=store,
     callback_client=callback_client,
@@ -38,6 +45,8 @@ service = BuyerService(
     sberid_allowlist=parse_allowlist(settings.sberid_allowlist),
     sberid_auth_retry_budget=settings.sberid_auth_retry_budget,
     auth_script_runner=auth_script_runner,
+    purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
+    purchase_script_runner=purchase_script_runner,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')

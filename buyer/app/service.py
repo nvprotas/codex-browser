@@ -18,6 +18,7 @@ from .auth_scripts import (
 )
 from .callback import CallbackClient, CallbackDeliveryError
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
+from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
 from .state import (
     ReplyValidationError,
@@ -44,6 +45,8 @@ class BuyerService:
         sberid_allowlist: set[str],
         sberid_auth_retry_budget: int,
         auth_script_runner: SberIdScriptRunner,
+        purchase_script_allowlist: set[str] | None = None,
+        purchase_script_runner: PurchaseScriptRunner | None = None,
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -55,6 +58,8 @@ class BuyerService:
         self._sberid_allowlist = {item for item in sberid_allowlist if item}
         self._sberid_auth_retry_budget = max(sberid_auth_retry_budget, 0)
         self._auth_script_runner = auth_script_runner
+        self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
+        self._purchase_script_runner = purchase_script_runner
 
     async def create_session(
         self,
@@ -117,6 +122,11 @@ class BuyerService:
                     'system',
                     f'[SBERID_AUTH_SUMMARY] {json.dumps(auth_summary, ensure_ascii=False)}',
                 )
+
+            purchase_result = await self._run_purchase_script_flow(state)
+            if purchase_result is not None:
+                await self._handle_completed(state, purchase_result, auth_summary=auth_summary)
+                return
 
             while True:
                 state = await self._store.get(session_id)
@@ -432,6 +442,72 @@ class BuyerService:
             ),
         )
         return summary
+
+    async def _run_purchase_script_flow(self, state: SessionState) -> AgentOutput | None:
+        if self._purchase_script_runner is None:
+            return None
+
+        domain = domain_from_url(state.start_url)
+        if not is_domain_in_allowlist(domain, self._purchase_script_allowlist):
+            return None
+
+        try:
+            script_result = await self._purchase_script_runner.run(
+                session_id=state.session_id,
+                domain=domain,
+                start_url=state.start_url,
+                task=state.task,
+            )
+        except Exception as exc:  # noqa: BLE001 - быстрый путь не должен ломать generic fallback
+            await self._store.add_agent_memory(
+                state.session_id,
+                'system',
+                (
+                    '[PURCHASE_SCRIPT_FALLBACK] '
+                    f'Быстрый purchase-скрипт для {domain} аварийно завершился: {_tail_text(str(exc), limit=500)}. '
+                    'Продолжай через generic browser-flow.'
+                ),
+            )
+            logger.warning(
+                'purchase_script_exception_fallback session_id=%s domain=%s error=%s',
+                state.session_id,
+                domain,
+                _tail_text(str(exc), limit=700),
+            )
+            return None
+
+        if script_result.status == 'completed' and script_result.order_id:
+            logger.info(
+                'purchase_script_completed session_id=%s domain=%s order_id=%s',
+                state.session_id,
+                domain,
+                script_result.order_id,
+            )
+            return AgentOutput(
+                status='completed',
+                message=script_result.message,
+                order_id=script_result.order_id,
+                artifacts={'purchase_script': script_result.artifacts},
+            )
+
+        await self._store.add_agent_memory(
+            state.session_id,
+            'system',
+            (
+                '[PURCHASE_SCRIPT_FALLBACK] '
+                f'Быстрый purchase-скрипт для {domain} не завершился успешно: '
+                f'{script_result.reason_code}; {script_result.message}. '
+                'Продолжай через generic browser-flow.'
+            ),
+        )
+        logger.info(
+            'purchase_script_fallback session_id=%s domain=%s reason=%s message=%s',
+            state.session_id,
+            domain,
+            script_result.reason_code,
+            _tail_text(script_result.message, limit=500),
+        )
+        return None
 
     async def _ask_user_for_reply(
         self,

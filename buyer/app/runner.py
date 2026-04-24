@@ -494,6 +494,7 @@ class AgentRunner:
             trace['browser_actions_log_path'],
             limit=self._settings.buyer_browser_actions_tail,
         )
+        actions_metrics = _build_browser_actions_metrics(trace['browser_actions_log_path'])
         payload: dict[str, Any] = {
             'session_id': trace['session_id'],
             'step': trace['step_index'],
@@ -512,6 +513,7 @@ class AgentRunner:
             'browser_actions_log_path': str(trace['browser_actions_log_path']),
             'browser_actions_total': actions_total,
             'browser_actions_tail': actions_tail,
+            **actions_metrics,
         }
         _write_json_safely(trace['step_trace_path'], payload)
         payload['trace_file'] = str(trace['step_trace_path'])
@@ -598,6 +600,108 @@ def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, 
         return 0, []
 
     return total, items[-max(limit, 1) :]
+
+
+def _build_browser_actions_metrics(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            'command_duration_ms': 0,
+            'inter_command_idle_ms': 0,
+            'html_commands': 0,
+            'html_bytes': 0,
+            'command_breakdown': {},
+        }
+
+    starts_by_command: dict[str, list[dict[str, Any]]] = {}
+    finished_commands: list[dict[str, Any]] = []
+    breakdown: dict[str, dict[str, int]] = {}
+    total_command_duration_ms = 0
+    html_commands = 0
+    html_bytes = 0
+
+    try:
+        records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        records = []
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        event = record.get('event')
+        command = record.get('command')
+        if not isinstance(command, str) or not command:
+            continue
+
+        if event == 'browser_command_started':
+            starts_by_command.setdefault(command, []).append(record)
+            continue
+
+        if event == 'browser_command_finished':
+            started_record = None
+            queue = starts_by_command.get(command)
+            if queue:
+                started_record = queue.pop(0)
+
+            duration_ms = _int_or_zero(record.get('duration_ms'))
+            total_command_duration_ms += duration_ms
+            command_stats = breakdown.setdefault(command, {'count': 0, 'duration_ms': 0, 'errors': 0})
+            command_stats['count'] += 1
+            command_stats['duration_ms'] += duration_ms
+            if not bool(record.get('ok')):
+                command_stats['errors'] += 1
+
+            result = record.get('result') if isinstance(record.get('result'), dict) else {}
+            if command == 'html':
+                html_commands += 1
+                size = _int_or_zero(result.get('html_size') or result.get('size'))
+                html_bytes += size
+                command_stats['html_bytes'] = command_stats.get('html_bytes', 0) + size
+
+            started_ts = _parse_ts_ms(started_record.get('ts')) if isinstance(started_record, dict) else None
+            finished_ts = _parse_ts_ms(record.get('ts'))
+            if started_ts is not None and finished_ts is not None:
+                finished_commands.append(
+                    {
+                        'started_ms': started_ts,
+                        'finished_ms': finished_ts,
+                        'duration_ms': duration_ms,
+                    }
+                )
+
+    finished_commands.sort(key=lambda item: item['started_ms'])
+    inter_command_idle_ms = 0
+    previous_finish_ms: int | None = None
+    for command in finished_commands:
+        started_ms = command['started_ms']
+        finished_ms = command['finished_ms']
+        if previous_finish_ms is not None and started_ms > previous_finish_ms:
+            inter_command_idle_ms += started_ms - previous_finish_ms
+        previous_finish_ms = finished_ms if previous_finish_ms is None else max(previous_finish_ms, finished_ms)
+
+    return {
+        'command_duration_ms': total_command_duration_ms,
+        'inter_command_idle_ms': inter_command_idle_ms,
+        'html_commands': html_commands,
+        'html_bytes': html_bytes,
+        'command_breakdown': breakdown,
+    }
+
+
+def _parse_ts_ms(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        normalized = value.replace('Z', '+00:00')
+        return int(datetime.fromisoformat(normalized).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _write_json_safely(path: Path, payload: dict[str, Any]) -> None:

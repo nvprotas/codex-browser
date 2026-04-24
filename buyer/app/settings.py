@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     sberid_auth_retry_budget: int = Field(default=1, ge=0)
     auth_scripts_dir: str = '/app/scripts'
     auth_script_timeout_sec: int = Field(default=90, ge=5)
+    purchase_script_allowlist: str = 'litres.ru'
+    purchase_script_timeout_sec: int = Field(default=120, ge=5)
 
     max_active_sessions: int = 1
 
