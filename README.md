@@ -18,6 +18,8 @@
 - Трассировка шагов `codex`: сохраняются prompt, stdout/stderr tail, итог шага и лог браузерных команд.
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
+- Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
+- Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
 
 ## Запуск
@@ -50,6 +52,10 @@ cp .env.example .env
 # Параметры запуска TS auth-скриптов
 # AUTH_SCRIPTS_DIR=/app/scripts
 # AUTH_SCRIPT_TIMEOUT_SEC=90
+
+# Быстрые purchase-скрипты до generic codex-flow
+# PURCHASE_SCRIPT_ALLOWLIST=litres.ru
+# PURCHASE_SCRIPT_TIMEOUT_SEC=120
 ```
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
@@ -113,7 +119,20 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://example.com
 ```
 
-Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `text`, `title`, `url`, `screenshot`, `html`.
+Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
+
+Для анализа DOM предпочтительны структурные команды:
+
+```bash
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 snapshot --selector body --limit 120
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 links --selector body --limit 80
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 exists --selector '[data-testid="book__addToCartButton"]'
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[href*="/book/"]' --name href
+```
+
+Команда `html` без `--path` возвращает только превью до 20 000 символов и поля `html_size`/`truncated`.
+Полный HTML предпочтительно сохранять в файл через `html --path <file>` и анализировать локальными командами.
+Если полный HTML нужен именно в stdout, доступен явный escape hatch `html --full`; для кастомного лимита используйте `html --max-chars <n>`, где `0` означает без ограничения.
 
 `cdp_tool.py` автоматически пробует fallback-адреса (`localhost`, `127.0.0.1`, `host.docker.internal`) на том же порту, если исходный hostname (например `browser`) не резолвится в текущем окружении.
 Для `resolve/connect` используется retry-окно (`CDP_RECOVERY_WINDOW_SEC`, по умолчанию 20с) и интервал (`CDP_RECOVERY_INTERVAL_MS`, по умолчанию 500мс).
@@ -125,7 +144,13 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 
 - `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
-- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, длительность, tails stdout/stderr, хвост browser actions).
+- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `html_commands`, `html_bytes`, `command_breakdown`.
+
+## Быстрые purchase-скрипты
+
+После SberId-подготовки `buyer` проверяет `PURCHASE_SCRIPT_ALLOWLIST`. Для `litres.ru` он запускает `buyer/scripts/purchase/litres.ts` до generic `codex exec`.
+
+Скрипт принимает `--endpoint`, `--start-url`, `--task`, `--output-path`, извлекает запрос из формата `Ищи книгу <query>`, открывает поиск Litres, выбирает релевантную книгу, добавляет ее в корзину и переходит только до страницы оплаты. Финальную оплату скрипт не выполняет. Если скрипт не нашел запрос, товар, кнопку корзины или `orderId`, он возвращает failed-результат, а `buyer` продолжает текущим generic browser-flow.
 
 Чтобы смотреть это в реальном времени в логах контейнера:
 
