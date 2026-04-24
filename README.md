@@ -21,6 +21,7 @@
 - Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
+- Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
 
 ## Запуск
 
@@ -149,6 +150,11 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 - `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
 - `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `html_commands`, `html_bytes`, `command_breakdown`.
+- `knowledge-analysis-prompt.txt` — отдельный prompt post-session analyzer после финального callback.
+- `knowledge-analysis.json` — внутренний артефакт с draft-кандидатами знаний (`navigation_hints`, `pitfalls`, `site_overview_plain`, `playbook_candidate`).
+- `knowledge-analysis-trace.json` — статус выполнения analyzer, команда, stdout/stderr tail и ссылка на артефакт.
+
+Post-session анализ не отправляет дополнительный callback в `middle`, не влияет на `SessionStatus` и не должен сохранять auth-пакеты, cookies, `storageState`, токены или одноразовые платежные данные. Все кандидаты знаний имеют статус `draft` и не используются автоматически в следующих прогонах.
 
 ## Быстрые purchase-скрипты
 
