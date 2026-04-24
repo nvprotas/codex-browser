@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import unittest
-import os
 import json
-from datetime import datetime, timezone
+import os
+import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -103,6 +103,21 @@ class _RecordingKnowledgeAnalyzer:
 
 
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_store_prunes_terminal_sessions_by_ttl(self) -> None:
+        store = SessionStore(max_active_sessions=1, status_ttl_sec=1)
+        state = await store.create_session(
+            task='test',
+            start_url='https://example.com',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await store.set_status(state.session_id, SessionStatus.COMPLETED)
+        state.updated_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+
+        self.assertEqual(await store.list_sessions(), [])
+
     async def test_trace_context_uses_date_and_time_directory(self) -> None:
         with TemporaryDirectory() as tmpdir:
             runner = AgentRunner(Settings(buyer_trace_dir=tmpdir))

@@ -51,8 +51,11 @@ class ReplyValidationError(RuntimeError):
 
 
 class SessionStore:
-    def __init__(self, max_active_sessions: int = 1) -> None:
+    _TERMINAL_STATUSES = {SessionStatus.COMPLETED, SessionStatus.FAILED}
+
+    def __init__(self, max_active_sessions: int = 1, status_ttl_sec: int | None = None) -> None:
         self._max_active_sessions = max_active_sessions
+        self._status_ttl_sec = status_ttl_sec
         self._lock = asyncio.Lock()
         self._sessions: dict[str, SessionState] = {}
 
@@ -67,6 +70,7 @@ class SessionStore:
         auth: TaskAuthPayload | None,
     ) -> SessionState:
         async with self._lock:
+            self._prune_expired_locked()
             active = [
                 session
                 for session in self._sessions.values()
@@ -100,6 +104,7 @@ class SessionStore:
 
     async def get(self, session_id: str) -> SessionState:
         async with self._lock:
+            self._prune_expired_locked()
             state = self._sessions.get(session_id)
             if state is None:
                 raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
@@ -185,4 +190,18 @@ class SessionStore:
 
     async def list_sessions(self) -> list[SessionState]:
         async with self._lock:
+            self._prune_expired_locked()
             return list(self._sessions.values())
+
+    def _prune_expired_locked(self) -> None:
+        if self._status_ttl_sec is None:
+            return
+
+        deadline = utcnow().timestamp() - max(self._status_ttl_sec, 0)
+        expired = [
+            session_id
+            for session_id, state in self._sessions.items()
+            if state.status in self._TERMINAL_STATUSES and state.updated_at.timestamp() < deadline
+        ]
+        for session_id in expired:
+            self._sessions.pop(session_id, None)

@@ -1,25 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .auth_scripts import normalize_domain, resolve_cdp_endpoint
+from .script_runtime import ScriptSpec, read_script_result_payload, registry_snapshot, script_stdio_artifacts
+from ._utils import tail_text
 
 logger = logging.getLogger('uvicorn.error')
 
 PURCHASE_SCRIPT_COMPLETED = 'completed'
 PURCHASE_SCRIPT_FAILED = 'failed'
-
-
-@dataclass(frozen=True)
-class PurchaseScriptSpec:
-    domain: str
-    lifecycle: str
-    relative_path: str
 
 
 @dataclass
@@ -45,19 +39,12 @@ class PurchaseScriptRunner:
         self._cdp_endpoint = cdp_endpoint
         self._timeout_sec = max(timeout_sec, 5)
         self._trace_dir = Path(trace_dir)
-        self._registry: dict[str, PurchaseScriptSpec] = {
-            'litres.ru': PurchaseScriptSpec(domain='litres.ru', lifecycle='publish', relative_path='purchase/litres.ts'),
+        self._registry: dict[str, ScriptSpec] = {
+            'litres.ru': ScriptSpec(domain='litres.ru', lifecycle='publish', relative_path='purchase/litres.ts'),
         }
 
     def registry_snapshot(self) -> list[dict[str, str]]:
-        return [
-            {
-                'domain': spec.domain,
-                'lifecycle': spec.lifecycle,
-                'script': spec.relative_path,
-            }
-            for spec in sorted(self._registry.values(), key=lambda item: item.domain)
-        ]
+        return registry_snapshot(self._registry)
 
     async def run(
         self,
@@ -116,7 +103,7 @@ class PurchaseScriptRunner:
                 session_id,
                 normalized_domain,
                 self._cdp_endpoint,
-                _tail_text(str(exc), limit=700),
+                tail_text(str(exc), limit=700),
             )
             return PurchaseScriptResult(
                 status=PURCHASE_SCRIPT_FAILED,
@@ -127,7 +114,7 @@ class PurchaseScriptRunner:
                     'domain': normalized_domain,
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
-                    'cdp_resolve_error': _tail_text(str(exc), limit=900),
+                    'cdp_resolve_error': tail_text(str(exc), limit=900),
                 },
             )
 
@@ -188,18 +175,8 @@ class PurchaseScriptRunner:
 
         stdout_text = stdout_raw.decode('utf-8', errors='ignore').strip()
         stderr_text = stderr_raw.decode('utf-8', errors='ignore').strip()
-        parsed_payload: dict[str, Any] | None = None
-
-        if output_path.is_file():
-            try:
-                parsed_payload = json.loads(output_path.read_text(encoding='utf-8'))
-            except Exception:
-                parsed_payload = None
-        if parsed_payload is None and stdout_text:
-            try:
-                parsed_payload = json.loads(stdout_text)
-            except Exception:
-                parsed_payload = None
+        parsed_payload = read_script_result_payload(output_path, stdout_text)
+        stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
 
         if process.returncode != 0 and parsed_payload is None:
             return PurchaseScriptResult(
@@ -207,7 +184,7 @@ class PurchaseScriptRunner:
                 reason_code='purchase_script_process_failed',
                 message=(
                     f'Purchase-скрипт завершился с кодом {process.returncode}. '
-                    f'stderr: {_tail_text(stderr_text)}'
+                    f'stderr: {tail_text(stderr_text)}'
                 ),
                 order_id=None,
                 artifacts={
@@ -215,8 +192,7 @@ class PurchaseScriptRunner:
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
-                    'stdout_tail': _tail_text(stdout_text),
-                    'stderr_tail': _tail_text(stderr_text),
+                    **stdio_artifacts,
                 },
             )
 
@@ -231,8 +207,7 @@ class PurchaseScriptRunner:
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
-                    'stdout_tail': _tail_text(stdout_text),
-                    'stderr_tail': _tail_text(stderr_text),
+                    **stdio_artifacts,
                 },
             )
 
@@ -251,8 +226,7 @@ class PurchaseScriptRunner:
                 'lifecycle': spec.lifecycle,
                 'cdp_endpoint': self._cdp_endpoint,
                 'resolved_cdp_endpoint': resolved_endpoint,
-                'stdout_tail': _tail_text(stdout_text),
-                'stderr_tail': _tail_text(stderr_text),
+                **stdio_artifacts,
             }
         )
         return PurchaseScriptResult(
@@ -262,10 +236,3 @@ class PurchaseScriptRunner:
             order_id=order_id,
             artifacts=artifacts,
         )
-
-
-def _tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join((text or '').replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]
