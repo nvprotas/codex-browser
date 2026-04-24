@@ -48,6 +48,7 @@
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
 - Ошибка формата `storageState`: `auth_failed_payload` + `ask_user` на новый пакет.
 - Вход через SberId: `scripts first` → эвристический fallback → handoff.
+- Опубликованные магазинные auth-скрипты SberId: `litres.ru`, `brandshop.ru`.
 - Критерий auth success: редирект обратно на магазин + маркер авторизованного состояния.
 - Redirect loop guard на `id.sber.ru`: максимум 2 цикла.
 - Retry budget auth: 1 повтор с новым auth-пакетом.

@@ -46,7 +46,7 @@ cp .env.example .env
 # BUYER_TRACE_DIR=/workspace/.tmp/buyer-observability
 
 # Домены SberId allowlist и retry-бюджет auth-пакета
-# SBERID_ALLOWLIST=litres.ru,kuper.ru,samokat.ru,okko.tv
+# SBERID_ALLOWLIST=litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv
 # SBERID_AUTH_RETRY_BUDGET=1
 
 # Параметры запуска TS auth-скриптов

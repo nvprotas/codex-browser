@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from buyer.app.auth_scripts import SberIdScriptRunner
 from buyer.app.prompt_builder import build_agent_prompt
 from buyer.app.runner import _build_browser_actions_metrics
 from buyer.tools.cdp_tool import HTML_STDOUT_LIMIT, _format_html_result, parser
@@ -168,5 +169,61 @@ class LitresAuthScriptSmokeTests(unittest.TestCase):
                 'host': 'litres.ru',
                 'same': True,
                 'firstLabels': ['litres-sb-icon', 'litres-sb-img'],
+            },
+        )
+
+
+class SberIdScriptRegistryTests(unittest.TestCase):
+    def test_brandshop_is_registered_as_publish_script(self) -> None:
+        runner = SberIdScriptRunner(
+            scripts_dir='buyer/scripts',
+            cdp_endpoint='http://browser:9223',
+            timeout_sec=90,
+            trace_dir='/tmp',
+        )
+
+        registry = {item['domain']: item for item in runner.registry_snapshot()}
+        self.assertEqual(
+            registry['brandshop.ru'],
+            {
+                'domain': 'brandshop.ru',
+                'lifecycle': 'publish',
+                'script': 'sberid/brandshop.ts',
+            },
+        )
+
+
+class BrandshopAuthScriptSmokeTests(unittest.TestCase):
+    def test_brandshop_auth_helpers_when_tsx_is_installed(self) -> None:
+        buyer_root = Path(__file__).resolve().parents[1]
+        tsx = buyer_root / 'scripts' / 'node_modules' / '.bin' / 'tsx'
+        if not tsx.is_file():
+            self.skipTest('buyer/scripts/node_modules не установлен')
+
+        scripts_dir = buyer_root / 'scripts'
+        command = [
+            str(tsx),
+            '-e',
+            (
+                "import { authEntryUrl, hostFromUrl, isSameOrSubdomain, sberIdTargetLabels } from './sberid/brandshop.ts';"
+                "const labels = sberIdTargetLabels();"
+                "console.log(JSON.stringify({"
+                "entry: authEntryUrl('https://brandshop.ru/new/?foo=bar#top'),"
+                "host: hostFromUrl('https://api.brandshop.ru/xhr/checkout/sber_id/callback'),"
+                "same: isSameOrSubdomain('api.brandshop.ru', 'brandshop.ru'),"
+                "firstLabels: labels.slice(0, 2)"
+                "}));"
+            ),
+        ]
+        completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
+
+        payload = json.loads(completed.stdout)
+        self.assertEqual(
+            payload,
+            {
+                'entry': 'https://brandshop.ru/',
+                'host': 'api.brandshop.ru',
+                'same': True,
+                'firstLabels': ['brandshop-sber-social-btn', 'brandshop-role-button-sber-id'],
             },
         )
