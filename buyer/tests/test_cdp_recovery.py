@@ -277,6 +277,52 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         memory = await store.get_agent_memory(state.session_id)
         self.assertTrue(any('[PURCHASE_SCRIPT_FALLBACK]' in item['text'] for item in memory))
 
+    async def test_profile_updates_are_appended_to_user_info_file(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Дошел до шага оплаты',
+                order_id='order-900',
+                profile_updates=[
+                    'Предпочитает электронные книги',
+                    'Бюджет на книги до 1500 рублей',
+                ],
+                artifacts={},
+            ),
+        ])
+
+        with TemporaryDirectory() as tmpdir:
+            user_info_path = Path(tmpdir) / 'user-buyer-info.md'
+            store = SessionStore(max_active_sessions=1)
+            service = BuyerService(
+                store=store,
+                callback_client=callback_client,  # type: ignore[arg-type]
+                runner=runner,  # type: ignore[arg-type]
+                novnc_url='http://novnc',
+                default_callback_url='http://callback',
+                cdp_recovery_window_sec=0.2,
+                cdp_recovery_interval_ms=1,
+                sberid_allowlist=set(),
+                sberid_auth_retry_budget=1,
+                auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+                buyer_user_info_path=str(user_info_path),
+            )
+
+            state = await service.create_session(
+                task='Открой litres. Ищи книгу одиссея гомера',
+                start_url='https://www.litres.ru/',
+                callback_url='http://callback',
+                metadata={},
+                auth=None,
+            )
+            await state.task_ref
+
+            self.assertEqual(
+                user_info_path.read_text(encoding='utf-8'),
+                '- Предпочитает электронные книги\n- Бюджет на книги до 1500 рублей\n',
+            )
+
     async def test_transient_failure_after_window_finishes_as_failed(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([

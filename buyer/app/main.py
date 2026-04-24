@@ -47,6 +47,7 @@ service = BuyerService(
     auth_script_runner=auth_script_runner,
     purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
     purchase_script_runner=purchase_script_runner,
+    buyer_user_info_path=settings.buyer_user_info_path,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')

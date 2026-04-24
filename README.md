@@ -64,6 +64,7 @@ USER_BUYER_INFO_PATH=
 
 `CODEX_AUTH_JSON_PATH` и `USER_BUYER_INFO_PATH` монтируются в `buyer` только на этапе runtime и не попадают в image.
 `buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
+Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
 ```bash
 docker compose up --build

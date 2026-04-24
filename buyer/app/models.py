@@ -85,6 +85,7 @@ class AgentOutput(BaseModel):
     status: str = Field(description='needs_user_input|completed|failed')
     message: str
     order_id: str | None = None
+    profile_updates: list[str] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -27,6 +27,7 @@ from .state import (
     SessionState,
     SessionStore,
 )
+from .user_profile import append_profile_updates
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -47,6 +48,7 @@ class BuyerService:
         auth_script_runner: SberIdScriptRunner,
         purchase_script_allowlist: set[str] | None = None,
         purchase_script_runner: PurchaseScriptRunner | None = None,
+        buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -60,6 +62,7 @@ class BuyerService:
         self._auth_script_runner = auth_script_runner
         self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
         self._purchase_script_runner = purchase_script_runner
+        self._buyer_user_info_path = buyer_user_info_path
 
     async def create_session(
         self,
@@ -153,6 +156,7 @@ class BuyerService:
                     memory=memory,
                     latest_user_reply=latest_user_reply,
                 )
+                self._persist_profile_updates(session_id=session_id, step_index=step_index, updates=result.profile_updates)
                 await self._emit_event(
                     state,
                     event_type='agent_step_finished',
@@ -577,6 +581,18 @@ class BuyerService:
                 'operator_reply': operator_reply,
             },
             idempotency_suffix=f'handoff-resumed-{reason_code}',
+        )
+
+    def _persist_profile_updates(self, *, session_id: str, step_index: int, updates: list[str]) -> None:
+        appended = append_profile_updates(self._buyer_user_info_path, updates)
+        if appended <= 0:
+            return
+        logger.info(
+            'buyer_user_info_updated session_id=%s step=%s appended=%s path=%s',
+            session_id,
+            step_index,
+            appended,
+            self._buyer_user_info_path,
         )
 
     @staticmethod

@@ -65,6 +65,8 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('links', prompt)
         self.assertIn('Не печатай полный HTML в stdout', prompt)
         self.assertIn('html --path', prompt)
+        self.assertIn('profile_updates', prompt)
+        self.assertIn('только новые факты', prompt)
 
 
 class BrowserActionMetricsTests(unittest.TestCase):
