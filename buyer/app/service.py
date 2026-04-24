@@ -817,6 +817,15 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         'browser_actions_log_path',
         'browser_actions_total',
         'duration_ms',
+        'command_duration_ms',
+        'inter_command_idle_ms',
+        'browser_busy_union_ms',
+        'post_browser_idle_ms',
+        'command_errors',
+        'codex_tokens_used',
+        'codex_model',
+        'model_strategy',
+        'model_fallback_reason',
         'codex_returncode',
     )
     trace: dict[str, Any] = {}
@@ -840,6 +849,14 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
     browser_actions_tail = raw_trace.get('browser_actions_tail')
     if isinstance(browser_actions_tail, list):
         trace['browser_actions_tail'] = browser_actions_tail[-10:]
+
+    top_idle_gaps = raw_trace.get('top_idle_gaps')
+    if isinstance(top_idle_gaps, list):
+        trace['top_idle_gaps'] = top_idle_gaps[:5]
+
+    codex_attempts = raw_trace.get('codex_attempts')
+    if isinstance(codex_attempts, list):
+        trace['codex_attempts'] = codex_attempts[-3:]
 
     return trace
 

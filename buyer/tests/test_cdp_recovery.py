@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -157,6 +159,115 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('attempts=3', summary)
         self.assertIn('last_error_tail=CDP_TRANSIENT_ERROR', summary)
         self.assertTrue(all(cmd[-1] == 'url' for cmd in calls))
+
+    async def test_run_step_uses_single_model_and_records_trace_metrics(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-test',
+                buyer_model_strategy='single',
+            )
+            runner = AgentRunner(settings)
+            calls: list[tuple[Any, ...]] = []
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
+                _ = kwargs
+                calls.append(cmd)
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                output_path.write_text(
+                    json.dumps({'status': 'completed', 'message': 'ok', 'order_id': None, 'artifacts': {}}),
+                    encoding='utf-8',
+                )
+                return _FakeProcess(returncode=0, stderr_text='tokens used 123')
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                result = await runner.run_step(
+                    session_id='session-123',
+                    step_index=1,
+                    task='test-task',
+                    start_url='https://example.com',
+                    metadata={},
+                    auth=None,
+                    auth_context=None,
+                    memory=[],
+                    latest_user_reply=None,
+                )
+
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(calls), 1)
+        self.assertIn('gpt-test', calls[0])
+        trace = result.artifacts['trace']
+        self.assertEqual(trace['model_strategy'], 'single')
+        self.assertEqual(trace['codex_model'], 'gpt-test')
+        self.assertEqual(trace['codex_tokens_used'], 123)
+        self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
+
+    async def test_run_step_fast_then_strong_retries_clean_failed_attempt(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-strong',
+                buyer_model_strategy='fast_then_strong',
+                buyer_fast_codex_model='gpt-mini',
+            )
+            runner = AgentRunner(settings)
+            calls: list[tuple[Any, ...]] = []
+            reset_calls = 0
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
+                nonlocal reset_calls
+                reset_calls += 1
+                return True, 'reset_ok'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
+                _ = kwargs
+                calls.append(cmd)
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                status = 'failed' if len(calls) == 1 else 'completed'
+                output_path.write_text(
+                    json.dumps({'status': status, 'message': status, 'order_id': None, 'artifacts': {}}),
+                    encoding='utf-8',
+                )
+                return _FakeProcess(returncode=0, stderr_text=f'tokens used {len(calls) * 10}')
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                result = await runner.run_step(
+                    session_id='session-456',
+                    step_index=1,
+                    task='test-task',
+                    start_url='https://example.com',
+                    metadata={},
+                    auth=None,
+                    auth_context=None,
+                    memory=[],
+                    latest_user_reply=None,
+                )
+
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(reset_calls, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('gpt-mini', calls[0])
+        self.assertIn('gpt-strong', calls[1])
+        trace = result.artifacts['trace']
+        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
+        self.assertEqual(trace['codex_tokens_used'], 30)
 
     async def test_transient_failure_does_not_finish_session_immediately(self) -> None:
         callback_client = _RecordingCallbackClient()

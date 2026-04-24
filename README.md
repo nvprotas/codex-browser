@@ -39,6 +39,11 @@ cp .env.example .env
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
+# Опционально: стратегия модели generic buyer-flow.
+# BUYER_MODEL_STRATEGY=single
+# BUYER_FAST_CODEX_MODEL=gpt-5.4-mini
+# BUYER_STRONG_CODEX_MODEL=
+
 # Опционально: окно/интервал CDP recovery (hotfix устойчивости)
 # CDP_RECOVERY_WINDOW_SEC=20
 # CDP_RECOVERY_INTERVAL_MS=500
@@ -125,8 +130,8 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 Для анализа DOM предпочтительны структурные команды:
 
 ```bash
-python /app/tools/cdp_tool.py --endpoint http://browser:9223 snapshot --selector body --limit 120
-python /app/tools/cdp_tool.py --endpoint http://browser:9223 links --selector body --limit 80
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 snapshot --selector body --limit 60
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 links --selector body --limit 50
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 exists --selector '[data-testid="book__addToCartButton"]'
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[href*="/book/"]' --name href
 ```
@@ -149,7 +154,7 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 
 - `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
-- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `html_commands`, `html_bytes`, `command_breakdown`.
+- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, модель/стратегия, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `browser_busy_union_ms`, `post_browser_idle_ms`, `command_errors`, `codex_tokens_used`, `html_commands`, `html_bytes`, `command_breakdown`.
 - `knowledge-analysis-prompt.txt` — отдельный prompt post-session analyzer после финального callback.
 - `knowledge-analysis.json` — внутренний артефакт с draft-кандидатами знаний (`navigation_hints`, `pitfalls`, `site_overview_plain`, `playbook_candidate`).
 - `knowledge-analysis-trace.json` — статус выполнения analyzer, команда, stdout/stderr tail и ссылка на артефакт.

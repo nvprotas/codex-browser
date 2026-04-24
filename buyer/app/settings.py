@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     codex_bin: str = 'codex'
     codex_model: str | None = None
+    buyer_model_strategy: Literal['single', 'fast_then_strong'] = 'single'
+    buyer_fast_codex_model: str = 'gpt-5.4-mini'
+    buyer_strong_codex_model: str | None = None
     codex_timeout_sec: int = 1800
     codex_workdir: str = '/workspace'
     codex_skip_git_repo_check: bool = True

@@ -16,6 +16,8 @@ from playwright.async_api import async_playwright
 
 HTML_STDOUT_LIMIT = 20_000
 TEXT_STDOUT_LIMIT = 4_000
+LINKS_DEFAULT_LIMIT = 50
+SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
 
 
@@ -58,11 +60,11 @@ def parser() -> argparse.ArgumentParser:
 
     links = sub.add_parser('links')
     links.add_argument('--selector', default='body')
-    links.add_argument('--limit', type=int, default=80)
+    links.add_argument('--limit', type=int, default=LINKS_DEFAULT_LIMIT)
 
     snapshot = sub.add_parser('snapshot')
     snapshot.add_argument('--selector', default='body')
-    snapshot.add_argument('--limit', type=int, default=120)
+    snapshot.add_argument('--limit', type=int, default=SNAPSHOT_DEFAULT_LIMIT)
 
     title = sub.add_parser('title')
 
@@ -412,7 +414,7 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
 
 
 async def _collect_links(page: Any, args: argparse.Namespace) -> dict[str, Any]:
-    limit = _normalize_limit(args.limit, default=80, maximum=300)
+    limit = _normalize_limit(args.limit, default=LINKS_DEFAULT_LIMIT, maximum=300)
     links = await page.locator(args.selector).locator('a').evaluate_all(
         """(nodes, limit) => {
             const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -456,7 +458,7 @@ async def _collect_text(page: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, Any]:
-    limit = _normalize_limit(args.limit, default=120, maximum=500)
+    limit = _normalize_limit(args.limit, default=SNAPSHOT_DEFAULT_LIMIT, maximum=500)
     items = await page.locator(args.selector).evaluate(
         """(root, options) => {
             const limit = options.limit;

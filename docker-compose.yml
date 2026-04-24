@@ -34,6 +34,9 @@ services:
       CDP_RECOVERY_INTERVAL_MS: ${CDP_RECOVERY_INTERVAL_MS:-500}
       CODEX_BIN: codex
       CODEX_MODEL: ${CODEX_MODEL:-gpt-5.4}
+      BUYER_MODEL_STRATEGY: ${BUYER_MODEL_STRATEGY:-single}
+      BUYER_FAST_CODEX_MODEL: ${BUYER_FAST_CODEX_MODEL:-gpt-5.4-mini}
+      BUYER_STRONG_CODEX_MODEL: ${BUYER_STRONG_CODEX_MODEL:-}
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
       CODEX_WORKDIR: /workspace
       BUYER_TRACE_DIR: ${BUYER_TRACE_DIR:-/workspace/.tmp/buyer-observability}

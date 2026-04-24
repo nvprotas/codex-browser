@@ -8,8 +8,22 @@ from tempfile import TemporaryDirectory
 
 from buyer.app.auth_scripts import SberIdScriptRunner
 from buyer.app.prompt_builder import build_agent_prompt
-from buyer.app.runner import _build_browser_actions_metrics
-from buyer.tools.cdp_tool import HTML_STDOUT_LIMIT, TEXT_STDOUT_LIMIT, _format_html_result, _format_text_result, parser
+from buyer.app.runner import (
+    _browser_actions_have_mutating_commands,
+    _build_browser_actions_metrics,
+    _build_model_attempt_specs,
+    _extract_codex_tokens_used,
+)
+from buyer.app.settings import Settings
+from buyer.tools.cdp_tool import (
+    HTML_STDOUT_LIMIT,
+    LINKS_DEFAULT_LIMIT,
+    SNAPSHOT_DEFAULT_LIMIT,
+    TEXT_STDOUT_LIMIT,
+    _format_html_result,
+    _format_text_result,
+    parser,
+)
 
 
 class CdpToolOutputTests(unittest.TestCase):
@@ -61,7 +75,9 @@ class CdpToolOutputTests(unittest.TestCase):
         exists = cli.parse_args(['exists', '--selector', '[data-testid="x"]'])
         attr = cli.parse_args(['attr', '--selector', 'a', '--name', 'href'])
         links = cli.parse_args(['links', '--selector', 'main', '--limit', '12'])
+        links_default = cli.parse_args(['links'])
         snapshot = cli.parse_args(['snapshot', '--selector', 'body', '--limit', '20'])
+        snapshot_default = cli.parse_args(['snapshot'])
         html = cli.parse_args(['html', '--full'])
 
         self.assertEqual(text.command, 'text')
@@ -71,7 +87,9 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertEqual(exists.command, 'exists')
         self.assertEqual(attr.name, 'href')
         self.assertEqual(links.limit, 12)
+        self.assertEqual(links_default.limit, LINKS_DEFAULT_LIMIT)
         self.assertEqual(snapshot.limit, 20)
+        self.assertEqual(snapshot_default.limit, SNAPSHOT_DEFAULT_LIMIT)
         self.assertTrue(html.full)
 
     def test_prompt_discourages_full_html_stdout(self) -> None:
@@ -89,10 +107,13 @@ class CdpToolOutputTests(unittest.TestCase):
 
         self.assertIn('snapshot', prompt)
         self.assertIn('links', prompt)
+        self.assertIn('snapshot --limit 60', prompt)
+        self.assertIn('links --limit 50', prompt)
+        self.assertIn('--timeout-ms 3000', prompt)
         self.assertIn('`text` используй только точечно', prompt)
         self.assertIn('`text --selector body` допускается только как fallback и с лимитом', prompt)
         self.assertIn('Не печатай полный HTML в stdout', prompt)
-        self.assertIn('html --path', prompt)
+        self.assertIn('`html --path <file>` и `screenshot` используй только как fallback', prompt)
 
 
 class BrowserActionMetricsTests(unittest.TestCase):
@@ -128,16 +149,112 @@ class BrowserActionMetricsTests(unittest.TestCase):
                     'duration_ms': 300,
                     'result': {'html_size': 271066},
                 },
+                {
+                    'ts': '2026-04-23T23:00:05.500000+00:00',
+                    'event': 'browser_command_started',
+                    'command': 'snapshot',
+                    'details': {'selector': 'body'},
+                },
+                {
+                    'ts': '2026-04-23T23:00:06.000000+00:00',
+                    'event': 'browser_command_failed',
+                    'command': 'snapshot',
+                    'duration_ms': 500,
+                    'details': {'selector': 'body'},
+                    'error': 'CDP_COMMAND_ERROR: timeout',
+                },
             ]
             path.write_text('\n'.join(json.dumps(item) for item in records), encoding='utf-8')
 
             metrics = _build_browser_actions_metrics(path)
 
-        self.assertEqual(metrics['command_duration_ms'], 1800)
-        self.assertEqual(metrics['inter_command_idle_ms'], 3500)
+        self.assertEqual(metrics['command_duration_ms'], 2300)
+        self.assertEqual(metrics['inter_command_idle_ms'], 3700)
+        self.assertEqual(metrics['browser_busy_union_ms'], 2300)
         self.assertEqual(metrics['html_commands'], 1)
         self.assertEqual(metrics['html_bytes'], 271066)
         self.assertEqual(metrics['command_breakdown']['html']['html_bytes'], 271066)
+        self.assertEqual(metrics['command_breakdown']['snapshot']['errors'], 1)
+        self.assertEqual(metrics['command_errors'], 1)
+        self.assertEqual(metrics['top_idle_gaps'][0]['duration_ms'], 3500)
+
+    def test_trace_metrics_use_union_for_overlapping_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'actions.jsonl'
+            records = [
+                {'ts': '2026-04-23T23:00:00.000000+00:00', 'event': 'browser_command_started', 'command': 'links'},
+                {'ts': '2026-04-23T23:00:00.100000+00:00', 'event': 'browser_command_started', 'command': 'snapshot'},
+                {'ts': '2026-04-23T23:00:00.700000+00:00', 'event': 'browser_command_finished', 'command': 'links', 'ok': True, 'duration_ms': 700},
+                {'ts': '2026-04-23T23:00:00.900000+00:00', 'event': 'browser_command_finished', 'command': 'snapshot', 'ok': True, 'duration_ms': 800},
+            ]
+            path.write_text('\n'.join(json.dumps(item) for item in records), encoding='utf-8')
+
+            metrics = _build_browser_actions_metrics(path)
+
+        self.assertEqual(metrics['command_duration_ms'], 1500)
+        self.assertEqual(metrics['browser_busy_union_ms'], 900)
+        self.assertEqual(metrics['inter_command_idle_ms'], 0)
+
+    def test_model_attempts_default_to_single_legacy_model(self) -> None:
+        attempts = _build_model_attempt_specs(Settings(codex_model='gpt-5.4', buyer_model_strategy='single'))
+
+        self.assertEqual([(item.role, item.model) for item in attempts], [('single', 'gpt-5.4')])
+
+    def test_codex_tokens_used_sums_multiple_attempts(self) -> None:
+        tokens = _extract_codex_tokens_used(stdout_text='tokens used 10', stderr_text='tokens used 1,250')
+
+        self.assertEqual(tokens, 1260)
+
+    def test_model_attempts_use_fast_then_strong_fallback(self) -> None:
+        attempts = _build_model_attempt_specs(
+            Settings(
+                codex_model='gpt-5.4',
+                buyer_model_strategy='fast_then_strong',
+                buyer_fast_codex_model='gpt-5.4-mini',
+                buyer_strong_codex_model=None,
+            )
+        )
+
+        self.assertEqual(
+            [(item.role, item.model) for item in attempts],
+            [('fast', 'gpt-5.4-mini'), ('strong', 'gpt-5.4')],
+        )
+
+    def test_model_attempts_fallback_to_default_strong_model(self) -> None:
+        attempts = _build_model_attempt_specs(
+            Settings(
+                codex_model=None,
+                buyer_model_strategy='fast_then_strong',
+                buyer_fast_codex_model='gpt-5.4-mini',
+                buyer_strong_codex_model=None,
+            )
+        )
+
+        self.assertEqual(attempts[-1].model, 'gpt-5.4')
+
+    def test_mutating_action_detector_blocks_dirty_retry(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'actions.jsonl'
+            records = [
+                {'event': 'browser_command_started', 'command': 'goto'},
+                {'event': 'browser_command_finished', 'command': 'snapshot', 'ok': True},
+                {'event': 'browser_command_started', 'command': 'click'},
+            ]
+            path.write_text('\n'.join(json.dumps(item) for item in records), encoding='utf-8')
+
+            self.assertTrue(_browser_actions_have_mutating_commands(path))
+
+    def test_mutating_action_detector_allows_read_only_retry(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'actions.jsonl'
+            records = [
+                {'event': 'browser_command_started', 'command': 'goto'},
+                {'event': 'browser_command_finished', 'command': 'html', 'ok': True},
+                {'event': 'browser_command_finished', 'command': 'snapshot', 'ok': True},
+            ]
+            path.write_text('\n'.join(json.dumps(item) for item in records), encoding='utf-8')
+
+            self.assertFalse(_browser_actions_have_mutating_commands(path))
 
 
 class LitresPurchaseScriptSmokeTests(unittest.TestCase):

@@ -31,9 +31,11 @@ def build_agent_prompt(
 2. Для управления страницей используй CLI-утилиту:
    python /app/tools/cdp_tool.py --endpoint {browser_cdp_endpoint} <command> ...
    Доступные команды: goto, click, fill, press, wait, text, title, url, exists, attr, links, snapshot, screenshot, html.
-   Для анализа страницы сначала используй структурные команды `snapshot`, `links`, `exists`, `attr`.
+   Для анализа страницы сначала используй структурные команды `snapshot --limit 60`, `links --limit 50`, `exists`, `attr`.
+   Для пробных селекторов, где ты не уверен в наличии элемента, используй короткий таймаут: `--timeout-ms 3000`.
    `text` используй только точечно для конкретных селекторов; `text --selector body` допускается только как fallback и с лимитом.
    Не печатай полный HTML в stdout: `html` без `--path` возвращает только короткое превью.
+   `html --path <file>` и `screenshot` используй только как fallback после структурных команд, а не как обычный шаг выбора товара.
    Полный HTML используй только как fallback через `html --path <file>`, затем ищи по файлу локальными командами.
    Если полный HTML действительно нужен именно в stdout, используй явный escape hatch `html --full`.
    Не делай выводов о недоступности CDP по `curl`/`/json/version`/DNS-проверкам.
