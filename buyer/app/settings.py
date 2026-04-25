@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     purchase_script_allowlist: str = 'litres.ru'
     purchase_script_timeout_sec: int = Field(default=120, ge=5)
 
+    state_backend: Literal['memory', 'postgres'] = 'memory'
+    database_url: str = 'postgresql://buyer:buyer@postgres:5432/buyer'
+    postgres_pool_min_size: int = Field(default=1, ge=1)
+    postgres_pool_max_size: int = Field(default=5, ge=1)
+
     max_active_sessions: int = 1
 
     status_ttl_sec: int = Field(default=86400, ge=60)

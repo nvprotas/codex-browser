@@ -24,6 +24,29 @@
 - `Effort`: 1-5, где 5 — крупная архитектурная работа.
 - `V/E`: грубый показатель очередности. Фундаментальные задачи могут стоять выше, даже если их ratio ниже.
 
+## Связь С Linear
+
+Задачи roadmap ведутся в Linear-проекте `Ratatouille`, команда `Monaco`. При изменении roadmap нужно синхронно обновлять соответствующие Linear issue: заголовок, описание, статус, зависимости, оценку и приоритет.
+
+| Roadmap | Linear | Название |
+| --- | --- | --- |
+| 1 | [MON-12](https://linear.app/monaco-dev/issue/MON-12/buyer-phase-1-persistent-state-na-postgres-dlya-zadach-sessij-sobytij) | Persistent state: Postgres для задач, сессий, событий и артефактов |
+| 2 | [MON-13](https://linear.app/monaco-dev/issue/MON-13/buyer-phase-1-redis-locks-i-runtime-markers) | Redis locks и runtime markers |
+| 2.1 | [MON-27](https://linear.app/monaco-dev/issue/MON-27/buyer-phase-1-issledovanie-persistence-brauzernogo-sostoyaniya-mezhdu) | Исследование persistence браузерного состояния между рестартами |
+| 3 | [MON-14](https://linear.app/monaco-dev/issue/MON-14/buyer-phase-1-handoff-fsm) | Handoff FSM |
+| 4 | [MON-15](https://linear.app/monaco-dev/issue/MON-15/buyer-phase-1-api-upravleniya-lifecycle-sessii) | API управления lifecycle: pause, resume, abort, operator command |
+| 5 | [MON-16](https://linear.app/monaco-dev/issue/MON-16/buyer-phase-1-artifact-i-trace-manifest) | Artifact и trace manifest |
+| 6 | [MON-17](https://linear.app/monaco-dev/issue/MON-17/buyer-phase-2-reviewactivation-flow-dlya-knowledge-analysis) | Review/activation flow для knowledge-analysis |
+| 7 | [MON-18](https://linear.app/monaco-dev/issue/MON-18/buyer-phase-2-lifecycle-dlya-scriptplaybook-candidates) | Lifecycle для script/playbook candidates |
+| 8 | [MON-20](https://linear.app/monaco-dev/issue/MON-20/buyer-phase-2-minimalnyj-verifier-dlya-payment-ready-i-purchase-script) | Минимальный verifier для payment_ready и purchase-script result |
+| 9 | [MON-21](https://linear.app/monaco-dev/issue/MON-21/buyer-phase-2-formalnaya-model-task-step-attempt) | Формальная модель Task -> Step -> Attempt |
+| 10 | [MON-19](https://linear.app/monaco-dev/issue/MON-19/buyer-phase-2-buyer-worker-separation) | Buyer worker separation |
+| 11 | [MON-22](https://linear.app/monaco-dev/issue/MON-22/buyer-phase-3-policy-layer-dlya-opasnyh-dejstvij) | Policy layer для опасных действий |
+| 12 | [MON-23](https://linear.app/monaco-dev/issue/MON-23/buyer-phase-3-site-profiles) | Site profiles |
+| 13 | [MON-24](https://linear.app/monaco-dev/issue/MON-24/buyer-phase-3-strategy-ranking-i-ab-metrics) | Strategy ranking и A/B metrics |
+| 14 | [MON-25](https://linear.app/monaco-dev/issue/MON-25/buyer-phase-3-whitelist-dsl-vmesto-svobodnogo-generic-browser-flow) | Whitelist DSL вместо свободного generic browser flow |
+| 15 | [MON-26](https://linear.app/monaco-dev/issue/MON-26/buyer-phase-3-vision-challenge) | Vision challenge |
+
 ## Roadmap По Фазам
 
 ### Phase 1 — Надежный Runtime И Контракт Для Агентов
@@ -57,10 +80,10 @@
 
 #### 2. Redis locks и runtime markers
 
-**Value:** 4  
-**Effort:** 3  
-**V/E:** 1.33  
-**Статус:** planned  
+**Value:** 4
+**Effort:** 3
+**V/E:** 1.33
+**Статус:** planned
 **Зависимости:** задача 1.
 
 **Что сделать:**
@@ -77,6 +100,26 @@
 **Value для `openclaw`:**
 
 Вызывающий агент сможет запускать несколько задач без гонок и неоднозначных статусов. Redis также даст надежную основу для будущего worker-пула.
+
+#### 2.1. Исследование persistence браузерного состояния между рестартами
+
+**Value:** 4
+**Effort:** 3
+**V/E:** 1.33
+**Статус:** planned
+**Зависимости:** задачи 1-2.
+
+**Что сделать:**
+
+- Проанализировать, можно ли безопасно сохранять Playwright browser context/storage между рестартами `buyer` и `browser`.
+- Разделить техническое состояние браузера и чувствительные auth-данные: cookies, tokens, `storageState`, localStorage.
+- Оценить варианты шифрования, TTL, привязки к сессии и ручного сброса состояния.
+- Зафиксировать, какие части browser state можно восстанавливать автоматически, а какие требуют повторного auth/handoff.
+- Подготовить threat model и критерии включения в production.
+
+**Value для `openclaw`:**
+
+Если сохранение браузерного состояния окажется безопасным, `openclaw` сможет продолжать часть нестабильных сценариев после рестарта без повторного прохождения логина и выбора контекста магазина. До отдельного решения текущая Postgres-задача не сохраняет browser cookies/tokens/storageState.
 
 #### 3. Handoff FSM
 
