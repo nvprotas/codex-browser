@@ -26,7 +26,7 @@ def registry_snapshot(registry: dict[str, ScriptSpec]) -> list[dict[str, str]]:
     ]
 
 
-def read_script_result_payload(output_path: Path, stdout_text: str) -> dict[str, Any] | None:
+def read_script_result_payload(output_path: Path, stdout_text: str) -> Any | None:
     for raw_payload in (_read_text_if_file(output_path), stdout_text):
         if not raw_payload:
             continue
@@ -34,8 +34,7 @@ def read_script_result_payload(output_path: Path, stdout_text: str) -> dict[str,
             parsed = json.loads(raw_payload)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict):
-            return parsed
+        return parsed
     return None
 
 
@@ -49,5 +48,5 @@ def script_stdio_artifacts(stdout_text: str, stderr_text: str) -> dict[str, str]
 def _read_text_if_file(path: Path) -> str | None:
     try:
         return path.read_text(encoding='utf-8')
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None

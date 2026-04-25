@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .models import EventEnvelope, SessionStatus, TaskAuthPayload
@@ -53,9 +53,15 @@ class ReplyValidationError(RuntimeError):
 class SessionStore:
     _TERMINAL_STATUSES = {SessionStatus.COMPLETED, SessionStatus.FAILED}
 
-    def __init__(self, max_active_sessions: int = 1, status_ttl_sec: int | None = None) -> None:
+    def __init__(
+        self,
+        max_active_sessions: int = 1,
+        status_ttl_sec: int | None = None,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> None:
         self._max_active_sessions = max_active_sessions
         self._status_ttl_sec = status_ttl_sec
+        self._clock = clock
         self._lock = asyncio.Lock()
         self._sessions: dict[str, SessionState] = {}
 
@@ -90,6 +96,9 @@ class SessionStore:
                 auth=auth,
                 status=SessionStatus.CREATED,
             )
+            now = self._clock()
+            state.created_at = now
+            state.updated_at = now
             self._sessions[session_id] = state
             return state
 
@@ -99,12 +108,11 @@ class SessionStore:
             if state is None:
                 raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
             state.auth = auth
-            state.touch()
+            self._touch_locked(state)
             return state
 
     async def get(self, session_id: str) -> SessionState:
         async with self._lock:
-            self._prune_expired_locked()
             state = self._sessions.get(session_id)
             if state is None:
                 raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
@@ -118,7 +126,7 @@ class SessionStore:
             state.status = status
             if error is not None:
                 state.last_error = error
-            state.touch()
+            self._touch_locked(state)
             return state
 
     async def set_waiting_question(self, session_id: str, question: str, reply_id: str) -> SessionState:
@@ -131,7 +139,7 @@ class SessionStore:
             state.pending_reply_text = None
             state.wake_event.clear()
             state.status = SessionStatus.WAITING_USER
-            state.touch()
+            self._touch_locked(state)
             return state
 
     async def apply_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
@@ -147,7 +155,7 @@ class SessionStore:
             state.waiting_reply_id = None
             state.waiting_question = None
             state.status = SessionStatus.RUNNING
-            state.touch()
+            self._touch_locked(state)
             state.wake_event.set()
             return state
 
@@ -160,7 +168,7 @@ class SessionStore:
                 raise ReplyValidationError('Ответ пользователя отсутствует.')
             value = state.pending_reply_text
             state.pending_reply_text = None
-            state.touch()
+            self._touch_locked(state)
             return value
 
     async def append_event(self, session_id: str, event: EventEnvelope) -> SessionState:
@@ -169,7 +177,7 @@ class SessionStore:
             if state is None:
                 raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
             state.events.append(event)
-            state.touch()
+            self._touch_locked(state)
             return state
 
     async def add_agent_memory(self, session_id: str, role: str, text: str) -> SessionState:
@@ -178,7 +186,7 @@ class SessionStore:
             if state is None:
                 raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
             state.agent_memory.append({'role': role, 'text': text})
-            state.touch()
+            self._touch_locked(state)
             return state
 
     async def get_agent_memory(self, session_id: str) -> list[dict[str, str]]:
@@ -197,7 +205,7 @@ class SessionStore:
         if self._status_ttl_sec is None:
             return
 
-        deadline = utcnow().timestamp() - max(self._status_ttl_sec, 0)
+        deadline = self._clock().timestamp() - max(self._status_ttl_sec, 0)
         expired = [
             session_id
             for session_id, state in self._sessions.items()
@@ -205,3 +213,6 @@ class SessionStore:
         ]
         for session_id in expired:
             self._sessions.pop(session_id, None)
+
+    def _touch_locked(self, state: SessionState) -> None:
+        state.updated_at = self._clock()

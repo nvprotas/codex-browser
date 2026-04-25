@@ -685,7 +685,6 @@ def _read_browser_actions_log(path: Path, *, limit: int) -> tuple[int, list[dict
         return 0, [], _empty_browser_actions_metrics()
 
     total = 0
-    items: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     try:
         for raw_line in path.read_text(encoding='utf-8').splitlines():
@@ -698,16 +697,13 @@ def _read_browser_actions_log(path: Path, *, limit: int) -> tuple[int, list[dict
             except json.JSONDecodeError:
                 parsed = {'event': 'json_parse_error', 'line_tail': _tail_text(line, limit=500)}
             if isinstance(parsed, dict):
-                items.append(parsed)
                 records.append(parsed)
             else:
-                item = {'event': 'json_non_object', 'value': parsed}
-                items.append(item)
-                records.append(item)
+                records.append({'event': 'json_non_object', 'value': parsed})
     except OSError:
         return 0, [], _empty_browser_actions_metrics()
 
-    return total, items[-max(limit, 1) :], _build_browser_actions_metrics_from_records(records)
+    return total, records[-max(limit, 1) :], _build_browser_actions_metrics_from_records(records)
 
 
 def _empty_browser_actions_metrics() -> dict[str, Any]:
