@@ -334,7 +334,7 @@ async def _sync_session_related(conn: asyncpg.Connection, state: SessionState) -
                     event.event_type,
                     event.occurred_at,
                     event.idempotency_key,
-                    json.dumps(event.payload, ensure_ascii=False),
+                    json.dumps(_serialize_event_payload_for_storage(event.payload), ensure_ascii=False),
                     existing_delivery.get(event.event_id, {}).get('delivery_status', 'pending'),
                     existing_delivery.get(event.event_id, {}).get('delivery_error'),
                 )
@@ -593,28 +593,76 @@ def _ensure_json_safe(value: dict[str, Any]) -> None:
 
 
 _AUTH_CONTEXT_BLOCKED: frozenset[str] = frozenset({
-    'storagestate', 'storagestatepath', 'cookies', 'cookie', 'origins', 'localstorage', 'token', 'tokens',
+    'storagestate',
+    'storagestatepath',
+    'cookies',
+    'cookie',
+    'origins',
+    'localstorage',
+    'authorization',
 })
-_PERSISTENT_METADATA_BLOCKED: frozenset[str] = _AUTH_CONTEXT_BLOCKED | {'authorization'}
+_AUTH_CONTEXT_MARKERS: tuple[str, ...] = (
+    'token',
+    'secret',
+    'password',
+    'apikey',
+    'authorizationcode',
+)
+_PERSISTENT_METADATA_BLOCKED: frozenset[str] = _AUTH_CONTEXT_BLOCKED | {
+    'stdout',
+    'stdouttail',
+    'stderr',
+    'stderrtail',
+    'promptpreview',
+}
+_PERSISTENT_METADATA_MARKERS: tuple[str, ...] = _AUTH_CONTEXT_MARKERS + ('stdout', 'stderr')
 
 
-def _sanitize(value: Any, *, blocked_keys: frozenset[str], depth: int = 0) -> Any:
+def _normalized_sensitive_key(key: Any) -> str:
+    return str(key).replace('_', '').replace('-', '').replace(' ', '').lower()
+
+
+def _is_blocked_key(key: Any, *, blocked_keys: frozenset[str], blocked_markers: tuple[str, ...]) -> bool:
+    compact = _normalized_sensitive_key(key)
+    return compact in blocked_keys or any(marker in compact for marker in blocked_markers)
+
+
+def _sanitize(
+    value: Any,
+    *,
+    blocked_keys: frozenset[str],
+    blocked_markers: tuple[str, ...],
+    depth: int = 0,
+) -> Any:
     if depth > 8:
         return '[truncated]'
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
-            if str(key).replace('_', '').replace('-', '').lower() in blocked_keys:
+            if _is_blocked_key(key, blocked_keys=blocked_keys, blocked_markers=blocked_markers):
                 continue
-            sanitized[str(key)] = _sanitize(item, blocked_keys=blocked_keys, depth=depth + 1)
+            sanitized[str(key)] = _sanitize(
+                item,
+                blocked_keys=blocked_keys,
+                blocked_markers=blocked_markers,
+                depth=depth + 1,
+            )
         return sanitized
     if isinstance(value, list):
-        return [_sanitize(item, blocked_keys=blocked_keys, depth=depth + 1) for item in value[:100]]
+        return [
+            _sanitize(item, blocked_keys=blocked_keys, blocked_markers=blocked_markers, depth=depth + 1)
+            for item in value[:100]
+        ]
     return value
 
 
 def _sanitize_auth_context(value: Any, *, depth: int = 0) -> Any:
-    return _sanitize(value, blocked_keys=_AUTH_CONTEXT_BLOCKED, depth=depth)
+    return _sanitize(
+        value,
+        blocked_keys=_AUTH_CONTEXT_BLOCKED,
+        blocked_markers=_AUTH_CONTEXT_MARKERS,
+        depth=depth,
+    )
 
 
 def _build_artifact_refs(*, session_id: str, artifacts: list[dict[str, Any]]) -> list[ArtifactRef]:
@@ -669,7 +717,17 @@ def _iter_artifact_paths(value: Any, *, depth: int = 0, key: str = 'artifact') -
 
 
 def _sanitize_persistent_metadata(value: Any, *, depth: int = 0) -> Any:
-    return _sanitize(value, blocked_keys=_PERSISTENT_METADATA_BLOCKED, depth=depth)
+    return _sanitize(
+        value,
+        blocked_keys=_PERSISTENT_METADATA_BLOCKED,
+        blocked_markers=_PERSISTENT_METADATA_MARKERS,
+        depth=depth,
+    )
+
+
+def _serialize_event_payload_for_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _sanitize_persistent_metadata(payload)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _str_or_none(value: Any) -> str | None:

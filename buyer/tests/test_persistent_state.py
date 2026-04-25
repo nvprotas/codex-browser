@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from datetime import datetime, timezone
 
 from buyer.app.models import EventEnvelope, SessionStatus, TaskAuthPayload
-from buyer.app.persistence import SCHEMA_MIGRATIONS, PostgresSessionRepository, _build_artifact_refs, _sanitize_auth_context
+from buyer.app.persistence import (
+    SCHEMA_MIGRATIONS,
+    PostgresSessionRepository,
+    _build_artifact_refs,
+    _sanitize_auth_context,
+    _sanitize_persistent_metadata,
+)
 from buyer.app.state import InMemorySessionRepository, ReplyValidationError, SessionStore
 
 
@@ -120,6 +127,104 @@ class PersistentStateStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('secret', dumped)
         self.assertNotIn('auth-storage-attempt-01', dumped)
         self.assertNotIn('storageState', dumped)
+
+    async def test_event_payload_for_storage_redacts_sensitive_auth_data(self) -> None:
+        from buyer.app.persistence import _serialize_event_payload_for_storage
+
+        payload = {
+            'status': 'completed',
+            'message': 'ok',
+            'order_id': 'order-123',
+            'artifacts': {
+                'trace': {'trace_file': '/tmp/step-trace.json'},
+                'stdout_tail': 'stdout-tail-secret',
+                'stderr_tail': 'stderr-tail-secret',
+                'auth': {
+                    'provider': 'sberid',
+                    'storageState': {
+                        'cookies': [{'name': 'sid', 'value': 'cookie-secret'}],
+                        'origins': [{'origin': 'https://example.com', 'localStorage': [{'name': 'token', 'value': 'ls-secret'}]}],
+                    },
+                    'storage_state_path': '/tmp/auth-storage-attempt-01.json',
+                    'accessToken': 'access-secret',
+                    'refresh_token': 'refresh-secret',
+                },
+                'authorization': 'Bearer auth-secret',
+            },
+        }
+
+        stored = _serialize_event_payload_for_storage(payload)
+        dumped = json.dumps(stored, ensure_ascii=False)
+
+        self.assertIn('/tmp/step-trace.json', dumped)
+        self.assertIn('order-123', dumped)
+        for forbidden in (
+            'cookie-secret',
+            'ls-secret',
+            'auth-storage-attempt-01',
+            'access-secret',
+            'refresh-secret',
+            'auth-secret',
+            'stdout-tail-secret',
+            'stderr-tail-secret',
+            'storageState',
+        ):
+            self.assertNotIn(forbidden, dumped)
+
+    async def test_persistent_metadata_redacts_token_like_key_variants(self) -> None:
+        metadata = _sanitize_persistent_metadata(
+            {
+                'accessToken': 'access-secret',
+                'refresh_token': 'refresh-secret',
+                'idToken': 'id-secret',
+                'session-token': 'session-secret',
+                'api_key': 'api-secret',
+                'clientSecret': 'client-secret',
+                'password': 'password-secret',
+                'safe_path': '/tmp/trace.json',
+                'nested': {'authorization_code': 'auth-code-secret', 'safe': 'public'},
+            }
+        )
+        dumped = json.dumps(metadata, ensure_ascii=False)
+
+        self.assertIn('/tmp/trace.json', dumped)
+        self.assertIn('public', dumped)
+        for forbidden in (
+            'access-secret',
+            'refresh-secret',
+            'id-secret',
+            'session-secret',
+            'api-secret',
+            'client-secret',
+            'password-secret',
+            'auth-code-secret',
+        ):
+            self.assertNotIn(forbidden, dumped)
+
+    async def test_restarted_store_ignores_stale_active_sessions_without_runtime_task(self) -> None:
+        repository = InMemorySessionRepository()
+        first = SessionStore(repository=repository, max_active_sessions=1)
+        created = await first.create_session(
+            task='Первая задача',
+            start_url='https://example.com/first',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await first.set_status(created.session_id, SessionStatus.RUNNING)
+
+        restarted = SessionStore(repository=repository, max_active_sessions=1)
+        next_state = await restarted.create_session(
+            task='Вторая задача после рестарта',
+            start_url='https://example.com/second',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+
+        self.assertNotEqual(created.session_id, next_state.session_id)
 
     @unittest.skipUnless(os.environ.get('BUYER_TEST_DATABASE_URL'), 'BUYER_TEST_DATABASE_URL не задан')
     async def test_postgres_repository_restores_state_between_store_instances(self) -> None:

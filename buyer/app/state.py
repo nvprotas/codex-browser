@@ -150,6 +150,7 @@ class SessionStore:
         self._wake_events: dict[str, asyncio.Event] = {}
         self._task_refs: dict[str, asyncio.Task[None]] = {}
         self._runtime_auth: dict[str, TaskAuthPayload] = {}
+        self._runtime_sessions: set[str] = set()
 
     async def initialize(self) -> None:
         await self._repository.initialize()
@@ -159,6 +160,7 @@ class SessionStore:
 
     def set_task_ref(self, session_id: str, task_ref: asyncio.Task[None]) -> None:
         self._task_refs[session_id] = task_ref
+        self._runtime_sessions.add(session_id)
 
     async def set_auth_context(self, session_id: str, context: dict[str, Any]) -> None:
         async with self._lock:
@@ -188,7 +190,7 @@ class SessionStore:
             active = [
                 session
                 for session in sessions
-                if session.status in {SessionStatus.CREATED, SessionStatus.RUNNING, SessionStatus.WAITING_USER}
+                if self._is_active_in_current_runtime(session)
             ]
             if len(active) >= self._max_active_sessions:
                 raise SessionConflictError('Доступен только один активный сценарий одновременно.')
@@ -210,6 +212,7 @@ class SessionStore:
             if auth is not None:
                 self._runtime_auth[session_id] = auth
             await self._repository.create_session(state)
+            self._runtime_sessions.add(session_id)
             return self._attach_runtime(state)
 
     async def set_auth(self, session_id: str, auth: TaskAuthPayload | None) -> SessionState:
@@ -237,6 +240,8 @@ class SessionStore:
                 state.last_error = error
             self._touch_locked(state)
             await self._repository.update_session(state)
+            if status in self._TERMINAL_STATUSES:
+                self._runtime_sessions.discard(session_id)
             return self._attach_runtime(state)
 
     async def set_waiting_question(self, session_id: str, question: str, reply_id: str) -> SessionState:
@@ -327,8 +332,14 @@ class SessionStore:
                 self._wake_events.pop(session_id, None)
                 self._task_refs.pop(session_id, None)
                 self._runtime_auth.pop(session_id, None)
+                self._runtime_sessions.discard(session_id)
             sessions = [s for s in sessions if s.session_id not in expired_set]
         return sessions
+
+    def _is_active_in_current_runtime(self, state: SessionState) -> bool:
+        if state.status not in {SessionStatus.CREATED, SessionStatus.RUNNING, SessionStatus.WAITING_USER}:
+            return False
+        return state.session_id in self._runtime_sessions
 
     def _touch_locked(self, state: SessionState) -> None:
         state.updated_at = self._clock()
