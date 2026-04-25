@@ -55,11 +55,47 @@ class PersistentStateStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event.event_type for event in restored.events], ['session_started'])
         self.assertEqual(await second.get_agent_memory(created.session_id), [{'role': 'user', 'text': 'Купить книгу'}])
 
-        replied = await second.apply_reply(created.session_id, 'reply-1', 'Одиссея')
+    async def test_active_runtime_store_accepts_waiting_reply(self) -> None:
+        repository = InMemorySessionRepository()
+        store = SessionStore(repository=repository, max_active_sessions=1)
+        created = await store.create_session(
+            task='Купить книгу',
+            start_url='https://www.litres.ru/',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await store.set_waiting_question(created.session_id, 'Какую книгу искать?', 'reply-1')
+
+        replied = await store.apply_reply(created.session_id, 'reply-1', 'Одиссея')
         self.assertEqual(replied.status, SessionStatus.RUNNING)
-        self.assertEqual(await second.pop_reply(created.session_id), 'Одиссея')
+        self.assertEqual(await store.pop_reply(created.session_id), 'Одиссея')
         with self.assertRaises(ReplyValidationError):
-            await second.pop_reply(created.session_id)
+            await store.pop_reply(created.session_id)
+
+    async def test_restarted_store_rejects_reply_for_stale_waiting_session_without_runtime_runner(self) -> None:
+        repository = InMemorySessionRepository()
+        first = SessionStore(repository=repository, max_active_sessions=1)
+        created = await first.create_session(
+            task='Купить книгу',
+            start_url='https://www.litres.ru/',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await first.set_waiting_question(created.session_id, 'Какую книгу искать?', 'reply-1')
+
+        restarted = SessionStore(repository=repository, max_active_sessions=1)
+
+        with self.assertRaises(ReplyValidationError) as caught:
+            await restarted.apply_reply(created.session_id, 'reply-1', 'Одиссея')
+
+        self.assertIn('активного runner', str(caught.exception))
+        restored = await restarted.get(created.session_id)
+        self.assertEqual(restored.status, SessionStatus.WAITING_USER)
+        self.assertEqual(restored.waiting_reply_id, 'reply-1')
 
     async def test_persistent_backend_does_not_restore_storage_state(self) -> None:
         repository = InMemorySessionRepository(persist_auth_payload=False)

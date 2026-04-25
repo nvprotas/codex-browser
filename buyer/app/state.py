@@ -263,6 +263,11 @@ class SessionStore:
                 raise ReplyValidationError('Сессия сейчас не ожидает ответ пользователя.')
             if state.waiting_reply_id != reply_id:
                 raise ReplyValidationError('Передан неверный reply_id для текущего уточнения.')
+            if not self._is_active_in_current_runtime(state):
+                raise ReplyValidationError(
+                    'Сессия ожидает ответ, но в текущем процессе нет активного runner. '
+                    'Продолжение после рестарта пока не поддерживается.'
+                )
             state.pending_reply_text = message
             state.waiting_reply_id = None
             state.waiting_question = None
