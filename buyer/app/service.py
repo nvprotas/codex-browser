@@ -83,10 +83,11 @@ class BuyerService:
             metadata=metadata,
             auth=auth,
         )
-        await self._store.set_status(state.session_id, SessionStatus.RUNNING)
+        state = await self._store.set_status(state.session_id, SessionStatus.RUNNING)
 
         task_ref = asyncio.create_task(self._run_session(state.session_id), name=f'buyer-session-{state.session_id}')
         state.task_ref = task_ref
+        self._store.set_task_ref(state.session_id, task_ref)
         return state
 
     async def get_session(self, session_id: str) -> SessionState:
@@ -136,6 +137,7 @@ class BuyerService:
             await self._store.add_agent_memory(session_id, 'user', state.task)
             auth_summary = await self._run_sberid_auth_flow(state)
             if auth_summary:
+                await self._store.set_auth_context(session_id, auth_summary)
                 await self._store.add_agent_memory(
                     session_id,
                     'system',
@@ -305,6 +307,7 @@ class BuyerService:
             },
             idempotency_suffix='scenario-finished',
         )
+        await self._store.record_artifacts(state.session_id, [artifacts])
         await self._store.set_status(state.session_id, SessionStatus.COMPLETED)
         logger.info('session_completed session_id=%s', state.session_id)
         await self._schedule_post_session_analysis(
@@ -336,6 +339,7 @@ class BuyerService:
             },
             idempotency_suffix='scenario-failed',
         )
+        await self._store.record_artifacts(state.session_id, [merged_artifacts])
         await self._store.set_status(state.session_id, SessionStatus.FAILED, error=reason)
         logger.error('session_failed session_id=%s reason=%s', state.session_id, _tail_text(reason, limit=700))
         await self._schedule_post_session_analysis(
@@ -696,7 +700,12 @@ class BuyerService:
             idempotency_suffix=idempotency_suffix,
         )
         await self._store.append_event(state.session_id, envelope)
-        await self._callback_client.deliver(state.callback_url, envelope)
+        try:
+            await self._callback_client.deliver(state.callback_url, envelope)
+        except CallbackDeliveryError as exc:
+            await self._store.mark_event_delivery(envelope.event_id, 'failed', str(exc))
+            raise
+        await self._store.mark_event_delivery(envelope.event_id, 'delivered')
         return envelope
 
 

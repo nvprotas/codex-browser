@@ -48,6 +48,13 @@
   - `auth_failed_invalid_session`
   - `auth_refresh_requested`
 
+## Persistent State
+
+- Долговременное состояние задач, сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
+- In-memory backend остается только как локальный режим для unit-тестов и отладки.
+- После рестарта `buyer` восстанавливает сохраненные статусы и историю сессии, но не автопродолжает активный runner без Redis locks/runtime markers.
+- `storageState`, cookies, tokens и localStorage не сохраняются в Postgres. Auth-пакет остается `session-bound` и живет только в памяти текущего процесса.
+
 ## SberId авторизация v1
 
 - Охват сайтов в v1: смешанный режим.

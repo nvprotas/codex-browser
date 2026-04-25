@@ -21,6 +21,7 @@ Roadmap развития после MVP: `docs/buyer-roadmap.md`.
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
 - Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
+- Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
 - Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
@@ -64,6 +65,13 @@ cp .env.example .env
 # Быстрые purchase-скрипты до generic codex-flow
 # PURCHASE_SCRIPT_ALLOWLIST=litres.ru
 # PURCHASE_SCRIPT_TIMEOUT_SEC=120
+
+# Долговременное состояние buyer
+# STATE_BACKEND=postgres
+# DATABASE_URL=postgresql://buyer:buyer@postgres:5432/buyer
+# POSTGRES_DB=buyer
+# POSTGRES_USER=buyer
+# POSTGRES_PASSWORD=buyer
 ```
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
@@ -199,8 +207,9 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 
 ## Важные ограничения MVP
 
-- Состояние хранится только в памяти (`in-memory`).
-- После перезапуска контейнеров активные сессии теряются.
+- Состояние задач, сессий, событий, ответов, agent memory и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
+- После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner. Защита от двойного запуска и resume активных задач будут реализованы через Redis locks/runtime markers.
+- Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
 - noVNC поднят всегда и без пароля (только для MVP).
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).
 - `buyer` требует авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.

@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buyer}
+      POSTGRES_USER: ${POSTGRES_USER:-buyer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-buyer}
+    volumes:
+      - buyer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-buyer} -d ${POSTGRES_DB:-buyer}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
   browser:
     build:
       context: .
@@ -49,6 +65,10 @@ services:
       AUTH_SCRIPT_TIMEOUT_SEC: ${AUTH_SCRIPT_TIMEOUT_SEC:-90}
       PURCHASE_SCRIPT_ALLOWLIST: ${PURCHASE_SCRIPT_ALLOWLIST:-litres.ru}
       PURCHASE_SCRIPT_TIMEOUT_SEC: ${PURCHASE_SCRIPT_TIMEOUT_SEC:-120}
+      STATE_BACKEND: ${STATE_BACKEND:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://buyer:buyer@postgres:5432/buyer}
+      POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
+      POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-5}
       CALLBACK_RETRIES: "3"
       CALLBACK_TIMEOUT_SEC: "10"
       MAX_ACTIVE_SESSIONS: "1"
@@ -63,6 +83,8 @@ services:
     depends_on:
       micro-ui:
         condition: service_started
+      postgres:
+        condition: service_healthy
       browser:
         condition: service_healthy
 
@@ -75,3 +97,6 @@ services:
       UI_POLL_INTERVAL_SEC: "3"
     ports:
       - "8080:8080"
+
+volumes:
+  buyer-postgres-data:
