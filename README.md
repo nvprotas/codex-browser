@@ -6,6 +6,8 @@
 - `browser` (отдельный sidecar): держит Chromium + Xvfb + x11vnc + noVNC и отдает CDP endpoint для Playwright.
 - `micro-ui` (FastAPI + HTML/JS): временный `middle`, принимает callbacks, показывает ленту событий, noVNC и форму ответа пользователя (`reply_id`).
 
+Roadmap развития после MVP: `docs/buyer-roadmap.md`.
+
 ## Что уже реализовано
 
 - HTTP старт задачи: `POST /v1/tasks`.
