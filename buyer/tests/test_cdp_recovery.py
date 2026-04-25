@@ -134,6 +134,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(_looks_like_transient_cdp_failure('', artifacts))
 
+    async def test_transient_cdp_detection_keeps_prefix_of_long_nested_artifacts(self) -> None:
+        artifacts = {
+            'nested': {
+                'error': 'CDP_TRANSIENT_ERROR: Target page, context or browser has been closed ' + ('x' * 20_000),
+            },
+        }
+
+        self.assertTrue(_looks_like_transient_cdp_failure('', artifacts))
+
     async def test_trace_context_uses_date_and_time_directory(self) -> None:
         with TemporaryDirectory() as tmpdir:
             runner = AgentRunner(Settings(buyer_trace_dir=tmpdir))
