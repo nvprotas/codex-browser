@@ -1180,4 +1180,3 @@ def validate_written_fixed_output(path: Path, *, session_dir: Path) -> None:
     if not is_relative_to_path(resolved, session_resolved):
         raise ValueError('Записанный файл knowledge analysis вышел за пределы session_dir.')
 
-

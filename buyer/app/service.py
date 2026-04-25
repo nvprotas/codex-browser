@@ -725,9 +725,29 @@ def _looks_like_transient_cdp_failure(message: str, artifacts: dict[str, Any]) -
             if isinstance(value, str):
                 chunks.append(value)
     if chunks == [message]:
-        chunks.append(json.dumps(artifacts, ensure_ascii=False))
+        chunks.extend(_collect_artifact_string_samples(artifacts))
     haystack = ' '.join(chunks).lower()
     return any(marker in haystack for marker in TRANSIENT_CDP_MARKERS)
+
+
+def _collect_artifact_string_samples(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 3:
+        return []
+    if isinstance(value, str):
+        if len(value) <= 2000:
+            return [value]
+        return [_head_text(value, limit=1000), _tail_text(value, limit=1000)]
+    if isinstance(value, dict):
+        chunks: list[str] = []
+        for item in list(value.values())[:20]:
+            chunks.extend(_collect_artifact_string_samples(item, depth=depth + 1))
+        return chunks
+    if isinstance(value, list):
+        chunks = []
+        for item in value[:20]:
+            chunks.extend(_collect_artifact_string_samples(item, depth=depth + 1))
+        return chunks
+    return []
 
 
 def _is_valid_storage_state(payload: dict[str, Any] | None) -> bool:

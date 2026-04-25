@@ -18,6 +18,7 @@ class CallbackDeliveryError(RuntimeError):
 class CallbackClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.callback_timeout_sec))
 
     def build_envelope(self, session_id: str, event_type: str, payload: dict, idempotency_suffix: str | None = None) -> EventEnvelope:
         event_id = str(uuid4())
@@ -38,11 +39,9 @@ class CallbackClient:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                timeout = httpx.Timeout(self._settings.callback_timeout_sec)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    response = await client.post(callback_url, json=envelope.model_dump(mode='json'))
-                    response.raise_for_status()
-                    return
+                response = await self._client.post(callback_url, json=envelope.model_dump(mode='json'))
+                response.raise_for_status()
+                return
             except Exception as exc:  # noqa: BLE001 - важно сохранить первопричину доставки
                 last_error = exc
                 if attempt == attempts:
@@ -51,6 +50,9 @@ class CallbackClient:
                 await asyncio.sleep(backoff * (2 ** (attempt - 1)) + random() * 0.2)
 
         raise CallbackDeliveryError(f'Не удалось доставить callback {envelope.event_type}: {last_error}')
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     @staticmethod
     def _utc_now():

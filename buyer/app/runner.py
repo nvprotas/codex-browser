@@ -595,11 +595,10 @@ class AgentRunner:
         model_strategy: str | None = None,
         fallback_reason: str | None = None,
     ) -> dict[str, Any]:
-        actions_total, actions_tail = _read_jsonl_records(
+        actions_total, actions_tail, actions_metrics = _read_browser_actions_log(
             trace['browser_actions_log_path'],
             limit=self._settings.buyer_browser_actions_tail,
         )
-        actions_metrics = _build_browser_actions_metrics(trace['browser_actions_log_path'])
         codex_tokens_used = _extract_codex_tokens_used(stdout_text=stdout_text, stderr_text=stderr_text)
         post_browser_idle_ms = _build_post_browser_idle_ms(
             codex_started_at=codex_started_at,
@@ -677,11 +676,16 @@ def _merge_artifacts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
 
 
 def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
+    total, items, _ = _read_browser_actions_log(path, limit=limit)
+    return total, items
+
+
+def _read_browser_actions_log(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]], dict[str, Any]]:
     if not path.is_file():
-        return 0, []
+        return 0, [], _empty_browser_actions_metrics()
 
     total = 0
-    items: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     try:
         for raw_line in path.read_text(encoding='utf-8').splitlines():
             line = raw_line.strip()
@@ -693,40 +697,48 @@ def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, 
             except json.JSONDecodeError:
                 parsed = {'event': 'json_parse_error', 'line_tail': _tail_text(line, limit=500)}
             if isinstance(parsed, dict):
-                items.append(parsed)
+                records.append(parsed)
             else:
-                items.append({'event': 'json_non_object', 'value': parsed})
+                records.append({'event': 'json_non_object', 'value': parsed})
     except OSError:
-        return 0, []
+        return 0, [], _empty_browser_actions_metrics()
 
-    return total, items[-max(limit, 1) :]
+    return total, records[-max(limit, 1) :], _build_browser_actions_metrics_from_records(records)
+
+
+def _empty_browser_actions_metrics() -> dict[str, Any]:
+    return {
+        'command_duration_ms': 0,
+        'inter_command_idle_ms': 0,
+        'browser_busy_union_ms': 0,
+        'top_idle_gaps': [],
+        'last_command_finished_epoch_ms': None,
+        'command_errors': 0,
+        'html_commands': 0,
+        'html_bytes': 0,
+        'command_breakdown': {},
+    }
 
 
 def _build_browser_actions_metrics(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        return {
-            'command_duration_ms': 0,
-            'inter_command_idle_ms': 0,
-            'browser_busy_union_ms': 0,
-            'top_idle_gaps': [],
-            'last_command_finished_epoch_ms': None,
-            'command_errors': 0,
-            'html_commands': 0,
-            'html_bytes': 0,
-            'command_breakdown': {},
-        }
+        return _empty_browser_actions_metrics()
 
+    try:
+        records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        records = []
+
+    return _build_browser_actions_metrics_from_records(records)
+
+
+def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str, Any]:
     starts_by_command: dict[str, list[dict[str, Any]]] = {}
     finished_commands: list[dict[str, Any]] = []
     breakdown: dict[str, dict[str, int]] = {}
     total_command_duration_ms = 0
     html_commands = 0
     html_bytes = 0
-
-    try:
-        records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
-    except (OSError, json.JSONDecodeError):
-        records = []
 
     for record in records:
         if not isinstance(record, dict):

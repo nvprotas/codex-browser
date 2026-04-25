@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import unittest
-import os
 import json
-from datetime import datetime, timezone
+import os
+import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -12,7 +12,7 @@ from unittest.mock import patch
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
 from buyer.app.purchase_scripts import PurchaseScriptResult
 from buyer.app.runner import AgentRunner, _trace_date_dir_name
-from buyer.app.service import BuyerService
+from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
 
@@ -103,6 +103,46 @@ class _RecordingKnowledgeAnalyzer:
 
 
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_store_prunes_terminal_sessions_by_ttl(self) -> None:
+        now = datetime.now(timezone.utc)
+
+        def clock() -> datetime:
+            return now
+
+        store = SessionStore(max_active_sessions=1, status_ttl_sec=1, clock=clock)
+        state = await store.create_session(
+            task='test',
+            start_url='https://example.com',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await store.set_status(state.session_id, SessionStatus.COMPLETED)
+
+        now += timedelta(seconds=2)
+
+        self.assertEqual((await store.get(state.session_id)).status, SessionStatus.COMPLETED)
+
+        self.assertEqual(await store.list_sessions(), [])
+
+    async def test_transient_cdp_detection_scans_bounded_nested_artifacts(self) -> None:
+        artifacts = {
+            'large_html': '<html>' + ('x' * 20_000) + '</html>',
+            'nested': [{'error': 'CDP_TRANSIENT_ERROR: Target page, context or browser has been closed'}],
+        }
+
+        self.assertTrue(_looks_like_transient_cdp_failure('', artifacts))
+
+    async def test_transient_cdp_detection_keeps_prefix_of_long_nested_artifacts(self) -> None:
+        artifacts = {
+            'nested': {
+                'error': 'CDP_TRANSIENT_ERROR: Target page, context or browser has been closed ' + ('x' * 20_000),
+            },
+        }
+
+        self.assertTrue(_looks_like_transient_cdp_failure('', artifacts))
+
     async def test_trace_context_uses_date_and_time_directory(self) -> None:
         with TemporaryDirectory() as tmpdir:
             runner = AgentRunner(Settings(buyer_trace_dir=tmpdir))

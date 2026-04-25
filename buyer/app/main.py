@@ -20,7 +20,7 @@ from .settings import get_settings
 from .state import ReplyValidationError, SessionConflictError, SessionNotFoundError, SessionState, SessionStore
 
 settings = get_settings()
-store = SessionStore(max_active_sessions=settings.max_active_sessions)
+store = SessionStore(max_active_sessions=settings.max_active_sessions, status_ttl_sec=settings.status_ttl_sec)
 callback_client = CallbackClient(settings)
 runner = AgentRunner(settings)
 knowledge_analyzer = PostSessionKnowledgeAnalyzer(settings)
@@ -63,6 +63,7 @@ async def healthz() -> dict[str, str]:
 @app.on_event('shutdown')
 async def shutdown() -> None:
     await service.shutdown_post_session_analysis()
+    await callback_client.aclose()
 
 
 @app.post('/v1/tasks', response_model=TaskCreateResponse, status_code=201)
