@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
 
 from .models import EventEnvelope, SessionStatus
-from .state import SessionState
+from .state import SessionState, utcnow
 
 
 SCHEMA_MIGRATIONS: tuple[tuple[str, str], ...] = (
@@ -153,19 +152,7 @@ class PostgresSessionRepository:
     async def list_sessions(self) -> list[SessionState]:
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT session_id
-                FROM buyer_sessions
-                ORDER BY created_at ASC, session_id ASC
-                """
-            )
-            sessions: list[SessionState] = []
-            for row in rows:
-                state = await _load_session(conn, row['session_id'])
-                if state is not None:
-                    sessions.append(state)
-            return sessions
+            return await _load_all_sessions(conn)
 
     async def update_session(self, state: SessionState) -> None:
         pool = await self._ensure_pool()
@@ -213,7 +200,7 @@ class PostgresSessionRepository:
                 _int_or_zero(context.get('attempts')),
                 bool(context.get('context_prepared')),
                 json.dumps(metadata, ensure_ascii=False),
-                _utcnow(),
+                utcnow(),
             )
 
     async def replace_artifacts(self, session_id: str, artifacts: list[dict[str, Any]]) -> None:
@@ -501,6 +488,99 @@ async def _load_session(conn: asyncpg.Connection, session_id: str) -> SessionSta
     )
 
 
+async def _load_all_sessions(conn: asyncpg.Connection) -> list[SessionState]:
+    session_rows = await conn.fetch(
+        """
+        SELECT session_id, task, start_url, callback_url, novnc_url,
+               status, metadata, last_error, created_at, updated_at
+        FROM buyer_sessions
+        ORDER BY created_at ASC, session_id ASC
+        """
+    )
+    if not session_rows:
+        return []
+    session_ids = [row['session_id'] for row in session_rows]
+    event_rows = await conn.fetch(
+        """
+        SELECT event_id, session_id, event_type, occurred_at, idempotency_key, payload
+        FROM buyer_events
+        WHERE session_id = ANY($1::text[])
+        ORDER BY session_id ASC, position ASC, occurred_at ASC
+        """,
+        session_ids,
+    )
+    memory_rows = await conn.fetch(
+        """
+        SELECT session_id, role, text
+        FROM buyer_agent_memory
+        WHERE session_id = ANY($1::text[])
+        ORDER BY session_id ASC, position ASC, memory_id ASC
+        """,
+        session_ids,
+    )
+    reply_rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (session_id) session_id, reply_id, question, message, status
+        FROM buyer_replies
+        WHERE session_id = ANY($1::text[]) AND status IN ('waiting', 'answered')
+        ORDER BY session_id ASC, created_at DESC
+        """,
+        session_ids,
+    )
+
+    events_by_sid: dict[str, list[Any]] = {}
+    for row in event_rows:
+        events_by_sid.setdefault(row['session_id'], []).append(row)
+    memory_by_sid: dict[str, list[Any]] = {}
+    for row in memory_rows:
+        memory_by_sid.setdefault(row['session_id'], []).append(row)
+    reply_by_sid: dict[str, Any] = {row['session_id']: row for row in reply_rows}
+
+    states: list[SessionState] = []
+    for row in session_rows:
+        sid = row['session_id']
+        events = [
+            EventEnvelope(
+                event_id=er['event_id'],
+                session_id=er['session_id'],
+                event_type=er['event_type'],
+                occurred_at=er['occurred_at'],
+                idempotency_key=er['idempotency_key'],
+                payload=_json_dict(er['payload']),
+            )
+            for er in events_by_sid.get(sid, [])
+        ]
+        memory = [{'role': mr['role'], 'text': mr['text']} for mr in memory_by_sid.get(sid, [])]
+        reply = reply_by_sid.get(sid)
+        waiting_reply_id = None
+        waiting_question = None
+        pending_reply_text = None
+        if reply is not None and reply['status'] == 'waiting':
+            waiting_reply_id = reply['reply_id']
+            waiting_question = reply['question']
+        elif reply is not None and reply['status'] == 'answered':
+            pending_reply_text = reply['message']
+        states.append(SessionState(
+            session_id=row['session_id'],
+            task=row['task'],
+            start_url=row['start_url'],
+            callback_url=row['callback_url'],
+            novnc_url=row['novnc_url'],
+            metadata=_json_dict(row['metadata']),
+            auth=None,
+            status=SessionStatus(row['status']),
+            created_at=row['created_at'],
+            updated_at=row['updated_at'],
+            waiting_reply_id=waiting_reply_id,
+            waiting_question=waiting_question,
+            last_error=row['last_error'],
+            events=events,
+            agent_memory=memory,
+            pending_reply_text=pending_reply_text,
+        ))
+    return states
+
+
 def _json_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         parsed = json.loads(value)
@@ -512,29 +592,29 @@ def _ensure_json_safe(value: dict[str, Any]) -> None:
     json.dumps(value, ensure_ascii=False)
 
 
-def _sanitize_auth_context(value: Any, *, depth: int = 0) -> Any:
+_AUTH_CONTEXT_BLOCKED: frozenset[str] = frozenset({
+    'storagestate', 'storagestatepath', 'cookies', 'cookie', 'origins', 'localstorage', 'token', 'tokens',
+})
+_PERSISTENT_METADATA_BLOCKED: frozenset[str] = _AUTH_CONTEXT_BLOCKED | {'authorization'}
+
+
+def _sanitize(value: Any, *, blocked_keys: frozenset[str], depth: int = 0) -> Any:
     if depth > 8:
         return '[truncated]'
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
-            normalized = str(key).replace('_', '').replace('-', '').lower()
-            if normalized in {
-                'storagestate',
-                'storagestatepath',
-                'cookies',
-                'cookie',
-                'origins',
-                'localstorage',
-                'token',
-                'tokens',
-            }:
+            if str(key).replace('_', '').replace('-', '').lower() in blocked_keys:
                 continue
-            sanitized[str(key)] = _sanitize_auth_context(item, depth=depth + 1)
+            sanitized[str(key)] = _sanitize(item, blocked_keys=blocked_keys, depth=depth + 1)
         return sanitized
     if isinstance(value, list):
-        return [_sanitize_auth_context(item, depth=depth + 1) for item in value[:100]]
+        return [_sanitize(item, blocked_keys=blocked_keys, depth=depth + 1) for item in value[:100]]
     return value
+
+
+def _sanitize_auth_context(value: Any, *, depth: int = 0) -> Any:
+    return _sanitize(value, blocked_keys=_AUTH_CONTEXT_BLOCKED, depth=depth)
 
 
 def _build_artifact_refs(*, session_id: str, artifacts: list[dict[str, Any]]) -> list[ArtifactRef]:
@@ -589,29 +669,7 @@ def _iter_artifact_paths(value: Any, *, depth: int = 0, key: str = 'artifact') -
 
 
 def _sanitize_persistent_metadata(value: Any, *, depth: int = 0) -> Any:
-    if depth > 8:
-        return '[truncated]'
-    if isinstance(value, dict):
-        sanitized: dict[str, Any] = {}
-        for key, item in value.items():
-            normalized = str(key).replace('_', '').replace('-', '').lower()
-            if normalized in {
-                'storagestate',
-                'storagestatepath',
-                'cookies',
-                'cookie',
-                'origins',
-                'localstorage',
-                'token',
-                'tokens',
-                'authorization',
-            }:
-                continue
-            sanitized[str(key)] = _sanitize_persistent_metadata(item, depth=depth + 1)
-        return sanitized
-    if isinstance(value, list):
-        return [_sanitize_persistent_metadata(item, depth=depth + 1) for item in value[:100]]
-    return value
+    return _sanitize(value, blocked_keys=_PERSISTENT_METADATA_BLOCKED, depth=depth)
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -626,7 +684,3 @@ def _int_or_zero(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)

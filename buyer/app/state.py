@@ -171,8 +171,7 @@ class SessionStore:
             await self._repository.replace_artifacts(session_id, artifacts)
 
     async def mark_event_delivery(self, event_id: str, status: str, error: str | None = None) -> None:
-        async with self._lock:
-            await self._repository.mark_event_delivery(event_id, status, error)
+        await self._repository.mark_event_delivery(event_id, status, error)
 
     async def create_session(
         self,
@@ -185,8 +184,7 @@ class SessionStore:
         auth: TaskAuthPayload | None,
     ) -> SessionState:
         async with self._lock:
-            await self._prune_expired_locked()
-            sessions = await self._repository.list_sessions()
+            sessions = await self._prune_and_list_locked()
             active = [
                 session
                 for session in sessions
@@ -303,8 +301,8 @@ class SessionStore:
 
     async def list_sessions(self) -> list[SessionState]:
         async with self._lock:
-            await self._prune_expired_locked()
-            return [self._attach_runtime(state) for state in await self._repository.list_sessions()]
+            sessions = await self._prune_and_list_locked()
+            return [self._attach_runtime(state) for state in sessions]
 
     async def _get_locked(self, session_id: str) -> SessionState:
         state = await self._repository.get_session(session_id)
@@ -312,22 +310,25 @@ class SessionStore:
             raise SessionNotFoundError(f'Сессия {session_id} не найдена.')
         return state
 
-    async def _prune_expired_locked(self) -> None:
+    async def _prune_and_list_locked(self) -> list[SessionState]:
+        sessions = await self._repository.list_sessions()
         if self._status_ttl_sec is None:
-            return
-
+            return sessions
         deadline = self._clock().timestamp() - max(self._status_ttl_sec, 0)
         expired = [
             state.session_id
-            for state in await self._repository.list_sessions()
+            for state in sessions
             if state.status in self._TERMINAL_STATUSES and state.updated_at.timestamp() < deadline
         ]
         if expired:
             await self._repository.delete_sessions(expired)
+            expired_set = set(expired)
             for session_id in expired:
                 self._wake_events.pop(session_id, None)
                 self._task_refs.pop(session_id, None)
                 self._runtime_auth.pop(session_id, None)
+            sessions = [s for s in sessions if s.session_id not in expired_set]
+        return sessions
 
     def _touch_locked(self, state: SessionState) -> None:
         state.updated_at = self._clock()
