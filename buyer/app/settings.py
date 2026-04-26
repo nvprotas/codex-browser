@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     codex_bin: str = 'codex'
     codex_model: str | None = None
+    buyer_model_strategy: Literal['single', 'fast_then_strong'] = 'single'
+    buyer_fast_codex_model: str = 'gpt-5.4-mini'
+    buyer_strong_codex_model: str | None = None
     codex_timeout_sec: int = 1800
     codex_workdir: str = '/workspace'
     codex_skip_git_repo_check: bool = True
@@ -40,6 +43,11 @@ class Settings(BaseSettings):
     auth_script_timeout_sec: int = Field(default=90, ge=5)
     purchase_script_allowlist: str = 'litres.ru'
     purchase_script_timeout_sec: int = Field(default=120, ge=5)
+
+    state_backend: Literal['memory', 'postgres'] = 'memory'
+    database_url: str = 'postgresql://buyer:buyer@postgres:5432/buyer'
+    postgres_pool_min_size: int = Field(default=1, ge=1)
+    postgres_pool_max_size: int = Field(default=5, ge=1)
 
     max_active_sessions: int = 1
 

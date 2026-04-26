@@ -10,6 +10,9 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from .script_runtime import ScriptSpec, read_script_result_payload, registry_snapshot, script_stdio_artifacts
+from ._utils import tail_text
+
 logger = logging.getLogger('uvicorn.error')
 
 
@@ -48,13 +51,6 @@ def parse_allowlist(raw: str) -> set[str]:
     return {normalize_domain(item) for item in raw.split(',') if normalize_domain(item)}
 
 
-@dataclass(frozen=True)
-class ScriptSpec:
-    domain: str
-    lifecycle: str
-    relative_path: str
-
-
 @dataclass
 class AuthScriptResult:
     status: str
@@ -86,14 +82,7 @@ class SberIdScriptRunner:
         }
 
     def registry_snapshot(self) -> list[dict[str, str]]:
-        return [
-            {
-                'domain': spec.domain,
-                'lifecycle': spec.lifecycle,
-                'script': spec.relative_path,
-            }
-            for spec in sorted(self._registry.values(), key=lambda item: item.domain)
-        ]
+        return registry_snapshot(self._registry)
 
     async def run(
         self,
@@ -167,7 +156,7 @@ class SberIdScriptRunner:
                 normalized_domain,
                 attempt,
                 self._cdp_endpoint,
-                _tail_text(str(exc), limit=700),
+                tail_text(str(exc), limit=700),
             )
             return AuthScriptResult(
                 status='failed',
@@ -177,7 +166,7 @@ class SberIdScriptRunner:
                     'domain': normalized_domain,
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
-                    'cdp_resolve_error': _tail_text(str(exc), limit=900),
+                    'cdp_resolve_error': tail_text(str(exc), limit=900),
                 },
             )
 
@@ -245,18 +234,8 @@ class SberIdScriptRunner:
 
         stdout_text = stdout_raw.decode('utf-8', errors='ignore').strip()
         stderr_text = stderr_raw.decode('utf-8', errors='ignore').strip()
-        parsed_payload: dict[str, Any] | None = None
-
-        if output_path.is_file():
-            try:
-                parsed_payload = json.loads(output_path.read_text(encoding='utf-8'))
-            except Exception:
-                parsed_payload = None
-        if parsed_payload is None and stdout_text:
-            try:
-                parsed_payload = json.loads(stdout_text)
-            except Exception:
-                parsed_payload = None
+        parsed_payload = read_script_result_payload(output_path, stdout_text)
+        stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
 
         if process.returncode != 0 and parsed_payload is None:
             return AuthScriptResult(
@@ -264,15 +243,14 @@ class SberIdScriptRunner:
                 reason_code=AUTH_FAILED_INVALID_SESSION,
                 message=(
                     f'SberId-скрипт завершился с кодом {process.returncode}. '
-                    f'stderr: {_tail_text(stderr_text)}'
+                    f'stderr: {tail_text(stderr_text)}'
                 ),
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
-                    'stdout_tail': _tail_text(stdout_text),
-                    'stderr_tail': _tail_text(stderr_text),
+                    **stdio_artifacts,
                 },
             )
 
@@ -286,8 +264,7 @@ class SberIdScriptRunner:
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
-                    'stdout_tail': _tail_text(stdout_text),
-                    'stderr_tail': _tail_text(stderr_text),
+                    **stdio_artifacts,
                 },
             )
 
@@ -304,8 +281,7 @@ class SberIdScriptRunner:
                 'lifecycle': spec.lifecycle,
                 'cdp_endpoint': self._cdp_endpoint,
                 'resolved_cdp_endpoint': resolved_endpoint,
-                'stdout_tail': _tail_text(stdout_text),
-                'stderr_tail': _tail_text(stderr_text),
+                **stdio_artifacts,
             }
         )
         return AuthScriptResult(
@@ -381,10 +357,3 @@ async def resolve_cdp_endpoint(endpoint: str) -> str:
         'Не удалось подключиться к browser-sidecar ни по одному CDP endpoint. '
         f'Пробовали: {", ".join(candidates)}. Ошибки: {details}'
     )
-
-
-def _tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join((text or '').replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]

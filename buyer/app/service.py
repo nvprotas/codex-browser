@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from ._utils import head_text as _head_text, tail_text as _tail_text
 from .auth_scripts import (
     AUTH_FAILED_INVALID_SESSION,
     AUTH_FAILED_PAYLOAD,
@@ -85,10 +86,11 @@ class BuyerService:
             metadata=metadata,
             auth=auth,
         )
-        await self._store.set_status(state.session_id, SessionStatus.RUNNING)
+        state = await self._store.set_status(state.session_id, SessionStatus.RUNNING)
 
         task_ref = asyncio.create_task(self._run_session(state.session_id), name=f'buyer-session-{state.session_id}')
         state.task_ref = task_ref
+        self._store.set_task_ref(state.session_id, task_ref)
         return state
 
     async def get_session(self, session_id: str) -> SessionState:
@@ -138,6 +140,7 @@ class BuyerService:
             await self._store.add_agent_memory(session_id, 'user', state.task)
             auth_summary = await self._run_sberid_auth_flow(state)
             if auth_summary:
+                await self._store.set_auth_context(session_id, auth_summary)
                 await self._store.add_agent_memory(
                     session_id,
                     'system',
@@ -308,6 +311,7 @@ class BuyerService:
             },
             idempotency_suffix='scenario-finished',
         )
+        await self._store.record_artifacts(state.session_id, [artifacts])
         await self._store.set_status(state.session_id, SessionStatus.COMPLETED)
         logger.info('session_completed session_id=%s', state.session_id)
         await self._schedule_post_session_analysis(
@@ -339,6 +343,7 @@ class BuyerService:
             },
             idempotency_suffix='scenario-failed',
         )
+        await self._store.record_artifacts(state.session_id, [merged_artifacts])
         await self._store.set_status(state.session_id, SessionStatus.FAILED, error=reason)
         logger.error('session_failed session_id=%s reason=%s', state.session_id, _tail_text(reason, limit=700))
         await self._schedule_post_session_analysis(
@@ -711,7 +716,12 @@ class BuyerService:
             idempotency_suffix=idempotency_suffix,
         )
         await self._store.append_event(state.session_id, envelope)
-        await self._callback_client.deliver(state.callback_url, envelope)
+        try:
+            await self._callback_client.deliver(state.callback_url, envelope)
+        except CallbackDeliveryError as exc:
+            await self._store.mark_event_delivery(envelope.event_id, 'failed', str(exc))
+            raise
+        await self._store.mark_event_delivery(envelope.event_id, 'delivered')
         return envelope
 
 
@@ -740,9 +750,29 @@ def _looks_like_transient_cdp_failure(message: str, artifacts: dict[str, Any]) -
             if isinstance(value, str):
                 chunks.append(value)
     if chunks == [message]:
-        chunks.append(json.dumps(artifacts, ensure_ascii=False))
+        chunks.extend(_collect_artifact_string_samples(artifacts))
     haystack = ' '.join(chunks).lower()
     return any(marker in haystack for marker in TRANSIENT_CDP_MARKERS)
+
+
+def _collect_artifact_string_samples(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 3:
+        return []
+    if isinstance(value, str):
+        if len(value) <= 2000:
+            return [value]
+        return [_head_text(value, limit=1000), _tail_text(value, limit=1000)]
+    if isinstance(value, dict):
+        chunks: list[str] = []
+        for item in list(value.values())[:20]:
+            chunks.extend(_collect_artifact_string_samples(item, depth=depth + 1))
+        return chunks
+    if isinstance(value, list):
+        chunks = []
+        for item in value[:20]:
+            chunks.extend(_collect_artifact_string_samples(item, depth=depth + 1))
+        return chunks
+    return []
 
 
 def _is_valid_storage_state(payload: dict[str, Any] | None) -> bool:
@@ -762,13 +792,6 @@ def _build_auth_retry_context(*, attempt: int, max_attempts: int, script_result:
         'script_message': _tail_text(getattr(script_result, 'message', ''), limit=220),
         'stderr_tail': _tail_text(str(artifacts.get('stderr_tail', '')), limit=220),
     }
-
-
-def _tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]
 
 
 def _build_agent_step_payload(*, step_index: int, result: AgentOutput) -> dict[str, Any]:
@@ -833,6 +856,15 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         'browser_actions_log_path',
         'browser_actions_total',
         'duration_ms',
+        'command_duration_ms',
+        'inter_command_idle_ms',
+        'browser_busy_union_ms',
+        'post_browser_idle_ms',
+        'command_errors',
+        'codex_tokens_used',
+        'codex_model',
+        'model_strategy',
+        'model_fallback_reason',
         'codex_returncode',
     )
     trace: dict[str, Any] = {}
@@ -857,11 +889,12 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
     if isinstance(browser_actions_tail, list):
         trace['browser_actions_tail'] = browser_actions_tail[-10:]
 
+    top_idle_gaps = raw_trace.get('top_idle_gaps')
+    if isinstance(top_idle_gaps, list):
+        trace['top_idle_gaps'] = top_idle_gaps[:5]
+
+    codex_attempts = raw_trace.get('codex_attempts')
+    if isinstance(codex_attempts, list):
+        trace['codex_attempts'] = codex_attempts[-3:]
+
     return trace
-
-
-def _head_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return f'{compact[:limit]}...'

@@ -6,6 +6,8 @@
 - `browser` (отдельный sidecar): держит Chromium + Xvfb + x11vnc + noVNC и отдает CDP endpoint для Playwright.
 - `micro-ui` (FastAPI + HTML/JS): временный `middle`, принимает callbacks, показывает ленту событий, noVNC и форму ответа пользователя (`reply_id`).
 
+Roadmap развития после MVP: `docs/buyer-roadmap.md`.
+
 ## Что уже реализовано
 
 - HTTP старт задачи: `POST /v1/tasks`.
@@ -19,6 +21,7 @@
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
 - Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
+- Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
 - Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
@@ -43,6 +46,11 @@ USER_BUYER_INFO_PATH=
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
+# Опционально: стратегия модели generic buyer-flow.
+# BUYER_MODEL_STRATEGY=single
+# BUYER_FAST_CODEX_MODEL=gpt-5.4-mini
+# BUYER_STRONG_CODEX_MODEL=
+
 # Опционально: окно/интервал CDP recovery (hotfix устойчивости)
 # CDP_RECOVERY_WINDOW_SEC=20
 # CDP_RECOVERY_INTERVAL_MS=500
@@ -61,6 +69,13 @@ USER_BUYER_INFO_PATH=
 # Быстрые purchase-скрипты до generic codex-flow
 # PURCHASE_SCRIPT_ALLOWLIST=litres.ru
 # PURCHASE_SCRIPT_TIMEOUT_SEC=120
+
+# Долговременное состояние buyer
+# STATE_BACKEND=postgres
+# DATABASE_URL=postgresql://buyer:buyer@postgres:5432/buyer
+# POSTGRES_DB=buyer
+# POSTGRES_USER=buyer
+# POSTGRES_PASSWORD=buyer
 ```
 
 `CODEX_AUTH_JSON_PATH` и `USER_BUYER_INFO_PATH` монтируются в `buyer` только на этапе runtime и не попадают в image.
@@ -131,8 +146,8 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 Для анализа DOM предпочтительны структурные команды:
 
 ```bash
-python /app/tools/cdp_tool.py --endpoint http://browser:9223 snapshot --selector body --limit 120
-python /app/tools/cdp_tool.py --endpoint http://browser:9223 links --selector body --limit 80
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 snapshot --selector body --limit 60
+python /app/tools/cdp_tool.py --endpoint http://browser:9223 links --selector body --limit 50
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 exists --selector '[data-testid="book__addToCartButton"]'
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[href*="/book/"]' --name href
 ```
@@ -155,7 +170,7 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 
 - `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
-- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `html_commands`, `html_bytes`, `command_breakdown`.
+- `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, модель/стратегия, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `browser_busy_union_ms`, `post_browser_idle_ms`, `command_errors`, `codex_tokens_used`, `html_commands`, `html_bytes`, `command_breakdown`.
 - `knowledge-analysis-prompt.txt` — отдельный prompt post-session analyzer после финального callback.
 - `knowledge-analysis.json` — внутренний артефакт с draft-кандидатами знаний (`navigation_hints`, `pitfalls`, `site_overview_plain`, `playbook_candidate`).
 - `knowledge-analysis-trace.json` — статус выполнения analyzer, команда, stdout/stderr tail и ссылка на артефакт.
@@ -198,8 +213,9 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 
 ## Важные ограничения MVP
 
-- Состояние хранится только в памяти (`in-memory`).
-- После перезапуска контейнеров активные сессии теряются.
+- Состояние задач, сессий, событий, ответов, agent memory и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
+- После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner. Защита от двойного запуска и resume активных задач будут реализованы через Redis locks/runtime markers.
+- Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
 - noVNC поднят всегда и без пароля (только для MVP).
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).
 - `buyer` требует авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.

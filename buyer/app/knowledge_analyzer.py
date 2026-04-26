@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
+from ._utils import duration_ms_since, remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
 from .settings import Settings
 
 logger = logging.getLogger('uvicorn.error')
@@ -1179,31 +1180,3 @@ def validate_written_fixed_output(path: Path, *, session_dir: Path) -> None:
     if not is_relative_to_path(resolved, session_resolved):
         raise ValueError('Записанный файл knowledge analysis вышел за пределы session_dir.')
 
-
-def duration_ms_since(started_at: datetime) -> int:
-    delta = datetime.now(timezone.utc) - started_at
-    return max(int(delta.total_seconds() * 1000), 0)
-
-
-def trace_date_dir_name(now: datetime | None = None) -> str:
-    current = now or datetime.now().astimezone()
-    return current.strftime('%Y-%m-%d')
-
-
-def trace_time_dir_name(now: datetime | None = None) -> str:
-    current = now or datetime.now().astimezone()
-    return current.strftime('%H-%M-%S')
-
-
-def tail_text(text: str, limit: int = 500) -> str:
-    compact = ' '.join(text.replace('\n', ' ').split())
-    if len(compact) <= limit:
-        return compact
-    return compact[-limit:]
-
-
-def remove_file_quietly(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        return

@@ -14,13 +14,38 @@ from .models import (
     TaskCreateResponse,
 )
 from .purchase_scripts import PurchaseScriptRunner
+from .persistence import PostgresSessionRepository
 from .runner import AgentRunner
 from .service import BuyerService
-from .settings import get_settings
-from .state import ReplyValidationError, SessionConflictError, SessionNotFoundError, SessionState, SessionStore
+from .settings import Settings, get_settings
+from .state import (
+    InMemorySessionRepository,
+    ReplyValidationError,
+    SessionConflictError,
+    SessionNotFoundError,
+    SessionState,
+    SessionStore,
+)
+
+
+def _build_session_store(settings: Settings) -> SessionStore:
+    if settings.state_backend == 'postgres':
+        repository = PostgresSessionRepository(
+            database_url=settings.database_url,
+            min_pool_size=settings.postgres_pool_min_size,
+            max_pool_size=settings.postgres_pool_max_size,
+        )
+    else:
+        repository = InMemorySessionRepository()
+    return SessionStore(
+        repository=repository,
+        max_active_sessions=settings.max_active_sessions,
+        status_ttl_sec=settings.status_ttl_sec,
+    )
+
 
 settings = get_settings()
-store = SessionStore(max_active_sessions=settings.max_active_sessions)
+store = _build_session_store(settings)
 callback_client = CallbackClient(settings)
 runner = AgentRunner(settings)
 knowledge_analyzer = PostSessionKnowledgeAnalyzer(settings)
@@ -61,9 +86,16 @@ async def healthz() -> dict[str, str]:
     return {'status': 'ok'}
 
 
+@app.on_event('startup')
+async def startup() -> None:
+    await store.initialize()
+
+
 @app.on_event('shutdown')
 async def shutdown() -> None:
     await service.shutdown_post_session_analysis()
+    await callback_client.aclose()
+    await store.aclose()
 
 
 @app.post('/v1/tasks', response_model=TaskCreateResponse, status_code=201)

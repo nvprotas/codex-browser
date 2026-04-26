@@ -16,6 +16,8 @@ from playwright.async_api import async_playwright
 
 HTML_STDOUT_LIMIT = 20_000
 TEXT_STDOUT_LIMIT = 4_000
+LINKS_DEFAULT_LIMIT = 50
+SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
 
 
@@ -58,11 +60,11 @@ def parser() -> argparse.ArgumentParser:
 
     links = sub.add_parser('links')
     links.add_argument('--selector', default='body')
-    links.add_argument('--limit', type=int, default=80)
+    links.add_argument('--limit', type=int, default=LINKS_DEFAULT_LIMIT)
 
     snapshot = sub.add_parser('snapshot')
     snapshot.add_argument('--selector', default='body')
-    snapshot.add_argument('--limit', type=int, default=120)
+    snapshot.add_argument('--limit', type=int, default=SNAPSHOT_DEFAULT_LIMIT)
 
     title = sub.add_parser('title')
 
@@ -150,7 +152,6 @@ def _sanitize_result_for_log(result: dict[str, Any]) -> dict[str, Any]:
     if isinstance(sanitized.get('html'), str):
         html = sanitized.pop('html')
         sanitized.setdefault('html_size', len(html))
-        sanitized['html_preview_size'] = len(html)
     if isinstance(sanitized.get('text'), str):
         text = sanitized['text']
         if len(text) > 400:
@@ -412,7 +413,7 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
 
 
 async def _collect_links(page: Any, args: argparse.Namespace) -> dict[str, Any]:
-    limit = _normalize_limit(args.limit, default=80, maximum=300)
+    limit = _normalize_limit(args.limit, default=LINKS_DEFAULT_LIMIT, maximum=300)
     links = await page.locator(args.selector).locator('a').evaluate_all(
         """(nodes, limit) => {
             const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -456,7 +457,7 @@ async def _collect_text(page: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, Any]:
-    limit = _normalize_limit(args.limit, default=120, maximum=500)
+    limit = _normalize_limit(args.limit, default=SNAPSHOT_DEFAULT_LIMIT, maximum=500)
     items = await page.locator(args.selector).evaluate(
         """(root, options) => {
             const limit = options.limit;
@@ -510,6 +511,24 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
     return {'ok': True, 'selector': args.selector, 'limit': limit, 'items': items, 'url': page.url}
 
 
+def _log_command_finished(
+    args: argparse.Namespace,
+    started: float,
+    command_details: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    _append_action_log(
+        'browser_command_finished',
+        {
+            'command': args.command,
+            'ok': bool(result.get('ok')),
+            'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+            'details': command_details,
+            'result': _sanitize_result_for_log(result),
+        },
+    )
+
+
 async def run_command(args: argparse.Namespace) -> dict:
     started = asyncio.get_running_loop().time()
     command_details = _extract_command_details_for_log(args)
@@ -524,45 +543,18 @@ async def run_command(args: argparse.Namespace) -> dict:
 
     if args.recovery_window_sec < 0:
         result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-window-sec не может быть отрицательным.'}
-        _append_action_log(
-            'browser_command_finished',
-            {
-                'command': args.command,
-                'ok': False,
-                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                'details': command_details,
-                'result': result,
-            },
-        )
+        _log_command_finished(args, started, command_details, result)
         return result
     if args.recovery_interval_ms <= 0:
         result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-interval-ms должен быть > 0.'}
-        _append_action_log(
-            'browser_command_finished',
-            {
-                'command': args.command,
-                'ok': False,
-                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                'details': command_details,
-                'result': result,
-            },
-        )
+        _log_command_finished(args, started, command_details, result)
         return result
 
     playwright = await async_playwright().start()
     try:
         if args.command in {'title', 'text', 'url', 'exists', 'attr', 'links', 'snapshot'}:
             result = await run_read_command_with_retry(playwright=playwright, args=args)
-            _append_action_log(
-                'browser_command_finished',
-                {
-                    'command': args.command,
-                    'ok': bool(result.get('ok')),
-                    'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                    'details': command_details,
-                    'result': _sanitize_result_for_log(result),
-                },
-            )
+            _log_command_finished(args, started, command_details, result)
             return result
 
         deadline = asyncio.get_running_loop().time() + max(args.recovery_window_sec, 0.0)
@@ -572,76 +564,31 @@ async def run_command(args: argparse.Namespace) -> dict:
             if args.command == 'goto':
                 await page.goto(args.url, wait_until='domcontentloaded')
                 result = {'ok': True, 'url': page.url, 'title': await page.title()}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'click':
                 await page.click(args.selector)
                 result = {'ok': True, 'selector': args.selector, 'url': page.url}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'fill':
                 await page.fill(args.selector, args.value)
                 result = {'ok': True, 'selector': args.selector, 'url': page.url}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'press':
                 await page.keyboard.press(args.key)
                 result = {'ok': True, 'key': args.key, 'url': page.url}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'wait':
                 await asyncio.sleep(args.seconds)
                 result = {'ok': True, 'seconds': args.seconds, 'url': page.url}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'screenshot':
@@ -649,16 +596,7 @@ async def run_command(args: argparse.Namespace) -> dict:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(path), full_page=True)
                 result = {'ok': True, 'path': str(path), 'url': page.url}
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             if args.command == 'html':
@@ -668,41 +606,14 @@ async def run_command(args: argparse.Namespace) -> dict:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding='utf-8')
                     result = {'ok': True, 'path': str(path), 'size': len(content), 'url': page.url}
-                    _append_action_log(
-                        'browser_command_finished',
-                        {
-                            'command': args.command,
-                            'ok': True,
-                            'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                            'details': command_details,
-                            'result': _sanitize_result_for_log(result),
-                        },
-                    )
+                    _log_command_finished(args, started, command_details, result)
                     return result
                 result = _format_html_result(content=content, url=page.url, max_chars=args.max_chars, full=args.full)
-                _append_action_log(
-                    'browser_command_finished',
-                    {
-                        'command': args.command,
-                        'ok': True,
-                        'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                        'details': command_details,
-                        'result': _sanitize_result_for_log(result),
-                    },
-                )
+                _log_command_finished(args, started, command_details, result)
                 return result
 
             result = {'ok': False, 'error': f'Неизвестная команда: {args.command}'}
-            _append_action_log(
-                'browser_command_finished',
-                {
-                    'command': args.command,
-                    'ok': False,
-                    'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                    'details': command_details,
-                    'result': result,
-                },
-            )
+            _log_command_finished(args, started, command_details, result)
             return result
         except Exception as exc:  # noqa: BLE001 - унифицируем текст ошибок на уровне CLI
             normalized = normalize_error_text(exc)

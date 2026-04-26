@@ -5,6 +5,7 @@
 - Документ фиксирует обязательные архитектурные решения для `buyer` v1.
 - Дата фиксации: 2026-04-23.
 - Все новые требования по `buyer` должны явно соответствовать решениям ниже.
+- Приоритизация реализации после MVP зафиксирована в `docs/buyer-roadmap.md`.
 
 ## Протоколы и данные
 
@@ -46,6 +47,7 @@
 - Канонический владелец auth-данных: `middle`; `openclaw` является прокси до `buyer`.
 - Передача auth-пакета: inline `storageState` в task payload.
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
+- Сохранение browser context/storage между рестартами является отдельным открытым вопросом: до отдельного threat model и решения нельзя писать cookies, tokens, `storageState` или localStorage в долговременное хранилище.
 - Ошибка формата `storageState`: `auth_failed_payload` + `ask_user` на новый пакет.
 - Вход через SberId: `scripts first` → эвристический fallback → handoff.
 - Опубликованные магазинные auth-скрипты SberId: `litres.ru`, `brandshop.ru`.
