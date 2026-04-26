@@ -15,6 +15,17 @@ services:
       retries: 20
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
   browser:
     build:
       context: .
@@ -69,9 +80,18 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://buyer:buyer@postgres:5432/buyer}
       POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
       POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-5}
+      RUNTIME_BACKEND: ${RUNTIME_BACKEND:-redis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-buyer:runtime}
+      BUYER_WORKER_ID: ${BUYER_WORKER_ID:-buyer-compose}
+      MAX_ACTIVE_JOBS_PER_WORKER: ${MAX_ACTIVE_JOBS_PER_WORKER:-4}
+      MAX_HANDOFF_SESSIONS: ${MAX_HANDOFF_SESSIONS:-1}
+      DOMAIN_ACTIVE_LIMIT_DEFAULT: ${DOMAIN_ACTIVE_LIMIT_DEFAULT:-1}
+      DOMAIN_ACTIVE_LIMITS: ${DOMAIN_ACTIVE_LIMITS:-}
+      RUNTIME_LOCK_TTL_SEC: ${RUNTIME_LOCK_TTL_SEC:-3600}
+      RUNTIME_MARKER_TTL_SEC: ${RUNTIME_MARKER_TTL_SEC:-300}
       CALLBACK_RETRIES: "3"
       CALLBACK_TIMEOUT_SEC: "10"
-      MAX_ACTIVE_SESSIONS: "1"
     volumes:
       - ./:/workspace
       - type: bind
@@ -84,6 +104,8 @@ services:
       micro-ui:
         condition: service_started
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       browser:
         condition: service_healthy

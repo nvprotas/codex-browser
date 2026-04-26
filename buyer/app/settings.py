@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from functools import lru_cache
 from typing import Literal
 
@@ -47,7 +48,16 @@ class Settings(BaseSettings):
     postgres_pool_min_size: int = Field(default=1, ge=1)
     postgres_pool_max_size: int = Field(default=5, ge=1)
 
-    max_active_sessions: int = 1
+    runtime_backend: Literal['memory', 'redis'] = 'memory'
+    redis_url: str = 'redis://redis:6379/0'
+    redis_key_prefix: str = 'buyer:runtime'
+    buyer_worker_id: str = Field(default_factory=socket.gethostname)
+    max_active_jobs_per_worker: int = Field(default=4, ge=1)
+    max_handoff_sessions: int = Field(default=1, ge=1)
+    domain_active_limit_default: int | None = Field(default=1, ge=1)
+    domain_active_limits: str = ''
+    runtime_lock_ttl_sec: int = Field(default=3600, ge=1)
+    runtime_marker_ttl_sec: int = Field(default=300, ge=1)
 
     status_ttl_sec: int = Field(default=86400, ge=60)
 

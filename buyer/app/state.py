@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from .models import EventEnvelope, SessionStatus, TaskAuthPayload
+from .runtime import normalize_domain_from_url
 
 
 def utcnow() -> datetime:
@@ -137,12 +138,17 @@ class SessionStore:
 
     def __init__(
         self,
-        max_active_sessions: int = 1,
+        max_active_sessions: int | None = None,
+        max_active_jobs_per_worker: int = 4,
+        domain_active_limit_default: int | None = None,
+        domain_active_limits: dict[str, int] | None = None,
         status_ttl_sec: int | None = None,
         clock: Callable[[], datetime] = utcnow,
         repository: SessionRepository | None = None,
     ) -> None:
-        self._max_active_sessions = max_active_sessions
+        self._max_active_jobs_per_worker = max_active_sessions or max_active_jobs_per_worker
+        self._domain_active_limit_default = domain_active_limit_default
+        self._domain_active_limits = domain_active_limits or {}
         self._status_ttl_sec = status_ttl_sec
         self._clock = clock
         self._lock = asyncio.Lock()
@@ -192,8 +198,22 @@ class SessionStore:
                 for session in sessions
                 if self._is_active_in_current_runtime(session)
             ]
-            if len(active) >= self._max_active_sessions:
-                raise SessionConflictError('Доступен только один активный сценарий одновременно.')
+            if len(active) >= self._max_active_jobs_per_worker:
+                raise SessionConflictError(
+                    f'Достигнут лимит активных сценариев worker: {self._max_active_jobs_per_worker}.'
+                )
+            domain = normalize_domain_from_url(start_url)
+            domain_limit = self._domain_limit(domain)
+            if domain and domain_limit is not None:
+                active_for_domain = [
+                    session
+                    for session in active
+                    if normalize_domain_from_url(session.start_url) == domain
+                ]
+                if len(active_for_domain) >= domain_limit:
+                    raise SessionConflictError(
+                        f'Достигнут лимит активных сценариев для домена {domain}: {domain_limit}.'
+                    )
 
             session_id = str(uuid4())
             state = SessionState(
@@ -348,6 +368,11 @@ class SessionStore:
 
     def _touch_locked(self, state: SessionState) -> None:
         state.updated_at = self._clock()
+
+    def _domain_limit(self, domain: str | None) -> int | None:
+        if domain is None:
+            return None
+        return self._domain_active_limits.get(domain, self._domain_active_limit_default)
 
     def _wake_for(self, session_id: str) -> asyncio.Event:
         event = self._wake_events.get(session_id)

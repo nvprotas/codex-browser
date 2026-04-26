@@ -22,6 +22,7 @@ from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledg
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
+from .runtime import InMemoryRuntimeCoordinator, RuntimeCoordinator, RuntimeLease, RuntimeLockConflictError
 from .state import (
     ReplyValidationError,
     SessionConflictError,
@@ -50,6 +51,7 @@ class BuyerService:
         purchase_script_allowlist: set[str] | None = None,
         purchase_script_runner: PurchaseScriptRunner | None = None,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
+        runtime_coordinator: RuntimeCoordinator | None = None,
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -64,6 +66,7 @@ class BuyerService:
         self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
         self._purchase_script_runner = purchase_script_runner
         self._knowledge_analyzer = knowledge_analyzer
+        self._runtime_coordinator = runtime_coordinator or InMemoryRuntimeCoordinator()
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
 
@@ -119,8 +122,28 @@ class BuyerService:
         recovery_started_at: float | None = None
         recovery_attempts = 0
         last_recovery_error_tail = 'none'
+        runtime_lease: RuntimeLease | None = None
         try:
             state = await self._store.get(session_id)
+            try:
+                runtime_lease = await self._runtime_coordinator.acquire_session_runner(
+                    session_id=session_id,
+                    start_url=state.start_url,
+                )
+            except RuntimeLockConflictError as exc:
+                if exc.reason_code == 'session_runner_locked':
+                    logger.info('session_runner_duplicate session_id=%s reason=%s', session_id, exc.reason_code)
+                    return
+                logger.warning('session_runtime_rejected session_id=%s reason=%s', session_id, exc.reason_code)
+                await self._handle_failed(
+                    state,
+                    str(exc),
+                    artifacts={'runtime': {'reason_code': exc.reason_code}},
+                    auth_summary=auth_summary,
+                )
+                return
+
+            await self._runtime_coordinator.mark_browser_context_active(session_id, lease=runtime_lease)
             await self._emit_event(
                 state,
                 event_type='session_started',
@@ -273,6 +296,10 @@ class BuyerService:
                     idempotency_suffix='scenario-failed-unhandled',
                 )
                 await self._store.append_event(session_id, fallback_event)
+        finally:
+            if runtime_lease is not None:
+                await self._runtime_coordinator.clear_browser_context_active(session_id)
+                await self._runtime_coordinator.release_session_runner(runtime_lease)
 
     async def _handle_completed(
         self,
@@ -631,36 +658,40 @@ class BuyerService:
         reason_code: str,
         message: str,
     ) -> None:
-        await self._emit_event(
-            state,
-            event_type='handoff_requested',
-            payload={
-                'message': message,
-                'reason_code': reason_code,
-                'novnc_url': state.novnc_url,
-            },
-            idempotency_suffix=f'handoff-requested-{reason_code}',
-        )
-        operator_reply = await self._ask_user_for_reply(
-            state,
-            (
-                'Переключитесь в noVNC, выполните ручной шаг авторизации и '
-                'подтвердите ответом в этом диалоге.'
-            ),
-            reason_code=reason_code,
-            extra_context={'handoff': True, 'novnc_url': state.novnc_url},
-        )
-        refreshed_state = await self._store.get(state.session_id)
-        await self._emit_event(
-            refreshed_state,
-            event_type='handoff_resumed',
-            payload={
-                'message': 'Ручной этап handoff завершен, buyer продолжает сценарий.',
-                'reason_code': reason_code,
-                'operator_reply': operator_reply,
-            },
-            idempotency_suffix=f'handoff-resumed-{reason_code}',
-        )
+        handoff_lease = await self._runtime_coordinator.acquire_handoff(state.session_id, reason_code=reason_code)
+        try:
+            await self._emit_event(
+                state,
+                event_type='handoff_requested',
+                payload={
+                    'message': message,
+                    'reason_code': reason_code,
+                    'novnc_url': state.novnc_url,
+                },
+                idempotency_suffix=f'handoff-requested-{reason_code}',
+            )
+            operator_reply = await self._ask_user_for_reply(
+                state,
+                (
+                    'Переключитесь в noVNC, выполните ручной шаг авторизации и '
+                    'подтвердите ответом в этом диалоге.'
+                ),
+                reason_code=reason_code,
+                extra_context={'handoff': True, 'novnc_url': state.novnc_url},
+            )
+            refreshed_state = await self._store.get(state.session_id)
+            await self._emit_event(
+                refreshed_state,
+                event_type='handoff_resumed',
+                payload={
+                    'message': 'Ручной этап handoff завершен, buyer продолжает сценарий.',
+                    'reason_code': reason_code,
+                    'operator_reply': operator_reply,
+                },
+                idempotency_suffix=f'handoff-resumed-{reason_code}',
+            )
+        finally:
+            await self._runtime_coordinator.release_handoff(handoff_lease)
 
     @staticmethod
     def _parse_auth_from_user_reply(raw: str) -> TaskAuthPayload | None:

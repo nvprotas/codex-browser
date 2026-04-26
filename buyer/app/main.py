@@ -16,6 +16,12 @@ from .models import (
 from .purchase_scripts import PurchaseScriptRunner
 from .persistence import PostgresSessionRepository
 from .runner import AgentRunner
+from .runtime import (
+    InMemoryRuntimeCoordinator,
+    RedisRuntimeCoordinator,
+    RuntimeCoordinator,
+    parse_domain_limits,
+)
 from .service import BuyerService
 from .settings import Settings, get_settings
 from .state import (
@@ -39,14 +45,42 @@ def _build_session_store(settings: Settings) -> SessionStore:
         repository = InMemorySessionRepository()
     return SessionStore(
         repository=repository,
-        max_active_sessions=settings.max_active_sessions,
+        max_active_jobs_per_worker=settings.max_active_jobs_per_worker,
+        domain_active_limit_default=settings.domain_active_limit_default,
+        domain_active_limits=parse_domain_limits(settings.domain_active_limits),
         status_ttl_sec=settings.status_ttl_sec,
     )
 
 
+def _build_runtime_coordinator(settings: Settings) -> RuntimeCoordinator:
+    domain_limits = parse_domain_limits(settings.domain_active_limits)
+    if settings.runtime_backend == 'redis':
+        return RedisRuntimeCoordinator(
+            redis_url=settings.redis_url,
+            key_prefix=settings.redis_key_prefix,
+            worker_id=settings.buyer_worker_id,
+            max_active_jobs_per_worker=settings.max_active_jobs_per_worker,
+            max_handoff_sessions=settings.max_handoff_sessions,
+            domain_active_limit_default=settings.domain_active_limit_default,
+            domain_active_limits=domain_limits,
+            lock_ttl_sec=settings.runtime_lock_ttl_sec,
+            marker_ttl_sec=settings.runtime_marker_ttl_sec,
+        )
+    return InMemoryRuntimeCoordinator(
+        worker_id=settings.buyer_worker_id,
+        max_active_jobs_per_worker=settings.max_active_jobs_per_worker,
+        max_handoff_sessions=settings.max_handoff_sessions,
+        domain_active_limit_default=settings.domain_active_limit_default,
+        domain_active_limits=domain_limits,
+        lock_ttl_sec=settings.runtime_lock_ttl_sec,
+        marker_ttl_sec=settings.runtime_marker_ttl_sec,
+    )
+
+
 settings = get_settings()
+runtime_coordinator = _build_runtime_coordinator(settings)
 store = _build_session_store(settings)
-callback_client = CallbackClient(settings)
+callback_client = CallbackClient(settings, runtime_coordinator=runtime_coordinator)
 runner = AgentRunner(settings)
 knowledge_analyzer = PostSessionKnowledgeAnalyzer(settings)
 auth_script_runner = SberIdScriptRunner(
@@ -75,6 +109,7 @@ service = BuyerService(
     purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
     purchase_script_runner=purchase_script_runner,
     knowledge_analyzer=knowledge_analyzer,
+    runtime_coordinator=runtime_coordinator,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')
@@ -87,6 +122,7 @@ async def healthz() -> dict[str, str]:
 
 @app.on_event('startup')
 async def startup() -> None:
+    await runtime_coordinator.initialize()
     await store.initialize()
 
 
@@ -95,6 +131,7 @@ async def shutdown() -> None:
     await service.shutdown_post_session_analysis()
     await callback_client.aclose()
     await store.aclose()
+    await runtime_coordinator.aclose()
 
 
 @app.post('/v1/tasks', response_model=TaskCreateResponse, status_code=201)

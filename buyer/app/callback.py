@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timezone
 from random import random
 from uuid import uuid4
@@ -8,7 +9,10 @@ from uuid import uuid4
 import httpx
 
 from .models import EventEnvelope
+from .runtime import RuntimeCoordinator
 from .settings import Settings
+
+logger = logging.getLogger('uvicorn.error')
 
 
 class CallbackDeliveryError(RuntimeError):
@@ -16,8 +20,9 @@ class CallbackDeliveryError(RuntimeError):
 
 
 class CallbackClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, runtime_coordinator: RuntimeCoordinator | None = None) -> None:
         self._settings = settings
+        self._runtime_coordinator = runtime_coordinator
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.callback_timeout_sec))
 
     def build_envelope(self, session_id: str, event_type: str, payload: dict, idempotency_suffix: str | None = None) -> EventEnvelope:
@@ -38,9 +43,11 @@ class CallbackClient:
 
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
+            await self._record_callback_attempt_marker(envelope, attempt=attempt, attempts_total=attempts)
             try:
                 response = await self._client.post(callback_url, json=envelope.model_dump(mode='json'))
                 response.raise_for_status()
+                await self._clear_callback_attempt_marker(envelope.event_id)
                 return
             except Exception as exc:  # noqa: BLE001 - важно сохранить первопричину доставки
                 last_error = exc
@@ -53,6 +60,28 @@ class CallbackClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def _record_callback_attempt_marker(self, envelope: EventEnvelope, *, attempt: int, attempts_total: int) -> None:
+        if self._runtime_coordinator is None:
+            return
+        try:
+            await self._runtime_coordinator.record_callback_attempt(
+                session_id=envelope.session_id,
+                event_id=envelope.event_id,
+                event_type=envelope.event_type,
+                attempt=attempt,
+                attempts_total=attempts_total,
+            )
+        except Exception as exc:  # noqa: BLE001 - marker не должен блокировать сам callback
+            logger.warning('callback_attempt_marker_failed event_id=%s error=%s', envelope.event_id, exc)
+
+    async def _clear_callback_attempt_marker(self, event_id: str) -> None:
+        if self._runtime_coordinator is None:
+            return
+        try:
+            await self._runtime_coordinator.clear_callback_attempt(event_id)
+        except Exception as exc:  # noqa: BLE001 - marker не должен превращать успешный callback в failure
+            logger.warning('callback_attempt_marker_clear_failed event_id=%s error=%s', event_id, exc)
 
     @staticmethod
     def _utc_now():
