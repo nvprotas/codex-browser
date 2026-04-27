@@ -208,7 +208,8 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 ## Важные ограничения MVP
 
 - Состояние задач, сессий, событий, ответов, agent memory и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
-- После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner. Защита от двойного запуска и resume активных задач будут реализованы через Redis locks/runtime markers.
+- После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner и не восстанавливает утраченную browser page.
+- Следующий этап runtime заменяет Redis-подход на Postgres task queue и browser-slot manager: `waiting_user` освобождает agent runner, browser slot удерживается только до TTL ожидания, после timeout сессия завершается без resume.
 - Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
 - noVNC поднят всегда и без пароля (только для MVP).
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).

@@ -52,7 +52,8 @@
 
 - Долговременное состояние задач, сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
 - In-memory backend остается только как локальный режим для unit-тестов и отладки.
-- После рестарта `buyer` восстанавливает сохраненные статусы и историю сессии, но не автопродолжает активный runner без Redis locks/runtime markers.
+- После рестарта `buyer` восстанавливает сохраненные статусы и историю сессии, но не автопродолжает активный runner и не восстанавливает утраченную browser page.
+- Следующий runtime-этап использует Postgres task queue и browser-slot manager вместо Redis: `waiting_user` освобождает agent runner, browser slot удерживается только до TTL ожидания, после timeout сессия завершается без resume.
 - `storageState`, cookies, tokens и localStorage не сохраняются в Postgres. Auth-пакет остается `session-bound` и живет только в памяти текущего процесса.
 
 ## SberId авторизация v1

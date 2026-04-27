@@ -19,18 +19,24 @@
 
 ## State и runtime
 
-- Persistence: `Postgres + Redis`.
-- `Postgres`: долговременное состояние задач/сессий/артефактов.
-- `Redis`: lock, TTL и runtime-маркеры.
-- Изоляция браузерных задач: `1 job = 1 isolated Playwright context`.
-- Браузерный рантайм в MVP разворачивается отдельным `browser-sidecar` контейнером:
+- Persistence и очередь выполнения: `Postgres`.
+- Redis не является обязательной зависимостью v1. Distributed locks и отдельный worker-pool выносятся в будущий этап масштабирования.
+- `Postgres`: долговременное состояние задач/сессий/артефактов, очередь задач, статусы ожидания пользователя и дедлайны ожидания.
+- Runtime-модель v1: один `buyer` process забирает задачи из Postgres по очереди и обновляет статус сессии.
+- Если сессия переходит в `waiting_user`, agent runner освобождается и `buyer` может выполнять следующую задачу.
+- `waiting_user` удерживает browser slot только до дедлайна ожидания ответа. После timeout сессия завершается без resume, browser slot очищается и возвращается в пул.
+- Браузерный рантайм в MVP разворачивается как пул `browser-sidecar` слотов:
   - внутри sidecar: `Chromium + Xvfb + x11vnc + noVNC`,
-  - `buyer` подключается к браузеру по CDP endpoint,
-  - noVNC публикуется отдельно от API-контейнера.
+  - `buyer` назначает сессии свободный browser slot и подключается к нему по CDP endpoint,
+  - noVNC публикуется отдельно от API-контейнера для каждого доступного browser slot,
+  - размер пула задается конфигурацией; динамическое создание контейнеров допускается только с явными `min/max` лимитами.
 - Лимиты рантайма по умолчанию:
-  - `max_active_jobs_per_worker=4`
+  - `max_active_jobs_per_worker=1`
+  - `max_browser_slots=2`
+  - `waiting_user_timeout_sec=300`
   - `max_handoff_sessions=1`
   - доменные лимиты для снижения флейков и банов.
+- После рестарта `buyer` не продолжает активный runner и не восстанавливает утраченную browser page. Сессии, потерявшие runtime browser slot, должны завершаться понятной ошибкой или требовать нового запуска.
 - Политика восстановления CDP (hotfix 2026-04-23):
   - единое окно восстановления: `CDP_RECOVERY_WINDOW_SEC=20`,
   - интервал retry: `CDP_RECOVERY_INTERVAL_MS=500`,
