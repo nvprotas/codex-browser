@@ -52,8 +52,18 @@
 
 - Долговременное состояние задач, сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
 - In-memory backend остается только как локальный режим для unit-тестов и отладки.
-- После рестарта `buyer` восстанавливает сохраненные статусы и историю сессии, но не автопродолжает активный runner без Redis locks/runtime markers.
+- После рестарта `buyer` восстанавливает сохраненные статусы и историю сессии. Redis locks/runtime markers предотвращают двойной старт runner-а и фиксируют runtime-состояние, но автоматическое продолжение active runner остается задачей будущего worker/resume-слоя.
 - `storageState`, cookies, tokens и localStorage не сохраняются в Postgres. Auth-пакет остается `session-bound` и живет только в памяти текущего процесса.
+
+## Runtime Locks И Маркеры
+
+- Runtime-координация работает через `RUNTIME_BACKEND=redis|memory`; Redis используется в docker compose, memory — в unit-тестах и локальной отладке.
+- Перед выполнением сценария `buyer` берет session runner lock с TTL, чтобы одна сессия не выполнялась двумя runner-ами одновременно.
+- Активность browser context, handoff и callback delivery attempts фиксируется TTL-маркерами в runtime-слое.
+- Лимиты выполнения задаются отдельно:
+  - `MAX_ACTIVE_JOBS_PER_WORKER`;
+  - `MAX_HANDOFF_SESSIONS`;
+  - `DOMAIN_ACTIVE_LIMIT_DEFAULT` и `DOMAIN_ACTIVE_LIMITS`.
 
 ## SberId авторизация v1
 

@@ -22,8 +22,9 @@ Roadmap развития после MVP: `docs/buyer-roadmap.md`.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
 - Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
 - Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
+- Runtime-координация в Redis: lock на runner сессии, TTL-маркеры browser context/handoff/callback attempts, лимиты worker/domain.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
-- Ограничение MVP: только 1 активная сессия одновременно.
+- Лимиты активных сценариев настраиваются через `MAX_ACTIVE_JOBS_PER_WORKER`, `MAX_HANDOFF_SESSIONS` и domain limits.
 - Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
 
 ## Запуск
@@ -72,6 +73,16 @@ cp .env.example .env
 # POSTGRES_DB=buyer
 # POSTGRES_USER=buyer
 # POSTGRES_PASSWORD=buyer
+
+# Runtime-координация buyer
+# RUNTIME_BACKEND=redis
+# REDIS_URL=redis://redis:6379/0
+# MAX_ACTIVE_JOBS_PER_WORKER=4
+# MAX_HANDOFF_SESSIONS=1
+# DOMAIN_ACTIVE_LIMIT_DEFAULT=1
+# DOMAIN_ACTIVE_LIMITS=
+# RUNTIME_LOCK_TTL_SEC=3600
+# RUNTIME_MARKER_TTL_SEC=300
 ```
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
