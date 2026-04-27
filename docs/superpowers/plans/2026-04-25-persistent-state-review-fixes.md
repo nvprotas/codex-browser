@@ -4,7 +4,7 @@
 
 **Цель:** закрыть замечания ревью по безопасному сохранению persistent state и поведению активных сессий после рестарта.
 
-**Архитектура:** `BuyerService` продолжает отправлять внешний callback с исходным payload, но repository сохраняет в Postgres только redacted-представление событий и артефактов. `SessionStore` различает активные сессии текущего процесса и stale-сессии, восстановленные из persistent backend без `task_ref`, чтобы restart не блокировал новые задачи до появления Redis locks/resume.
+**Архитектура:** `BuyerService` продолжает отправлять внешний callback с исходным payload, но repository сохраняет в Postgres только redacted-представление событий и артефактов. `SessionStore` различает активные сессии текущего процесса и stale-сессии, восстановленные из persistent backend без `task_ref`, чтобы restart не блокировал новые задачи до появления Postgres task queue и browser-slot runtime.
 
 **Технологии:** Python 3.12, unittest/pytest, asyncpg repository, FastAPI state layer.
 
@@ -80,7 +80,7 @@ Expected: FAIL с `SessionConflictError`.
 
 - [x] **Step 3: Implement runtime-aware active counting**
 
-В `SessionStore.create_session` считать активными только non-terminal сессии с runtime `task_ref`, а stale persistent сессии без runtime handle не блокируют новый запуск до реализации Redis locks/resume.
+В `SessionStore.create_session` считать активными только non-terminal сессии с runtime `task_ref`, а stale persistent сессии без runtime handle не блокируют новый запуск до реализации Postgres task queue и browser-slot runtime.
 
 - [x] **Step 4: Verify green**
 
