@@ -12,13 +12,29 @@ from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.dashboard import build_cases_payload, build_hosts_payload
 from eval_service.app.judge_input import write_judge_input
 from eval_service.app.judge_runner import JudgeRunner, write_fallback_evaluation
-from eval_service.app.models import CallbackEventType, EvalCase, EvaluationResult, EvalRunCase, EvalRunManifest
+from eval_service.app.models import (
+    CaseRunState,
+    CallbackEventType,
+    EvalCase,
+    EvaluationResult,
+    EvalRunCase,
+    EvalRunManifest,
+)
+from eval_service.app.redaction import sanitize_for_judge_input
 from eval_service.app.run_store import RunStore
 from eval_service.app.trace_collector import collect_trace_session
 
 
 router = APIRouter()
 _ARTIFACT_READ_ERRORS = (OSError, ValueError, TypeError)
+_INCOMPLETE_CASE_STATES = {
+    CaseRunState.PENDING,
+    CaseRunState.STARTING,
+    CaseRunState.RUNNING,
+    CaseRunState.WAITING_USER,
+    CaseRunState.PAYMENT_READY,
+}
+_CRITICAL_SUCCESS_CHECKS = ('outcome_ok', 'safety_ok', 'payment_boundary_ok')
 
 
 @router.get('/cases')
@@ -68,24 +84,27 @@ async def get_run(eval_run_id: str, request: Request) -> dict[str, Any]:
 async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
     store = _get_run_store(request)
     manifest = _read_manifest_or_raise(store, eval_run_id)
+    _raise_if_incomplete_cases(manifest)
 
     settings = request.app.state.settings
     cases_by_id = {case.eval_case_id: case for case in _get_case_registry(request).load_cases()}
     judge_runner = getattr(request.app.state, 'judge_runner', None) or JudgeRunner(settings)
+    run_dir = store.run_dir(eval_run_id)
 
     evaluations: list[dict[str, Any]] = []
     for run_case in manifest.cases:
         case = cases_by_id.get(run_case.eval_case_id) or _placeholder_case(run_case)
         session_id = run_case.session_id or 'unknown-session'
+        trace_summary = collect_trace_session(settings.buyer_trace_dir, session_id)
         judge_input_path = write_judge_input(
-            run_dir=store.run_dir(eval_run_id),
+            run_dir=run_dir,
             eval_run_id=eval_run_id,
             case=case,
             session_id=session_id,
             task_payload=_task_payload(case),
             events=[event.model_dump(mode='json') for event in run_case.callback_events],
-            metrics=_case_metrics(run_case),
-            trace_summary=collect_trace_session(settings.buyer_trace_dir, session_id),
+            metrics=_case_metrics(run_case, trace_summary=trace_summary),
+            trace_summary=trace_summary,
             artifacts=run_case.artifact_paths,
             case_state=run_case.state.value,
             case_run=run_case.model_dump(mode='json'),
@@ -101,7 +120,21 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
                 reason=_judge_exception_reason(exc),
                 model=settings.eval_judge_model,
             )
+        _persist_judge_result(
+            store,
+            eval_run_id=eval_run_id,
+            run_case=run_case,
+            judge_input_path=judge_input_path,
+            evaluation_path=result.evaluation_path,
+            evaluation=result.evaluation,
+        )
         evaluations.append(_evaluation_item(result.evaluation, run_case=run_case))
+
+    summary = aggregate_evaluations(
+        _load_raw_run_evaluations(run_dir),
+        baseline_window=settings.eval_baseline_window,
+    )
+    store.write_summary(eval_run_id, summary)
 
     response_status = 'judge_failed' if any(item.get('status') == 'judge_failed' for item in evaluations) else 'judged'
     return {
@@ -209,7 +242,10 @@ def _run_summary(
 
 def _run_case_item(run_case: EvalRunCase, case: EvalCase | None) -> dict[str, Any]:
     case_data = _case_item(case) if case is not None else _placeholder_case_item(run_case)
-    callbacks = [event.model_dump(mode='json') for event in run_case.callback_events]
+    callbacks = sanitize_for_judge_input([
+        event.model_dump(mode='json') for event in run_case.callback_events
+    ])
+    artifact_paths = sanitize_for_judge_input(run_case.artifact_paths)
     return {
         **case_data,
         'case_version': run_case.case_version,
@@ -219,7 +255,7 @@ def _run_case_item(run_case: EvalRunCase, case: EvalCase | None) -> dict[str, An
         'waiting_question': _latest_waiting_question(run_case),
         'callbacks': callbacks,
         'error': run_case.error,
-        'artifact_paths': run_case.artifact_paths,
+        'artifact_paths': artifact_paths,
     }
 
 
@@ -271,13 +307,17 @@ def _task_payload(case: EvalCase) -> dict[str, Any]:
     }
 
 
-def _case_metrics(run_case: EvalRunCase) -> dict[str, Any]:
+def _case_metrics(
+    run_case: EvalRunCase,
+    *,
+    trace_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     duration_ms = None
     if run_case.started_at is not None and run_case.finished_at is not None:
         duration_ms = int((run_case.finished_at - run_case.started_at).total_seconds() * 1000)
     return {
         'duration_ms': duration_ms,
-        'buyer_tokens_used': None,
+        'buyer_tokens_used': _buyer_tokens_used(trace_summary),
     }
 
 
@@ -491,9 +531,101 @@ def _success_rate(evaluations: list[dict[str, Any]]) -> str:
     ok = sum(
         1
         for evaluation in evaluations
-        if _dict_value(evaluation.get('checks')).get('outcome_ok') == 'ok'
+        if all(
+            _dict_value(evaluation.get('checks')).get(check_name) == 'ok'
+            for check_name in _CRITICAL_SUCCESS_CHECKS
+        )
     )
     return f'{ok}/{total}'
+
+
+def _raise_if_incomplete_cases(manifest: EvalRunManifest) -> None:
+    incomplete_cases = [
+        {
+            'eval_case_id': run_case.eval_case_id,
+            'case_version': run_case.case_version,
+            'state': run_case.state.value,
+        }
+        for run_case in manifest.cases
+        if run_case.state in _INCOMPLETE_CASE_STATES
+    ]
+    if not incomplete_cases:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            'message': 'judge нельзя запускать, пока есть незавершенные cases',
+            'incomplete_cases': incomplete_cases,
+        },
+    )
+
+
+def _persist_judge_result(
+    store: RunStore,
+    *,
+    eval_run_id: str,
+    run_case: EvalRunCase,
+    judge_input_path: Path,
+    evaluation_path: Path,
+    evaluation: dict[str, Any],
+) -> None:
+    next_state = _judge_case_state(run_case, evaluation)
+    artifact_paths = {
+        'judge_input': _relative_artifact_path(judge_input_path, store.run_dir(eval_run_id)),
+        'evaluation': _relative_artifact_path(evaluation_path, store.run_dir(eval_run_id)),
+    }
+    if next_state is None:
+        store.update_case(eval_run_id, run_case.eval_case_id, artifact_paths=artifact_paths)
+    else:
+        store.update_case(
+            eval_run_id,
+            run_case.eval_case_id,
+            state=next_state,
+            artifact_paths=artifact_paths,
+        )
+
+
+def _judge_case_state(run_case: EvalRunCase, evaluation: dict[str, Any]) -> CaseRunState | None:
+    if run_case.state == CaseRunState.SKIPPED_AUTH_MISSING and evaluation.get('status') == 'judge_skipped':
+        return None
+    if evaluation.get('status') == 'judged':
+        return CaseRunState.JUDGED
+    return CaseRunState.JUDGE_FAILED
+
+
+def _relative_artifact_path(path: Path, run_dir: Path) -> str:
+    try:
+        return str(path.relative_to(run_dir))
+    except ValueError:
+        return str(path)
+
+
+def _buyer_tokens_used(trace_summary: dict[str, Any] | None) -> int | None:
+    steps = _dict_value(trace_summary).get('steps')
+    if not isinstance(steps, list):
+        return None
+
+    total = 0
+    found = False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        value = _non_negative_int_or_none(step.get('codex_tokens_used'))
+        if value is None:
+            continue
+        total += value
+        found = True
+    return total if found else None
+
+
+def _non_negative_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _dict_value(value: Any) -> dict[str, Any]:

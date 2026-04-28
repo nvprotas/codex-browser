@@ -400,12 +400,7 @@
 
   async function evalRequest(contract, options = {}) {
     if (window.EVAL_SERVICE_BASE_URL) {
-      try {
-        return await fetchEvalService(contract, options);
-      } catch (error) {
-        console.warn('eval service fallback', contract, error);
-        return stubRequest(contract, options);
-      }
+      return fetchEvalService(contract, options);
     }
     return stubRequest(contract, options);
   }

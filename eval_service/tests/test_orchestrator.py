@@ -148,7 +148,7 @@ def test_post_runs_selected_cases_creates_manifest_and_calls_buyer_sequentially(
     }
     assert buyer.calls[0]['task'] == 'Задача для case-a'
     assert buyer.calls[0]['start_url'] == 'https://example.test/case-a'
-    assert buyer.calls[0]['callback_url'] == 'http://testserver/callbacks/buyer'
+    assert buyer.calls[0]['callback_url'] == 'http://eval_service:8090/callbacks/buyer'
     assert buyer.calls[0]['storage_state'] == {'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}
 
 
@@ -224,13 +224,13 @@ def test_missing_auth_profile_skips_case_and_continues_with_later_case(tmp_path:
     assert later_case.state == CaseRunState.FINISHED
 
 
-def test_create_task_failure_marks_case_timeout_and_continues_with_later_case(tmp_path: Path) -> None:
+def test_create_task_failure_marks_case_failed_and_continues_with_later_case(tmp_path: Path) -> None:
     def fail_first_case_and_finish_later(call: dict[str, Any]) -> None:
         if call['metadata']['eval_case_id'] == 'case-create-fails':
             raise RuntimeError('buyer create_task недоступен')
 
         failed_case = store.read_manifest('eval-run-001').cases[0]
-        assert failed_case.state == CaseRunState.TIMEOUT
+        assert failed_case.state == CaseRunState.FAILED
         _append_payment_ready(store, call)
 
     client, store, buyer, _timer = _client_with_orchestrator(
@@ -250,7 +250,7 @@ def test_create_task_failure_marks_case_timeout_and_continues_with_later_case(tm
     assert manifest.status == EvalRunStatus.FINISHED
     assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-create-fails', 'case-later']
     failed_case, later_case = manifest.cases
-    assert failed_case.state == CaseRunState.TIMEOUT
+    assert failed_case.state == CaseRunState.FAILED
     assert failed_case.started_at is not None
     assert failed_case.finished_at is not None
     assert failed_case.error is not None
@@ -716,7 +716,7 @@ def _client_with_orchestrator(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     timer: FakeTimer | None = None,
     raise_server_exceptions: bool = True,
-    eval_callback_base_url: str | None = None,
+    eval_callback_base_url: str | None = 'http://eval_service:8090',
     client_base_url: str = 'http://testserver',
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
     settings = Settings(

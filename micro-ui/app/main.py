@@ -31,6 +31,12 @@ templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
 app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='static')
 
 
+def eval_proxy_timeout(path: str, method: str) -> httpx.Timeout:
+    if method.upper() == 'POST' and path.strip('/') == 'runs':
+        return httpx.Timeout(650.0)
+    return httpx.Timeout(60.0)
+
+
 @app.get('/healthz')
 async def healthz() -> dict[str, str]:
     return {'status': 'ok'}
@@ -102,7 +108,7 @@ async def api_eval_proxy(path: str, request: Request) -> Response:
     headers = {'Content-Type': request.headers.get('content-type', 'application/json')}
 
     try:
-        timeout = httpx.Timeout(60.0)
+        timeout = eval_proxy_timeout(path, request.method)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 request.method,

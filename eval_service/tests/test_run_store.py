@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,6 +50,15 @@ def test_create_run_creates_directory_and_manifest(tmp_path: Path) -> None:
         'brandshop_sneakers_001',
     ]
     assert store.read_manifest('eval-20260428-120000') == manifest
+
+
+def test_run_store_rejects_eval_run_id_path_traversal(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+
+    with pytest.raises(ValueError, match='eval_run_id'):
+        store.create_run('../evil', cases=[_case()])
+
+    assert not (tmp_path.parent / 'evil').exists()
 
 
 def test_write_manifest_round_trips_existing_manifest(tmp_path: Path) -> None:
@@ -139,6 +149,80 @@ def test_append_callback_event_tracks_event_and_optional_case_fields(tmp_path: P
         (tmp_path / 'eval-20260428-120000' / 'manifest.json').read_text(encoding='utf-8')
     )
     assert stored['cases'][0]['callback_events'][0]['event_type'] == 'ask_user'
+
+
+def test_concurrent_case_updates_and_callback_events_do_not_lose_updates(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+    store.create_run('eval-20260428-120000', cases=[_case()])
+    occurred_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+    def append_event(index: int) -> None:
+        event = BuyerCallbackEnvelope(
+            event_id=f'event-{index}',
+            session_id='session-123',
+            event_type=CallbackEventType.AGENT_STEP_FINISHED,
+            occurred_at=occurred_at,
+            idempotency_key=f'idem-{index}',
+            payload={'index': index},
+        )
+        store.append_callback_event(
+            'eval-20260428-120000',
+            'litres_book_odyssey_001',
+            event,
+            artifact_paths={f'event_{index}': f'artifacts/event-{index}.json'},
+        )
+
+    def update_case(index: int) -> None:
+        store.update_case(
+            'eval-20260428-120000',
+            'litres_book_odyssey_001',
+            session_id='session-123',
+            artifact_paths={f'update_{index}': f'artifacts/update-{index}.json'},
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [
+            *(executor.submit(append_event, index) for index in range(30)),
+            *(executor.submit(update_case, index) for index in range(30)),
+        ]
+        for future in futures:
+            future.result()
+
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert {event.event_id for event in case.callback_events} == {f'event-{index}' for index in range(30)}
+    assert case.artifact_paths == {
+        **{f'event_{index}': f'artifacts/event-{index}.json' for index in range(30)},
+        **{f'update_{index}': f'artifacts/update-{index}.json' for index in range(30)},
+    }
+
+
+def test_append_callback_event_is_idempotent_under_concurrency(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+    store.create_run('eval-20260428-120000', cases=[_case()])
+    event = BuyerCallbackEnvelope(
+        event_id='event-duplicate',
+        session_id='session-123',
+        event_type=CallbackEventType.ASK_USER,
+        occurred_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
+        idempotency_key='idem-duplicate',
+        payload={},
+    )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [
+            executor.submit(
+                store.append_callback_event,
+                'eval-20260428-120000',
+                'litres_book_odyssey_001',
+                event,
+            )
+            for _ in range(30)
+        ]
+        for future in futures:
+            future.result()
+
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.callback_events == [event]
 
 
 def test_write_summary_persists_supplied_aggregate_and_updates_manifest(tmp_path: Path) -> None:

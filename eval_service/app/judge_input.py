@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import EvalCase
+from .models import EvalCase, validate_path_segment_id
 from .redaction import sanitize_for_judge_input
 
 
@@ -22,9 +22,13 @@ def write_judge_input(
     case_state: str | None = None,
     case_run: dict[str, Any] | None = None,
 ) -> Path:
+    validate_path_segment_id(eval_run_id, 'eval_run_id')
+    validate_path_segment_id(case.eval_case_id, 'eval_case_id')
     evaluations_dir = Path(run_dir) / 'evaluations'
     evaluations_dir.mkdir(parents=True, exist_ok=True)
     output_path = evaluations_dir / f'{case.eval_case_id}.judge-input.json'
+    if output_path.resolve().parent != evaluations_dir.resolve():
+        raise ValueError('judge-input должен записываться внутри evaluations')
 
     payload = {
         'eval_run_id': eval_run_id,

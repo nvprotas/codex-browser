@@ -39,7 +39,8 @@ def _client_with_store(
     tmp_path: Path,
     *,
     raise_server_exceptions: bool = True,
-    eval_callback_base_url: str | None = None,
+    eval_callback_base_url: str | None = 'http://eval_service:8090',
+    eval_callback_secret: str | None = None,
     client_base_url: str = 'http://testserver',
 ) -> tuple[TestClient, RunStore, FakeBuyerClient]:
     settings = Settings(
@@ -47,6 +48,7 @@ def _client_with_store(
         eval_runs_dir=tmp_path,
         buyer_api_base_url='http://buyer.test',
         eval_callback_base_url=eval_callback_base_url,
+        eval_callback_secret=eval_callback_secret,
     )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 1, tzinfo=UTC))
@@ -62,6 +64,12 @@ def _create_run(store: RunStore) -> None:
         cases=[EvalRunCase(eval_case_id='litres_book_odyssey_001', case_version='1')],
         status=EvalRunStatus.RUNNING,
     )
+
+
+def _callback_url(token: str | None = None) -> str:
+    if token is None:
+        return '/callbacks/buyer'
+    return f'/callbacks/buyer?token={token}'
 
 
 def _callback_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -107,6 +115,22 @@ def test_buyer_callback_ask_user_persists_event_and_waiting_state(tmp_path: Path
     assert case.session_id == 'session-123'
     assert case.waiting_reply_id == 'reply-42'
     assert case.callback_events[0].payload['question'] == 'Подтвердить размер?'
+
+
+def test_buyer_callback_requires_valid_token_when_secret_is_configured(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path, eval_callback_secret='callback-secret')
+    _create_run(store)
+    payload = _callback_payload('session_started', {'message': 'started'})
+
+    missing_response = client.post('/callbacks/buyer', json=payload)
+    invalid_response = client.post(_callback_url('wrong-secret'), json=payload)
+    valid_response = client.post(_callback_url('callback-secret'), json=payload)
+
+    assert missing_response.status_code == 401
+    assert invalid_response.status_code == 401
+    assert valid_response.status_code == 200
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert len(case.callback_events) == 1
 
 
 def test_buyer_callback_without_eval_ids_resolves_case_by_session_id_for_ask_user(tmp_path: Path) -> None:
@@ -690,6 +714,70 @@ def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_h
         'eval_case_id': 'litres_book_odyssey_001',
         'callback_url': 'http://eval_service:8090/callbacks/buyer',
     }
+
+
+def test_operator_reply_resume_callback_url_includes_configured_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _buyer = _client_with_store(
+        tmp_path,
+        eval_callback_base_url='http://eval_service:8090',
+        eval_callback_secret='callback-secret',
+    )
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer?token=callback-secret',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+    captured: dict[str, str] = {}
+
+    class FakeOrchestrator:
+        async def resume_after_operator_reply(
+            self,
+            *,
+            eval_run_id: str,
+            eval_case_id: str,
+            callback_url: str,
+        ) -> None:
+            captured['callback_url'] = callback_url
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    monkeypatch.setattr('eval_service.app.callbacks.get_run_orchestrator', lambda request: FakeOrchestrator())
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert response.status_code == 200
+    assert captured == {'callback_url': 'http://eval_service:8090/callbacks/buyer?token=callback-secret'}
+
+
+def test_operator_reply_resume_without_callback_base_url_fails_instead_of_using_request_host(
+    tmp_path: Path,
+) -> None:
+    client, store, _buyer = _client_with_store(
+        tmp_path,
+        eval_callback_base_url='http://eval_service:8090',
+        raise_server_exceptions=False,
+    )
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+    client.app.state.settings.eval_callback_base_url = None
+
+    response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert response.status_code == 500
 
 
 def test_operator_reply_inline_resume_failure_marks_run_failed(tmp_path: Path) -> None:

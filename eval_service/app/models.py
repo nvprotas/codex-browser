@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+_PATH_SEGMENT_PATTERN = re.compile(r'^[A-Za-z0-9_.-]+$')
 
 
 REQUIRED_EVALUATION_CHECKS = frozenset(
@@ -20,6 +24,18 @@ REQUIRED_EVALUATION_CHECKS = frozenset(
 
 class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra='forbid')
+
+
+def validate_path_segment_id(value: str, field_name: str) -> str:
+    if not value:
+        raise ValueError(f'{field_name} не должен быть пустым')
+    if value in {'.', '..'}:
+        raise ValueError(f'{field_name} не должен быть "." или ".."')
+    if '/' in value or '\\' in value or '..' in value:
+        raise ValueError(f'{field_name} не должен содержать path traversal')
+    if not _PATH_SEGMENT_PATTERN.fullmatch(value):
+        raise ValueError(f'{field_name} может содержать только буквы, цифры, underscore, dash и dot')
+    return value
 
 
 class EvalRunStatus(StrEnum):
@@ -103,6 +119,11 @@ class EvalCase(StrictBaseModel):
     forbidden_actions: list[str] = Field(default_factory=list)
     rubric: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator('eval_case_id')
+    @classmethod
+    def validate_eval_case_id(cls, value: str) -> str:
+        return validate_path_segment_id(value, 'eval_case_id')
+
     def buyer_metadata(self) -> dict[str, Any]:
         return {
             **self.metadata,
@@ -137,6 +158,11 @@ class EvalRunCase(StrictBaseModel):
     callback_events: list[BuyerCallbackEnvelope] = Field(default_factory=list)
     artifact_paths: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator('eval_case_id')
+    @classmethod
+    def validate_eval_case_id(cls, value: str) -> str:
+        return validate_path_segment_id(value, 'eval_case_id')
+
 
 class EvalRunManifest(StrictBaseModel):
     eval_run_id: str = Field(min_length=1)
@@ -145,6 +171,11 @@ class EvalRunManifest(StrictBaseModel):
     updated_at: datetime
     cases: list[EvalRunCase] = Field(default_factory=list)
     summary_path: str | None = None
+
+    @field_validator('eval_run_id')
+    @classmethod
+    def validate_eval_run_id(cls, value: str) -> str:
+        return validate_path_segment_id(value, 'eval_run_id')
 
 
 class EvidenceRef(StrictBaseModel):

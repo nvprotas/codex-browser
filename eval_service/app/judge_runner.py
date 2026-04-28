@@ -142,6 +142,15 @@ class JudgeRunner:
                 reason=f'codex exec schema validation failed: {exc.message}',
             )
 
+        identity_mismatch = _identity_mismatch_reason(evaluation, judge_input)
+        if identity_mismatch is not None:
+            return self._write_fallback(
+                evaluation_path,
+                judge_input,
+                status='judge_failed',
+                reason=identity_mismatch,
+            )
+
         return JudgeRunResult(evaluation_path=evaluation_path, evaluation=evaluation)
 
     def _build_command(self, *, evaluation_path: Path, prompt: str) -> list[str]:
@@ -220,6 +229,18 @@ def _fallback_evaluation(
             'model': _string_value(model, fallback='unknown-model'),
         },
     }
+
+
+def _identity_mismatch_reason(evaluation: dict[str, Any], judge_input: dict[str, Any]) -> str | None:
+    mismatches = []
+    for key in ('eval_run_id', 'eval_case_id', 'case_version', 'session_id', 'host'):
+        expected = _string_value(judge_input.get(key), fallback='')
+        actual = _string_value(evaluation.get(key), fallback='')
+        if actual != expected:
+            mismatches.append(f'{key}: expected {expected!r}, got {actual!r}')
+    if not mismatches:
+        return None
+    return 'codex exec identity mismatch after schema validation: ' + '; '.join(mismatches)
 
 
 def _auth_skip_reason(judge_input: dict[str, Any]) -> str | None:

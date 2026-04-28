@@ -215,7 +215,7 @@ class RunOrchestrator:
         manifest = self.run_store.update_case(
             eval_run_id,
             eval_case_id,
-            state=CaseRunState.TIMEOUT,
+            state=CaseRunState.FAILED,
             finished_at=self.clock(),
             waiting_reply_id=None,
             error=f'buyer runtime failure: {type(exc).__name__}: {exc}',

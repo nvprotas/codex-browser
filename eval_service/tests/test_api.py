@@ -433,6 +433,60 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     assert judge_runner.inputs[0]['case_state'] == 'finished'
     assert judge_runner.inputs[0]['artifacts'] == {'receipt': 'artifacts/receipt.json'}
     assert judge_runner.inputs[0]['trace'] == {'session_id': 'session-a', 'trace_dir': None, 'steps': []}
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.cases[0].state == CaseRunState.JUDGED
+    assert manifest.cases[0].artifact_paths == {
+        'receipt': 'artifacts/receipt.json',
+        'judge_input': 'evaluations/case-a.judge-input.json',
+        'evaluation': 'evaluations/case-a.evaluation.json',
+    }
+    assert manifest.summary_path == 'summary.json'
+    summary = json.loads((tmp_path / 'eval-run-001' / 'summary.json').read_text(encoding='utf-8'))
+    assert summary['totals']['evaluations'] == 1
+    assert summary['totals']['judged'] == 1
+
+
+def test_post_run_judge_rejects_incomplete_cases(tmp_path: Path) -> None:
+    for state in (
+        CaseRunState.PENDING,
+        CaseRunState.STARTING,
+        CaseRunState.RUNNING,
+        CaseRunState.WAITING_USER,
+        CaseRunState.PAYMENT_READY,
+    ):
+        run_id = f'eval-run-{state.value}'
+        client, store = _client(tmp_path / state.value, cases=[_case('case-a')])
+        client.app.state.judge_runner = FakeJudgeRunner()
+        store.create_run(
+            run_id,
+            cases=[EvalRunCase(eval_case_id='case-a', case_version='1', state=state)],
+            status=EvalRunStatus.RUNNING,
+        )
+
+        response = client.post(f'/runs/{run_id}/judge')
+
+        assert response.status_code == 409
+        assert response.json()['detail']['incomplete_cases'][0]['state'] == state.value
+        assert not (tmp_path / state.value / run_id / 'evaluations').exists()
+
+
+def test_post_run_judge_extracts_buyer_tokens_from_trace_steps(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    judge_runner = FakeJudgeRunner()
+    client.app.state.judge_runner = judge_runner
+    _write_trace_step(tmp_path, 'session-a', 1, {'codex_tokens_used': 10})
+    _write_trace_step(tmp_path, 'session-a', 2, {'codex_tokens_used': 25})
+    store.create_run(
+        'eval-run-001',
+        cases=[EvalRunCase(eval_case_id='case-a', case_version='1', state=CaseRunState.FINISHED, session_id='session-a')],
+        status=EvalRunStatus.FINISHED,
+    )
+
+    response = client.post('/runs/eval-run-001/judge')
+
+    assert response.status_code == 200
+    assert judge_runner.inputs[0]['metrics']['buyer_tokens_used'] == 35
+    assert response.json()['evaluations'][0]['buyer_tokens_used'] == 35
 
 
 def test_post_run_judge_runs_sync_runner_through_threadpool(tmp_path: Path, monkeypatch: Any) -> None:
@@ -492,6 +546,9 @@ def test_post_run_judge_skips_auth_missing_without_real_codex_or_state_mutation(
     assert body['evaluations'][0]['checks'][0].startswith('outcome_ok: skipped')
     assert 'skipped_auth_missing' in body['evaluations'][0]['checks_detail']['outcome_ok']['reason']
     assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.SKIPPED_AUTH_MISSING
+    summary = json.loads((tmp_path / 'eval-run-001' / 'summary.json').read_text(encoding='utf-8'))
+    assert summary['totals']['evaluations'] == 1
+    assert summary['totals']['judge_skipped'] == 1
 
 
 def test_post_run_judge_returns_judge_failed_when_one_case_fails(tmp_path: Path) -> None:
@@ -527,6 +584,8 @@ def test_post_run_judge_returns_judge_failed_when_one_case_fails(tmp_path: Path)
     assert response.status_code == 200
     assert response.json()['status'] == 'judge_failed'
     assert [evaluation['status'] for evaluation in response.json()['evaluations']] == ['judged', 'judge_failed']
+    states = [case.state for case in store.read_manifest('eval-run-001').cases]
+    assert states == [CaseRunState.JUDGED, CaseRunState.JUDGE_FAILED]
 
 
 def test_post_run_judge_continues_after_runner_exception_and_writes_judge_failed(
@@ -570,6 +629,57 @@ def test_post_run_judge_continues_after_runner_exception_and_writes_judge_failed
     assert 'OSError' in failed_evaluation['checks_detail']['outcome_ok']['reason']
     assert 'codex executable not found' in failed_evaluation['checks_detail']['outcome_ok']['reason']
     assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.evaluation.json').is_file()
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.JUDGE_FAILED
+
+
+def test_get_run_detail_sanitizes_callbacks_and_artifact_paths(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(
+                eval_case_id='case-a',
+                case_version='1',
+                state=CaseRunState.FINISHED,
+                session_id='session-a',
+                artifact_paths={
+                    'trace': 'trace/session-a',
+                    'payment_url': 'https://pay.example/sberpay/order/ORDER-1?token=secret-token',
+                },
+            )
+        ],
+        status=EvalRunStatus.FINISHED,
+    )
+    store.append_callback_event(
+        'eval-run-001',
+        'case-a',
+        BuyerCallbackEnvelope(
+            event_id='event-payment-a',
+            session_id='session-a',
+            event_type=CallbackEventType.PAYMENT_READY,
+            occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
+            idempotency_key='secret-idempotency-key',
+            payload={
+                'order_id': 'ORDER-1',
+                'message': 'Payment token=secret-token',
+                'safe': 'visible',
+            },
+            eval_run_id='eval-run-001',
+            eval_case_id='case-a',
+        ),
+        state=CaseRunState.FINISHED,
+    )
+
+    response = client.get('/runs/eval-run-001')
+
+    assert response.status_code == 200
+    case_payload = response.json()['run']['cases'][0]
+    serialized = json.dumps(case_payload, ensure_ascii=False)
+    assert 'secret-token' not in serialized
+    assert 'secret-idempotency-key' not in serialized
+    assert 'ORDER-1' not in serialized
+    assert case_payload['callbacks'][0]['payload']['safe'] == 'visible'
+    assert case_payload['artifact_paths']['trace'] == 'trace/session-a'
 
 
 def test_dashboard_cases_and_hosts_load_all_evaluation_files(tmp_path: Path) -> None:
@@ -620,6 +730,26 @@ def test_dashboard_cases_and_hosts_load_all_evaluation_files(tmp_path: Path) -> 
     assert host_rows[0]['success_rate'] == '1/2'
 
 
+def test_dashboard_success_rate_requires_all_critical_checks_ok(tmp_path: Path) -> None:
+    client, _store = _client(tmp_path, cases=[])
+    _write_evaluation(
+        tmp_path,
+        'eval-run-001',
+        _evaluation('eval-run-001', 'case-a', outcome='ok'),
+    )
+    not_safe = _evaluation('eval-run-002', 'case-a', outcome='ok')
+    not_safe['checks']['safety_ok']['status'] = 'not_ok'
+    _write_evaluation(tmp_path, 'eval-run-002', not_safe)
+    no_payment_boundary = _evaluation('eval-run-003', 'case-a', outcome='ok')
+    no_payment_boundary['checks']['payment_boundary_ok']['status'] = 'not_ok'
+    _write_evaluation(tmp_path, 'eval-run-003', no_payment_boundary)
+
+    response = client.get('/dashboard/cases')
+
+    assert response.status_code == 200
+    assert response.json()['rows'][0]['success_rate'] == '1/3'
+
+
 def test_dashboard_cases_and_hosts_skip_corrupt_evaluation_files_with_warnings(tmp_path: Path) -> None:
     client, _store = _client(tmp_path, cases=[], raise_server_exceptions=False)
     _write_evaluation(
@@ -651,7 +781,12 @@ def test_dashboard_cases_and_hosts_skip_corrupt_evaluation_files_with_warnings(t
 
 
 def test_existing_post_runs_route_still_works_after_api_router_include(tmp_path: Path) -> None:
-    settings = Settings(_env_file=None, eval_runs_dir=tmp_path, buyer_api_base_url='http://buyer.test')
+    settings = Settings(
+        _env_file=None,
+        eval_runs_dir=tmp_path,
+        buyer_api_base_url='http://buyer.test',
+        eval_callback_base_url='http://eval.test',
+    )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))
     app.state.run_store = store
@@ -718,6 +853,14 @@ def _write_evaluation(runs_dir: Path, eval_run_id: str, evaluation: dict[str, An
     path = runs_dir / eval_run_id / 'evaluations' / f'{evaluation["eval_case_id"]}.evaluation.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(evaluation, ensure_ascii=False, indent=2), encoding='utf-8')
+    return path
+
+
+def _write_trace_step(tmp_path: Path, session_id: str, step: int, payload: dict[str, Any]) -> Path:
+    trace_dir = tmp_path / 'trace' / '2026-04-28' / '12-00-00' / session_id
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    path = trace_dir / f'step-{step:03d}-trace.json'
+    path.write_text(json.dumps({'step': step, **payload}, ensure_ascii=False), encoding='utf-8')
     return path
 
 

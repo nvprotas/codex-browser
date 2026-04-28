@@ -120,6 +120,25 @@ def test_judge_runner_marks_schema_validation_error_as_judge_failed(tmp_path: Pa
     assert 'schema validation' in result.evaluation['checks']['outcome_ok']['reason']
 
 
+def test_judge_runner_rejects_identity_mismatch_after_schema_validation(tmp_path: Path) -> None:
+    judge_input_path, judge_input = _write_judge_input(tmp_path)
+
+    def fake_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        output_path = Path(cmd[cmd.index('-o') + 1])
+        evaluation = _valid_evaluation_payload(judge_input, model='gpt-5.5')
+        evaluation['eval_case_id'] = 'other-case'
+        evaluation['session_id'] = 'other-session'
+        output_path.write_text(json.dumps(evaluation, ensure_ascii=False), encoding='utf-8')
+        return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+
+    result = JudgeRunner(Settings(_env_file=None), runner=fake_runner).run(judge_input_path)
+
+    assert result.evaluation['status'] == 'judge_failed'
+    assert result.evaluation['eval_case_id'] == judge_input['eval_case_id']
+    assert result.evaluation['session_id'] == judge_input['session_id']
+    assert 'identity mismatch' in result.evaluation['checks']['outcome_ok']['reason']
+
+
 def _write_judge_input(
     tmp_path: Path,
     extra: dict[str, Any] | None = None,

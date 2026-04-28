@@ -88,6 +88,62 @@ def test_run_and_callback_contracts_validate_known_states() -> None:
     assert manifest.cases[0].state == CaseRunState.PAYMENT_READY
 
 
+@pytest.mark.parametrize(
+    ('model_cls', 'payload'),
+    [
+        (
+            EvalCase,
+            {
+                'eval_case_id': 'case/evil',
+                'case_version': '1',
+                'variant_id': 'variant-1',
+                'title': 'Case',
+                'host': 'example.test',
+                'task': 'Задача',
+                'start_url': 'https://example.test/',
+                'expected_outcome': {
+                    'target': 'target',
+                    'stop_condition': 'stop',
+                },
+            },
+        ),
+        (
+            EvalRunCase,
+            {
+                'eval_case_id': '..',
+                'case_version': '1',
+            },
+        ),
+        (
+            EvalRunManifest,
+            {
+                'eval_run_id': '../evil',
+                'created_at': '2026-04-28T12:00:00Z',
+                'updated_at': '2026-04-28T12:00:00Z',
+                'cases': [],
+            },
+        ),
+    ],
+)
+def test_path_segment_ids_reject_path_traversal(model_cls: type, payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        model_cls.model_validate(payload)
+
+
+@pytest.mark.parametrize('value', ['case-1', 'case_1', 'case.1', 'EvalRun-20260428.120000'])
+def test_path_segment_ids_allow_expected_characters(value: str) -> None:
+    run_case = EvalRunCase(eval_case_id=value, case_version='1')
+    manifest = EvalRunManifest(
+        eval_run_id=value,
+        created_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
+        cases=[run_case],
+    )
+
+    assert run_case.eval_case_id == value
+    assert manifest.eval_run_id == value
+
+
 @pytest.mark.parametrize('event_type', ['status_update', 'error'])
 def test_callback_contract_rejects_non_buyer_event_types(event_type: str) -> None:
     with pytest.raises(ValidationError):

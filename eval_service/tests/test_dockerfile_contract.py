@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_eval_service_dockerfile_preserves_package_layout() -> None:
     dockerfile = (ROOT / 'eval_service' / 'Dockerfile').read_text(encoding='utf-8')
 
+    assert 'WORKDIR /workspace' in dockerfile
+    assert 'WORKDIR /app' not in dockerfile
     assert 'COPY eval_service ./eval_service' in dockerfile
     assert 'eval_service.app.main:app' in dockerfile
 

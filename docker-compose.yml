@@ -123,6 +123,7 @@ services:
       EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-gpt-5.5}
       EVAL_BASELINE_WINDOW: ${EVAL_BASELINE_WINDOW:-5}
       EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}
+      EVAL_CALLBACK_SECRET: ${EVAL_CALLBACK_SECRET:?set EVAL_CALLBACK_SECRET}
       EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
@@ -134,7 +135,7 @@ services:
         target: /run/eval/auth-profiles
         read_only: true
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
     healthcheck:
       test:
         [

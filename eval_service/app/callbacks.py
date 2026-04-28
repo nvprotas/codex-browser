@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from collections.abc import Coroutine
 from typing import Any
 
@@ -51,6 +52,7 @@ async def receive_buyer_callback(
     envelope: BuyerCallbackEnvelope,
     request: Request,
 ) -> CallbackAcceptedResponse:
+    _validate_callback_token(request)
     store = _get_run_store(request)
     eval_run_id, eval_case_id = _resolve_eval_ids(envelope, store)
 
@@ -283,6 +285,19 @@ def _get_buyer_client(request: Request) -> BuyerClient:
         client = BuyerClient(request.app.state.settings.buyer_api_base_url)
         request.app.state.buyer_client = client
     return client
+
+
+def _validate_callback_token(request: Request) -> None:
+    secret = getattr(request.app.state.settings, 'eval_callback_secret', None)
+    if secret is None or not secret.strip():
+        return
+
+    token = request.query_params.get('token') or request.headers.get('X-Eval-Callback-Token')
+    if token is None or not hmac.compare_digest(token, secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='invalid callback token',
+        )
 
 
 def _resolve_eval_ids(envelope: BuyerCallbackEnvelope, store: RunStore) -> tuple[str, str]:

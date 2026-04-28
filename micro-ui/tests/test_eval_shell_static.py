@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import sys
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASE_DIR))
+
+from app.main import eval_proxy_timeout
 
 
 def _app_file(path: str) -> str:
@@ -56,19 +60,22 @@ class EvalShellStaticTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, js)
 
-    def test_eval_js_has_judge_stub_and_service_fallback(self) -> None:
+    def test_eval_js_has_judge_stub_without_service_error_fallback(self) -> None:
         js = (BASE_DIR / 'app/static/eval.js').read_text(encoding='utf-8')
 
         expected_fragments = [
             'function buildStubEvaluations',
             'evaluations: buildStubEvaluations',
-            'eval service fallback',
             'stubRequest(contract, options)',
+            'return fetchEvalService(contract, options)',
         ]
 
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, js)
+        eval_request_body = js[js.index('async function evalRequest') : js.index('function renderCases')]
+        self.assertNotIn('eval service fallback', js)
+        self.assertNotIn('catch', eval_request_body)
 
     def test_eval_shell_sets_same_origin_eval_base_url(self) -> None:
         html = _app_file('templates/index.html')
@@ -85,6 +92,15 @@ class EvalShellStaticTests(unittest.TestCase):
         self.assertIn("@app.api_route('/api/eval/{path:path}'", main)
         self.assertIn('settings.eval_service_base_url', main)
         self.assertIn('httpx.AsyncClient', main)
+
+    def test_eval_proxy_timeout_allows_long_run_creation(self) -> None:
+        run_timeout = eval_proxy_timeout('runs', 'POST')
+        default_get_timeout = eval_proxy_timeout('runs', 'GET')
+        default_post_timeout = eval_proxy_timeout('runs/run-1/judge', 'POST')
+
+        self.assertGreaterEqual(run_timeout.read, 650.0)
+        self.assertEqual(default_get_timeout.read, 60.0)
+        self.assertEqual(default_post_timeout.read, 60.0)
 
     def test_eval_js_normalizes_real_eval_run_manifest_cases(self) -> None:
         script = _static_file('eval.js')
