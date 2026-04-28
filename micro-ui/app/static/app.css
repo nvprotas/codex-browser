@@ -525,6 +525,12 @@ input[readonly] {
   border-color: rgba(28, 141, 88, 0.22);
 }
 
+.badge.queued {
+  color: var(--muted);
+  background: rgba(88, 104, 122, 0.1);
+  border-color: rgba(88, 104, 122, 0.22);
+}
+
 .badge.waiting_user {
   color: var(--warn);
   background: rgba(184, 100, 9, 0.12);

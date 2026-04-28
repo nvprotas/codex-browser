@@ -54,6 +54,10 @@ class AgentRunner:
         self._settings = settings
         self._schema_path = Path(__file__).with_name('codex_output_schema.json')
 
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
     async def run_step(
         self,
         *,
@@ -66,17 +70,19 @@ class AgentRunner:
         auth_context: dict[str, Any] | None,
         memory: list[dict[str, str]],
         latest_user_reply: str | None,
+        browser_cdp_endpoint: str | None = None,
     ) -> AgentOutput:
+        cdp_endpoint = browser_cdp_endpoint or self._settings.browser_cdp_endpoint
         trace = self._prepare_trace_context(session_id=session_id, step_index=step_index)
         logger.info(
             'codex_step_started session_id=%s step=%s endpoint=%s trace_dir=%s',
             session_id,
             step_index,
-            self._settings.browser_cdp_endpoint,
+            cdp_endpoint,
             trace['session_dir'],
         )
         probe_ok, probe_summary = await self._probe_browser_sidecar(
-            self._settings.browser_cdp_endpoint,
+            cdp_endpoint,
             actions_log_path=trace['browser_actions_log_path'],
         )
         if not probe_ok:
@@ -107,7 +113,7 @@ class AgentRunner:
         prompt = build_agent_prompt(
             task=task,
             start_url=start_url,
-            browser_cdp_endpoint=self._settings.browser_cdp_endpoint,
+            browser_cdp_endpoint=cdp_endpoint,
             cdp_preflight_summary=probe_summary,
             metadata=metadata,
             auth_payload=_build_redacted_auth_payload(auth),
@@ -120,7 +126,7 @@ class AgentRunner:
         prompt_preview = _preview_text(prompt, limit=self._settings.buyer_prompt_preview_chars)
 
         env = os.environ.copy()
-        env['BROWSER_CDP_ENDPOINT'] = self._settings.browser_cdp_endpoint
+        env['BROWSER_CDP_ENDPOINT'] = cdp_endpoint
         env['CDP_RECOVERY_WINDOW_SEC'] = str(self._settings.cdp_recovery_window_sec)
         env['CDP_RECOVERY_INTERVAL_MS'] = str(self._settings.cdp_recovery_interval_ms)
         env['BUYER_CDP_ACTIONS_LOG_PATH'] = str(trace['browser_actions_log_path'])
@@ -210,6 +216,7 @@ class AgentRunner:
                 reset_ok, reset_summary = await self._reset_browser_to_start_url(
                     start_url=start_url,
                     actions_log_path=trace['browser_actions_log_path'],
+                    browser_cdp_endpoint=cdp_endpoint,
                 )
                 if not reset_ok:
                     fallback_reason = 'strong_retry_skipped_reset_failed'
@@ -421,12 +428,19 @@ class AgentRunner:
         finally:
             _remove_file_quietly(output_path)
 
-    async def _reset_browser_to_start_url(self, *, start_url: str, actions_log_path: Path) -> tuple[bool, str]:
+    async def _reset_browser_to_start_url(
+        self,
+        *,
+        start_url: str,
+        actions_log_path: Path,
+        browser_cdp_endpoint: str | None = None,
+    ) -> tuple[bool, str]:
+        cdp_endpoint = browser_cdp_endpoint or self._settings.browser_cdp_endpoint
         cmd = [
             'python',
             '/app/tools/cdp_tool.py',
             '--endpoint',
-            self._settings.browser_cdp_endpoint,
+            cdp_endpoint,
             '--timeout-ms',
             '12000',
             '--recovery-window-sec',
@@ -439,7 +453,7 @@ class AgentRunner:
         ]
         env = os.environ.copy()
         env['BUYER_CDP_ACTIONS_LOG_PATH'] = str(actions_log_path)
-        env['BROWSER_CDP_ENDPOINT'] = self._settings.browser_cdp_endpoint
+        env['BROWSER_CDP_ENDPOINT'] = cdp_endpoint
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -458,6 +472,47 @@ class AgentRunner:
             process.kill()
             await process.communicate()
             return False, 'Reset browser to start_url превысил таймаут 30с.'
+
+        stdout_text = stdout.decode('utf-8', errors='ignore').strip()
+        stderr_text = stderr.decode('utf-8', errors='ignore').strip()
+        if process.returncode != 0:
+            return False, _extract_cdp_error_tail(stdout_text=stdout_text, stderr_text=stderr_text)
+        return True, stdout_text or 'reset_ok'
+
+    async def cleanup_browser_slot(self, browser_cdp_endpoint: str) -> tuple[bool, str]:
+        cmd = [
+            'python',
+            '/app/tools/cdp_tool.py',
+            '--endpoint',
+            browser_cdp_endpoint,
+            '--timeout-ms',
+            '12000',
+            '--recovery-window-sec',
+            str(self._settings.cdp_recovery_window_sec),
+            '--recovery-interval-ms',
+            str(self._settings.cdp_recovery_interval_ms),
+            'reset',
+        ]
+        env = os.environ.copy()
+        env['BROWSER_CDP_ENDPOINT'] = browser_cdp_endpoint
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=self._settings.codex_workdir,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            return False, _tail_text(f'Не удалось запустить reset CDP (`cdp_tool.py`): {exc}')
+
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            return False, 'Cleanup browser slot превысил таймаут 30с.'
 
         stdout_text = stdout.decode('utf-8', errors='ignore').strip()
         stderr_text = stderr.decode('utf-8', errors='ignore').strip()

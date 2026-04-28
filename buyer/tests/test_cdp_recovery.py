@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -100,6 +101,38 @@ class _RecordingKnowledgeAnalyzer:
         if self.fail:
             raise RuntimeError('analysis failed')
         return {'status': 'completed'}
+
+
+async def _run_service_session(
+    service: BuyerService,
+    store: SessionStore,
+    *,
+    task: str,
+    start_url: str,
+    callback_url: str,
+    metadata: dict[str, Any],
+    auth: Any,
+) -> Any:
+    await service.start_workers()
+    try:
+        state = await service.create_session(
+            task=task,
+            start_url=start_url,
+            callback_url=callback_url,
+            metadata=metadata,
+            auth=auth,
+        )
+        for _ in range(100):
+            refreshed = await store.get(state.session_id)
+            if refreshed.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}:
+                if refreshed.task_ref is not None:
+                    await refreshed.task_ref
+                return state
+            await asyncio.sleep(0.01)
+        final_state = await store.get(state.session_id)
+        raise AssertionError(f'Сессия не завершилась, текущий статус: {final_state.status}')
+    finally:
+        await service.shutdown_workers()
 
 
 class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -339,14 +372,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='test-task',
             start_url='https://example.com',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
@@ -385,14 +419,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='test-task',
             start_url='https://brandshop.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
         await service.wait_for_post_session_analysis()
 
         self.assertEqual(len(analyzer.snapshots), 1)
@@ -427,14 +462,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='test-task',
             start_url='https://brandshop.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
         await service.wait_for_post_session_analysis()
 
         final_state = await store.get(state.session_id)
@@ -468,14 +504,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='test-task',
             start_url='https://brandshop.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
         await service.wait_for_post_session_analysis()
 
         final_state = await store.get(state.session_id)
@@ -510,14 +547,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             purchase_script_runner=_CompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='Открой litres. Ищи книгу одиссея гомера',
             start_url='https://www.litres.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
@@ -553,14 +591,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             purchase_script_runner=_ThrowingPurchaseScriptRunner(),  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='Открой litres. Ищи книгу одиссея гомера',
             start_url='https://www.litres.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
@@ -599,14 +638,15 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
-        state = await service.create_session(
+        state = await _run_service_session(
+            service,
+            store,
             task='test-task',
             start_url='https://example.com',
             callback_url='http://callback',
             metadata={},
             auth=None,
         )
-        await state.task_ref
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.FAILED)

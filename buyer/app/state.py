@@ -26,6 +26,15 @@ class SessionState:
     status: SessionStatus = SessionStatus.CREATED
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    waiting_deadline_at: datetime | None = None
+    runtime_worker_id: str | None = None
+    runtime_claim_token: str | None = None
+    runtime_heartbeat_at: datetime | None = None
+    browser_slot_id: str | None = None
+    browser_cdp_endpoint: str | None = None
     waiting_reply_id: str | None = None
     waiting_question: str | None = None
     last_error: str | None = None
@@ -49,6 +58,13 @@ class SessionNotFoundError(RuntimeError):
 
 class ReplyValidationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ReplySubmissionResult:
+    state: SessionState
+    accepted: bool
+    reason_code: str | None = None
 
 
 class SessionRepository(Protocol):
@@ -80,6 +96,18 @@ class SessionRepository(Protocol):
         pass
 
     async def mark_event_delivery(self, event_id: str, status: str, error: str | None = None) -> None:
+        pass
+
+    async def claim_next_queued_session(
+        self,
+        *,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: datetime,
+    ) -> SessionState | None:
+        pass
+
+    async def fail_stale_runtime_sessions(self, *, failed_at: datetime, reason: str) -> int:
         pass
 
 
@@ -131,6 +159,51 @@ class InMemorySessionRepository:
         _ = event_id, status, error
         return
 
+    async def claim_next_queued_session(
+        self,
+        *,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: datetime,
+    ) -> SessionState | None:
+        async with self._lock:
+            queued = sorted(
+                (state for state in self._sessions.values() if state.status == SessionStatus.QUEUED),
+                key=lambda item: (item.queued_at or item.created_at, item.session_id),
+            )
+            if not queued:
+                return None
+            state = _clone_state(queued[0], persist_auth=self._persist_auth_payload)
+            state.status = SessionStatus.RUNNING
+            state.started_at = state.started_at or claimed_at
+            state.updated_at = claimed_at
+            state.runtime_worker_id = worker_id
+            state.runtime_claim_token = claim_token
+            state.runtime_heartbeat_at = claimed_at
+            self._sessions[state.session_id] = _clone_state(state, persist_auth=self._persist_auth_payload)
+            return _clone_state(state)
+
+    async def fail_stale_runtime_sessions(self, *, failed_at: datetime, reason: str) -> int:
+        async with self._lock:
+            count = 0
+            for state in list(self._sessions.values()):
+                if state.status not in {SessionStatus.RUNNING, SessionStatus.WAITING_USER}:
+                    continue
+                if not state.runtime_claim_token:
+                    continue
+                failed = _clone_state(state, persist_auth=self._persist_auth_payload)
+                failed.status = SessionStatus.FAILED
+                failed.last_error = reason
+                failed.finished_at = failed_at
+                failed.updated_at = failed_at
+                failed.runtime_worker_id = None
+                failed.runtime_claim_token = None
+                failed.runtime_heartbeat_at = None
+                failed.waiting_deadline_at = None
+                self._sessions[failed.session_id] = _clone_state(failed, persist_auth=self._persist_auth_payload)
+                count += 1
+            return count
+
 
 class SessionStore:
     _TERMINAL_STATUSES = {SessionStatus.COMPLETED, SessionStatus.FAILED}
@@ -161,6 +234,69 @@ class SessionStore:
     def set_task_ref(self, session_id: str, task_ref: asyncio.Task[None]) -> None:
         self._task_refs[session_id] = task_ref
         self._runtime_sessions.add(session_id)
+
+    async def claim_next_queued_session(self, *, worker_id: str, claim_token: str) -> SessionState | None:
+        async with self._lock:
+            state = await self._repository.claim_next_queued_session(
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claimed_at=self._clock(),
+            )
+            if state is None:
+                return None
+            self._runtime_sessions.add(state.session_id)
+            return self._attach_runtime(state)
+
+    async def fail_stale_runtime_sessions(self, *, reason: str) -> int:
+        async with self._lock:
+            count = await self._repository.fail_stale_runtime_sessions(failed_at=self._clock(), reason=reason)
+            if count:
+                sessions = await self._repository.list_sessions()
+                stale_ids = {
+                    state.session_id
+                    for state in sessions
+                    if state.status == SessionStatus.FAILED and state.last_error == reason
+                }
+                for session_id in stale_ids:
+                    self._wake_events.pop(session_id, None)
+                    self._task_refs.pop(session_id, None)
+                    self._runtime_auth.pop(session_id, None)
+                    self._runtime_sessions.discard(session_id)
+            return count
+
+    async def assign_browser_slot(
+        self,
+        session_id: str,
+        *,
+        slot_id: str,
+        cdp_endpoint: str,
+        novnc_url: str,
+    ) -> SessionState:
+        async with self._lock:
+            state = await self._get_locked(session_id)
+            state.browser_slot_id = slot_id
+            state.browser_cdp_endpoint = cdp_endpoint
+            state.novnc_url = novnc_url
+            self._touch_locked(state)
+            await self._repository.update_session(state)
+            return self._attach_runtime(state)
+
+    async def requeue_session(self, session_id: str) -> SessionState:
+        async with self._lock:
+            state = await self._get_locked(session_id)
+            state.status = SessionStatus.QUEUED
+            state.started_at = None
+            state.runtime_worker_id = None
+            state.runtime_claim_token = None
+            state.runtime_heartbeat_at = None
+            state.browser_slot_id = None
+            state.browser_cdp_endpoint = None
+            state.novnc_url = ''
+            self._touch_locked(state)
+            await self._repository.update_session(state)
+            self._runtime_sessions.discard(session_id)
+            self._task_refs.pop(session_id, None)
+            return self._attach_runtime(state)
 
     async def set_auth_context(self, session_id: str, context: dict[str, Any]) -> None:
         async with self._lock:
@@ -204,11 +340,12 @@ class SessionStore:
                 novnc_url=novnc_url,
                 metadata=metadata,
                 auth=auth,
-                status=SessionStatus.CREATED,
+                status=SessionStatus.QUEUED,
             )
             now = self._clock()
             state.created_at = now
             state.updated_at = now
+            state.queued_at = now
             if auth is not None:
                 self._runtime_auth[session_id] = auth
             await self._repository.create_session(state)
@@ -238,17 +375,34 @@ class SessionStore:
             state.status = status
             if error is not None:
                 state.last_error = error
+            if status == SessionStatus.RUNNING:
+                state.started_at = state.started_at or self._clock()
+                state.runtime_heartbeat_at = self._clock()
+            if status in self._TERMINAL_STATUSES:
+                state.finished_at = state.finished_at or self._clock()
+                state.runtime_worker_id = None
+                state.runtime_claim_token = None
+                state.runtime_heartbeat_at = None
+                state.waiting_deadline_at = None
             self._touch_locked(state)
             await self._repository.update_session(state)
             if status in self._TERMINAL_STATUSES:
                 self._runtime_sessions.discard(session_id)
             return self._attach_runtime(state)
 
-    async def set_waiting_question(self, session_id: str, question: str, reply_id: str) -> SessionState:
+    async def set_waiting_question(
+        self,
+        session_id: str,
+        question: str,
+        reply_id: str,
+        *,
+        deadline_at: datetime | None = None,
+    ) -> SessionState:
         async with self._lock:
             state = await self._get_locked(session_id)
             state.waiting_reply_id = reply_id
             state.waiting_question = question
+            state.waiting_deadline_at = deadline_at
             state.pending_reply_text = None
             self._wake_for(session_id).clear()
             state.status = SessionStatus.WAITING_USER
@@ -263,6 +417,8 @@ class SessionStore:
                 raise ReplyValidationError('Сессия сейчас не ожидает ответ пользователя.')
             if state.waiting_reply_id != reply_id:
                 raise ReplyValidationError('Передан неверный reply_id для текущего уточнения.')
+            if state.waiting_deadline_at is not None and self._clock() >= state.waiting_deadline_at:
+                raise ReplyValidationError('waiting_user_timeout')
             if not self._is_active_in_current_runtime(state):
                 raise ReplyValidationError(
                     'Сессия ожидает ответ, но в текущем процессе нет активного runner. '
@@ -271,9 +427,30 @@ class SessionStore:
             state.pending_reply_text = message
             state.waiting_reply_id = None
             state.waiting_question = None
+            state.waiting_deadline_at = None
             state.status = SessionStatus.RUNNING
             self._touch_locked(state)
             await self._repository.update_session(state)
+            self._wake_for(session_id).set()
+            return self._attach_runtime(state)
+
+    async def expire_waiting_reply_if_deadline_passed(self, session_id: str, *, reason: str) -> SessionState | None:
+        async with self._lock:
+            state = await self._get_locked(session_id)
+            if state.status != SessionStatus.WAITING_USER or state.waiting_deadline_at is None:
+                return None
+            if self._clock() < state.waiting_deadline_at:
+                return None
+            state.status = SessionStatus.FAILED
+            state.last_error = reason
+            state.finished_at = self._clock()
+            state.waiting_deadline_at = None
+            state.runtime_worker_id = None
+            state.runtime_claim_token = None
+            state.runtime_heartbeat_at = None
+            self._touch_locked(state)
+            await self._repository.update_session(state)
+            self._runtime_sessions.discard(session_id)
             self._wake_for(session_id).set()
             return self._attach_runtime(state)
 
@@ -342,7 +519,7 @@ class SessionStore:
         return sessions
 
     def _is_active_in_current_runtime(self, state: SessionState) -> bool:
-        if state.status not in {SessionStatus.CREATED, SessionStatus.RUNNING, SessionStatus.WAITING_USER}:
+        if state.status not in {SessionStatus.RUNNING, SessionStatus.WAITING_USER}:
             return False
         return state.session_id in self._runtime_sessions
 
@@ -378,6 +555,15 @@ def _clone_state(state: SessionState, *, persist_auth: bool = True) -> SessionSt
         status=state.status,
         created_at=state.created_at,
         updated_at=state.updated_at,
+        queued_at=state.queued_at,
+        started_at=state.started_at,
+        finished_at=state.finished_at,
+        waiting_deadline_at=state.waiting_deadline_at,
+        runtime_worker_id=state.runtime_worker_id,
+        runtime_claim_token=state.runtime_claim_token,
+        runtime_heartbeat_at=state.runtime_heartbeat_at,
+        browser_slot_id=state.browser_slot_id,
+        browser_cdp_endpoint=state.browser_cdp_endpoint,
         waiting_reply_id=state.waiting_reply_id,
         waiting_question=state.waiting_question,
         last_error=state.last_error,

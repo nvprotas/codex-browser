@@ -53,7 +53,9 @@ class PurchaseScriptRunner:
         domain: str,
         start_url: str,
         task: str,
+        cdp_endpoint: str | None = None,
     ) -> PurchaseScriptResult:
+        endpoint = cdp_endpoint or self._cdp_endpoint
         normalized_domain = normalize_domain(domain)
         spec = self._registry.get(normalized_domain)
         if spec is None:
@@ -96,13 +98,13 @@ class PurchaseScriptRunner:
         output_path = session_dir / 'purchase-script-result.json'
 
         try:
-            resolved_endpoint = await resolve_cdp_endpoint(self._cdp_endpoint)
+            resolved_endpoint = await resolve_cdp_endpoint(endpoint)
         except Exception as exc:
             logger.error(
                 'purchase_script_endpoint_resolve_failed session_id=%s domain=%s endpoint=%s error=%s',
                 session_id,
                 normalized_domain,
-                self._cdp_endpoint,
+                endpoint,
                 tail_text(str(exc), limit=700),
             )
             return PurchaseScriptResult(
@@ -113,7 +115,7 @@ class PurchaseScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'cdp_resolve_error': tail_text(str(exc), limit=900),
                 },
             )
@@ -167,7 +169,7 @@ class PurchaseScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     'timeout_sec': self._timeout_sec,
                 },
@@ -190,7 +192,7 @@ class PurchaseScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     **stdio_artifacts,
                 },
@@ -205,7 +207,7 @@ class PurchaseScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     **stdio_artifacts,
                 },
@@ -224,7 +226,7 @@ class PurchaseScriptRunner:
                 'domain': normalized_domain,
                 'script': str(script_path),
                 'lifecycle': spec.lifecycle,
-                'cdp_endpoint': self._cdp_endpoint,
+                'cdp_endpoint': endpoint,
                 'resolved_cdp_endpoint': resolved_endpoint,
                 **stdio_artifacts,
             }

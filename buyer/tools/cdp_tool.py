@@ -70,6 +70,8 @@ def parser() -> argparse.ArgumentParser:
 
     current = sub.add_parser('url')
 
+    sub.add_parser('reset')
+
     screenshot = sub.add_parser('screenshot')
     screenshot.add_argument('--path', required=True)
 
@@ -564,6 +566,32 @@ async def run_command(args: argparse.Namespace) -> dict:
             if args.command == 'goto':
                 await page.goto(args.url, wait_until='domcontentloaded')
                 result = {'ok': True, 'url': page.url, 'title': await page.title()}
+                _log_command_finished(args, started, command_details, result)
+                return result
+
+            if args.command == 'reset':
+                closed_pages = 0
+                cleared_contexts = 0
+                for context in list(browser.contexts):
+                    try:
+                        await context.clear_cookies()
+                        cleared_contexts += 1
+                    except Exception:
+                        pass
+                    pages = list(context.pages)
+                    for extra_page in pages[1:]:
+                        try:
+                            await extra_page.close()
+                            closed_pages += 1
+                        except Exception:
+                            pass
+                await page.goto('about:blank', wait_until='domcontentloaded')
+                result = {
+                    'ok': True,
+                    'url': page.url,
+                    'closed_pages': closed_pages,
+                    'cleared_contexts': cleared_contexts,
+                }
                 _log_command_finished(args, started, command_details, result)
                 return result
 

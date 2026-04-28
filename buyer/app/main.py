@@ -16,6 +16,7 @@ from .models import (
 from .purchase_scripts import PurchaseScriptRunner
 from .persistence import PostgresSessionRepository
 from .runner import AgentRunner
+from .runtime import build_browser_slot_manager
 from .service import BuyerService
 from .settings import Settings, get_settings
 from .state import (
@@ -61,6 +62,14 @@ purchase_script_runner = PurchaseScriptRunner(
     timeout_sec=settings.purchase_script_timeout_sec,
     trace_dir=settings.buyer_trace_dir,
 )
+browser_slot_manager = build_browser_slot_manager(
+    browser_slots_json=settings.browser_slots_json,
+    legacy_cdp_endpoint=settings.browser_cdp_endpoint,
+    legacy_novnc_url=settings.novnc_public_url,
+    domain_concurrency_limits=settings.domain_concurrency_limits,
+    min_browser_slots=settings.min_browser_slots,
+    max_browser_slots=settings.max_browser_slots,
+)
 service = BuyerService(
     store=store,
     callback_client=callback_client,
@@ -75,6 +84,9 @@ service = BuyerService(
     purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
     purchase_script_runner=purchase_script_runner,
     knowledge_analyzer=knowledge_analyzer,
+    browser_slot_manager=browser_slot_manager,
+    max_active_jobs_per_worker=settings.max_active_jobs_per_worker,
+    waiting_user_timeout_sec=settings.waiting_user_timeout_sec,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')
@@ -88,10 +100,12 @@ async def healthz() -> dict[str, str]:
 @app.on_event('startup')
 async def startup() -> None:
     await store.initialize()
+    await service.start_workers()
 
 
 @app.on_event('shutdown')
 async def shutdown() -> None:
+    await service.shutdown_workers()
     await service.shutdown_post_session_analysis()
     await callback_client.aclose()
     await store.aclose()
@@ -132,7 +146,7 @@ async def get_session(session_id: str) -> SessionDetail:
 @app.post('/v1/replies', response_model=SessionReplyResponse)
 async def submit_reply(request: SessionReplyRequest) -> SessionReplyResponse:
     try:
-        state = await service.submit_reply(
+        result = await service.submit_reply(
             session_id=request.session_id,
             reply_id=request.reply_id,
             message=request.message,
@@ -142,7 +156,12 @@ async def submit_reply(request: SessionReplyRequest) -> SessionReplyResponse:
     except ReplyValidationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    return SessionReplyResponse(session_id=state.session_id, accepted=True, status=state.status)
+    return SessionReplyResponse(
+        session_id=result.state.session_id,
+        accepted=result.accepted,
+        status=result.state.status,
+        reason_code=result.reason_code,
+    )
 
 
 def _to_view(state: SessionState) -> SessionView:
@@ -155,6 +174,8 @@ def _to_view(state: SessionState) -> SessionView:
         created_at=state.created_at,
         updated_at=state.updated_at,
         waiting_reply_id=state.waiting_reply_id,
+        waiting_deadline_at=state.waiting_deadline_at,
+        browser_slot_id=state.browser_slot_id,
         last_error=state.last_error,
     )
 

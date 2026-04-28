@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionStatus(StrEnum):
+    QUEUED = 'queued'
     CREATED = 'created'
     RUNNING = 'running'
     WAITING_USER = 'waiting_user'
@@ -54,6 +55,7 @@ class SessionReplyResponse(BaseModel):
     session_id: str
     accepted: bool
     status: SessionStatus
+    reason_code: str | None = None
 
 
 class EventEnvelope(BaseModel):
@@ -74,6 +76,8 @@ class SessionView(BaseModel):
     created_at: datetime
     updated_at: datetime
     waiting_reply_id: str | None = None
+    waiting_deadline_at: datetime | None = None
+    browser_slot_id: str | None = None
     last_error: str | None = None
 
 

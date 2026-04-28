@@ -15,7 +15,7 @@ services:
       retries: 20
       start_period: 10s
 
-  browser:
+  browser-1:
     build:
       context: .
       dockerfile: browser/Dockerfile
@@ -26,6 +26,25 @@ services:
     ports:
       - "6901:6901"
       - "9223:9223"
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9223/json/version || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  browser-2:
+    build:
+      context: .
+      dockerfile: browser/Dockerfile
+    restart: unless-stopped
+    environment:
+      SCREEN_WIDTH: "1440"
+      SCREEN_HEIGHT: "900"
+    ports:
+      - "6902:6901"
+      - "9224:9223"
     shm_size: 2gb
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9223/json/version || exit 1"]
@@ -45,7 +64,14 @@ services:
       CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}
       MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
       NOVNC_PUBLIC_URL: http://localhost:6901/vnc.html?autoconnect=1&resize=scale
-      BROWSER_CDP_ENDPOINT: http://browser:9223
+      BROWSER_CDP_ENDPOINT: http://browser-1:9223
+      BROWSER_SLOTS_JSON: '[{"id":"browser-1","cdp_endpoint":"http://browser-1:9223","novnc_url":"http://localhost:6901/vnc.html?autoconnect=1&resize=scale"},{"id":"browser-2","cdp_endpoint":"http://browser-2:9223","novnc_url":"http://localhost:6902/vnc.html?autoconnect=1&resize=scale"}]'
+      MIN_BROWSER_SLOTS: ${MIN_BROWSER_SLOTS:-1}
+      MAX_BROWSER_SLOTS: ${MAX_BROWSER_SLOTS:-2}
+      MAX_ACTIVE_JOBS_PER_WORKER: ${MAX_ACTIVE_JOBS_PER_WORKER:-1}
+      WAITING_USER_TIMEOUT_SEC: ${WAITING_USER_TIMEOUT_SEC:-300}
+      MAX_HANDOFF_SESSIONS: ${MAX_HANDOFF_SESSIONS:-1}
+      DOMAIN_CONCURRENCY_LIMITS: ${DOMAIN_CONCURRENCY_LIMITS:-}
       CDP_RECOVERY_WINDOW_SEC: ${CDP_RECOVERY_WINDOW_SEC:-20}
       CDP_RECOVERY_INTERVAL_MS: ${CDP_RECOVERY_INTERVAL_MS:-500}
       CODEX_BIN: codex
@@ -85,7 +111,9 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-      browser:
+      browser-1:
+        condition: service_healthy
+      browser-2:
         condition: service_healthy
 
   micro-ui:

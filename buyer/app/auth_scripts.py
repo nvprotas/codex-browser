@@ -92,7 +92,9 @@ class SberIdScriptRunner:
         start_url: str,
         storage_state: dict[str, Any],
         attempt: int,
+        cdp_endpoint: str | None = None,
     ) -> AuthScriptResult:
+        endpoint = cdp_endpoint or self._cdp_endpoint
         normalized_domain = normalize_domain(domain)
         spec = self._registry.get(normalized_domain)
         if spec is None:
@@ -148,14 +150,14 @@ class SberIdScriptRunner:
         storage_path.write_text(json.dumps(storage_state, ensure_ascii=False), encoding='utf-8')
 
         try:
-            resolved_endpoint = await resolve_cdp_endpoint(self._cdp_endpoint)
+            resolved_endpoint = await resolve_cdp_endpoint(endpoint)
         except Exception as exc:
             logger.error(
                 'auth_script_endpoint_resolve_failed session_id=%s domain=%s attempt=%s endpoint=%s error=%s',
                 session_id,
                 normalized_domain,
                 attempt,
-                self._cdp_endpoint,
+                endpoint,
                 tail_text(str(exc), limit=700),
             )
             return AuthScriptResult(
@@ -165,7 +167,7 @@ class SberIdScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'cdp_resolve_error': tail_text(str(exc), limit=900),
                 },
             )
@@ -187,7 +189,7 @@ class SberIdScriptRunner:
             session_id,
             normalized_domain,
             attempt,
-            self._cdp_endpoint,
+            endpoint,
             resolved_endpoint,
         )
         logger.info(
@@ -226,7 +228,7 @@ class SberIdScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     'timeout_sec': self._timeout_sec,
                 },
@@ -248,7 +250,7 @@ class SberIdScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     **stdio_artifacts,
                 },
@@ -262,7 +264,7 @@ class SberIdScriptRunner:
                 artifacts={
                     'domain': normalized_domain,
                     'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
+                    'cdp_endpoint': endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     **stdio_artifacts,
                 },
@@ -279,7 +281,7 @@ class SberIdScriptRunner:
                 'domain': normalized_domain,
                 'script': str(script_path),
                 'lifecycle': spec.lifecycle,
-                'cdp_endpoint': self._cdp_endpoint,
+                'cdp_endpoint': endpoint,
                 'resolved_cdp_endpoint': resolved_endpoint,
                 **stdio_artifacts,
             }

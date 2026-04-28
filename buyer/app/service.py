@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -22,7 +24,9 @@ from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledg
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
+from .runtime import BrowserSlot, BrowserSlotManager, domain_for_slot_limit
 from .state import (
+    ReplySubmissionResult,
     ReplyValidationError,
     SessionConflictError,
     SessionNotFoundError,
@@ -31,6 +35,17 @@ from .state import (
 )
 
 logger = logging.getLogger('uvicorn.error')
+WAITING_USER_TIMEOUT_REASON_CODE = 'waiting_user_timeout'
+
+
+class WaitingUserTimeoutError(RuntimeError):
+    pass
+
+
+@dataclass
+class _RuntimeSession:
+    session_id: str
+    slot: BrowserSlot
 
 
 class BuyerService:
@@ -50,6 +65,9 @@ class BuyerService:
         purchase_script_allowlist: set[str] | None = None,
         purchase_script_runner: PurchaseScriptRunner | None = None,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
+        browser_slot_manager: BrowserSlotManager | None = None,
+        max_active_jobs_per_worker: int = 1,
+        waiting_user_timeout_sec: float = 300.0,
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -64,8 +82,38 @@ class BuyerService:
         self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
         self._purchase_script_runner = purchase_script_runner
         self._knowledge_analyzer = knowledge_analyzer
+        default_cdp_endpoint = getattr(getattr(runner, 'settings', None), 'browser_cdp_endpoint', 'http://browser:9223')
+        self._browser_slot_manager = browser_slot_manager or BrowserSlotManager(
+            slots=[BrowserSlot(slot_id='browser-1', cdp_endpoint=default_cdp_endpoint, novnc_url=novnc_url)]
+        )
+        self._max_active_jobs_per_worker = max(max_active_jobs_per_worker, 1)
+        self._waiting_user_timeout_sec = max(waiting_user_timeout_sec, 0.0)
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
+        self._worker_id = f'buyer-{uuid4()}'
+        self._worker_task: asyncio.Task[None] | None = None
+        self._worker_stop = asyncio.Event()
+        self._active_job_sessions: set[str] = set()
+        self._job_capacity = asyncio.Condition()
+        self._runtime_sessions: dict[str, _RuntimeSession] = {}
+
+    async def start_workers(self) -> None:
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+        await self._store.fail_stale_runtime_sessions(
+            reason='stale_runtime_after_buyer_restart: browser slot утрачен, автопродолжение не поддерживается.'
+        )
+        self._worker_stop.clear()
+        self._worker_task = asyncio.create_task(self._worker_loop(), name=f'buyer-worker-{self._worker_id}')
+
+    async def shutdown_workers(self) -> None:
+        task = self._worker_task
+        if task is None:
+            return
+        self._worker_stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._worker_task = None
 
     async def create_session(
         self,
@@ -79,15 +127,10 @@ class BuyerService:
             task=task,
             start_url=start_url,
             callback_url=callback_url or self._default_callback_url,
-            novnc_url=self._novnc_url,
+            novnc_url='',
             metadata=metadata,
             auth=auth,
         )
-        state = await self._store.set_status(state.session_id, SessionStatus.RUNNING)
-
-        task_ref = asyncio.create_task(self._run_session(state.session_id), name=f'buyer-session-{state.session_id}')
-        state.task_ref = task_ref
-        self._store.set_task_ref(state.session_id, task_ref)
         return state
 
     async def get_session(self, session_id: str) -> SessionState:
@@ -96,8 +139,33 @@ class BuyerService:
     async def list_sessions(self) -> list[SessionState]:
         return await self._store.list_sessions()
 
-    async def submit_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
-        return await self._store.apply_reply(session_id, reply_id, message)
+    async def submit_reply(self, session_id: str, reply_id: str, message: str) -> ReplySubmissionResult:
+        try:
+            expired = await self._store.expire_waiting_reply_if_deadline_passed(
+                session_id,
+                reason=f'{WAITING_USER_TIMEOUT_REASON_CODE}: ответ пользователя не получен за отведенное время.',
+            )
+        except SessionNotFoundError:
+            raise
+        if expired is not None:
+            return ReplySubmissionResult(state=expired, accepted=False, reason_code=WAITING_USER_TIMEOUT_REASON_CODE)
+
+        state = await self._store.get(session_id)
+        if state.status == SessionStatus.FAILED and state.last_error and WAITING_USER_TIMEOUT_REASON_CODE in state.last_error:
+            return ReplySubmissionResult(state=state, accepted=False, reason_code=WAITING_USER_TIMEOUT_REASON_CODE)
+
+        try:
+            replied = await self._store.apply_reply(session_id, reply_id, message)
+        except ReplyValidationError as exc:
+            if WAITING_USER_TIMEOUT_REASON_CODE in str(exc):
+                state = await self._store.set_status(
+                    session_id,
+                    SessionStatus.FAILED,
+                    error=f'{WAITING_USER_TIMEOUT_REASON_CODE}: ответ пользователя не получен за отведенное время.',
+                )
+                return ReplySubmissionResult(state=state, accepted=False, reason_code=WAITING_USER_TIMEOUT_REASON_CODE)
+            raise
+        return ReplySubmissionResult(state=replied, accepted=True, reason_code=None)
 
     async def wait_for_post_session_analysis(self) -> None:
         if not self._post_session_analysis_tasks:
@@ -112,7 +180,69 @@ class BuyerService:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _run_session(self, session_id: str) -> None:
+    async def _worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                started = await self._start_next_queued_session_if_possible()
+                if not started:
+                    await asyncio.wait_for(self._worker_stop.wait(), timeout=0.05)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - worker не должен умереть от одной итерации
+                logger.exception('buyer_worker_loop_error worker_id=%s error=%s', self._worker_id, _tail_text(str(exc), limit=700))
+                await asyncio.sleep(0.2)
+
+    async def _start_next_queued_session_if_possible(self) -> bool:
+        async with self._job_capacity:
+            if len(self._active_job_sessions) >= self._max_active_jobs_per_worker:
+                return False
+
+        claim_token = str(uuid4())
+        state = await self._store.claim_next_queued_session(worker_id=self._worker_id, claim_token=claim_token)
+        if state is None:
+            return False
+
+        slot = await self._browser_slot_manager.acquire(
+            session_id=state.session_id,
+            domain=domain_for_slot_limit(state.start_url),
+        )
+        if slot is None:
+            await self._store.requeue_session(state.session_id)
+            return False
+
+        state = await self._store.assign_browser_slot(
+            state.session_id,
+            slot_id=slot.slot_id,
+            cdp_endpoint=slot.cdp_endpoint,
+            novnc_url=slot.novnc_url,
+        )
+        await self._acquire_job_capacity(state.session_id)
+        task_ref = asyncio.create_task(
+            self._run_session(state.session_id, slot),
+            name=f'buyer-session-{state.session_id}',
+        )
+        state.task_ref = task_ref
+        self._store.set_task_ref(state.session_id, task_ref)
+        self._runtime_sessions[state.session_id] = _RuntimeSession(session_id=state.session_id, slot=slot)
+        task_ref.add_done_callback(lambda _task, sid=state.session_id: self._runtime_sessions.pop(sid, None))
+        return True
+
+    async def _acquire_job_capacity(self, session_id: str) -> None:
+        async with self._job_capacity:
+            await self._job_capacity.wait_for(
+                lambda: session_id in self._active_job_sessions
+                or len(self._active_job_sessions) < self._max_active_jobs_per_worker
+            )
+            self._active_job_sessions.add(session_id)
+
+    async def _release_job_capacity(self, session_id: str) -> None:
+        async with self._job_capacity:
+            self._active_job_sessions.discard(session_id)
+            self._job_capacity.notify_all()
+
+    async def _run_session(self, session_id: str, slot: BrowserSlot) -> None:
         latest_user_reply: str | None = None
         auth_summary: dict[str, Any] = {}
         step_index = 0
@@ -135,7 +265,7 @@ class BuyerService:
 
             await self._store.add_agent_memory(session_id, 'system', f'Start URL: {state.start_url}')
             await self._store.add_agent_memory(session_id, 'user', state.task)
-            auth_summary = await self._run_sberid_auth_flow(state)
+            auth_summary = await self._run_sberid_auth_flow(state, browser_cdp_endpoint=slot.cdp_endpoint)
             if auth_summary:
                 await self._store.set_auth_context(session_id, auth_summary)
                 await self._store.add_agent_memory(
@@ -144,7 +274,7 @@ class BuyerService:
                     f'[SBERID_AUTH_SUMMARY] {json.dumps(auth_summary, ensure_ascii=False)}',
                 )
 
-            purchase_result = await self._run_purchase_script_flow(state)
+            purchase_result = await self._run_purchase_script_flow(state, browser_cdp_endpoint=slot.cdp_endpoint)
             if purchase_result is not None:
                 await self._handle_completed(state, purchase_result, auth_summary=auth_summary)
                 return
@@ -173,6 +303,7 @@ class BuyerService:
                     auth_context=auth_summary,
                     memory=memory,
                     latest_user_reply=latest_user_reply,
+                    browser_cdp_endpoint=slot.cdp_endpoint,
                 )
                 await self._emit_event(
                     state,
@@ -242,6 +373,14 @@ class BuyerService:
                 await self._handle_failed(state, result.message, result.artifacts, auth_summary=auth_summary)
                 return
 
+        except WaitingUserTimeoutError as exc:
+            state = await self._store.get(session_id)
+            await self._handle_failed(
+                state,
+                str(exc),
+                {'reason_code': WAITING_USER_TIMEOUT_REASON_CODE},
+                auth_summary=auth_summary,
+            )
         except (SessionNotFoundError, SessionConflictError, ReplyValidationError):
             return
         except CallbackDeliveryError as exc:
@@ -273,6 +412,24 @@ class BuyerService:
                     idempotency_suffix='scenario-failed-unhandled',
                 )
                 await self._store.append_event(session_id, fallback_event)
+        finally:
+            await self._release_job_capacity(session_id)
+            await self._cleanup_and_release_slot(session_id, slot)
+
+    async def _cleanup_and_release_slot(self, session_id: str, slot: BrowserSlot) -> None:
+        try:
+            cleanup = getattr(self._runner, 'cleanup_browser_slot', None)
+            if cleanup is not None:
+                await cleanup(slot.cdp_endpoint)
+        except Exception as exc:  # noqa: BLE001 - cleanup не должен менять итог сессии
+            logger.warning(
+                'browser_slot_cleanup_failed session_id=%s slot=%s endpoint=%s error=%s',
+                session_id,
+                slot.slot_id,
+                slot.cdp_endpoint,
+                _tail_text(str(exc), limit=700),
+            )
+        await self._browser_slot_manager.release(session_id)
 
     async def _handle_completed(
         self,
@@ -396,7 +553,7 @@ class BuyerService:
                 _tail_text(str(exc), limit=700),
             )
 
-    async def _run_sberid_auth_flow(self, state: SessionState) -> dict[str, Any]:
+    async def _run_sberid_auth_flow(self, state: SessionState, *, browser_cdp_endpoint: str) -> dict[str, Any]:
         domain = domain_from_url(state.start_url)
         summary: dict[str, Any] = {
             'provider': None,
@@ -470,6 +627,7 @@ class BuyerService:
                 start_url=state.start_url,
                 storage_state=storage_state,
                 attempt=attempt,
+                cdp_endpoint=browser_cdp_endpoint,
             )
             summary['script_status'] = script_result.status
             summary['reason_code'] = script_result.reason_code
@@ -526,7 +684,7 @@ class BuyerService:
         )
         return summary
 
-    async def _run_purchase_script_flow(self, state: SessionState) -> AgentOutput | None:
+    async def _run_purchase_script_flow(self, state: SessionState, *, browser_cdp_endpoint: str) -> AgentOutput | None:
         if self._purchase_script_runner is None:
             return None
 
@@ -540,6 +698,7 @@ class BuyerService:
                 domain=domain,
                 start_url=state.start_url,
                 task=state.task,
+                cdp_endpoint=browser_cdp_endpoint,
             )
         except Exception as exc:  # noqa: BLE001 - быстрый путь не должен ломать generic fallback
             await self._store.add_agent_memory(
@@ -601,7 +760,10 @@ class BuyerService:
         extra_context: dict[str, Any] | None,
     ) -> str:
         reply_id = str(uuid4())
-        await self._store.set_waiting_question(state.session_id, message, reply_id)
+        deadline_at = None
+        if self._waiting_user_timeout_sec > 0:
+            deadline_at = datetime.now(timezone.utc) + timedelta(seconds=self._waiting_user_timeout_sec)
+        await self._store.set_waiting_question(state.session_id, message, reply_id, deadline_at=deadline_at)
         refreshed_state = await self._store.get(state.session_id)
         payload: dict[str, Any] = {
             'message': message,
@@ -619,7 +781,24 @@ class BuyerService:
         )
         logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
 
-        await refreshed_state.wake_event.wait()
+        await self._release_job_capacity(state.session_id)
+        try:
+            if self._waiting_user_timeout_sec > 0:
+                await asyncio.wait_for(refreshed_state.wake_event.wait(), timeout=self._waiting_user_timeout_sec)
+            else:
+                await refreshed_state.wake_event.wait()
+        except asyncio.TimeoutError as exc:
+            await self._store.expire_waiting_reply_if_deadline_passed(
+                state.session_id,
+                reason=f'{WAITING_USER_TIMEOUT_REASON_CODE}: ответ пользователя не получен за отведенное время.',
+            )
+            raise WaitingUserTimeoutError(
+                f'{WAITING_USER_TIMEOUT_REASON_CODE}: ответ пользователя не получен за отведенное время.'
+            ) from exc
+        current = await self._store.get(state.session_id)
+        if current.status == SessionStatus.FAILED and current.last_error and WAITING_USER_TIMEOUT_REASON_CODE in current.last_error:
+            raise WaitingUserTimeoutError(current.last_error)
+        await self._acquire_job_capacity(state.session_id)
         reply_text = await self._store.pop_reply(state.session_id)
         await self._store.add_agent_memory(state.session_id, 'user', reply_text)
         return reply_text

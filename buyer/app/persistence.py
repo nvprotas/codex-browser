@@ -97,6 +97,33 @@ SCHEMA_MIGRATIONS: tuple[tuple[str, str], ...] = (
             ON buyer_agent_memory (session_id, position);
         """,
     ),
+    (
+        '002_runtime_queue',
+        """
+        ALTER TABLE buyer_sessions
+            ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS waiting_deadline_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS runtime_worker_id TEXT,
+            ADD COLUMN IF NOT EXISTS runtime_claim_token TEXT,
+            ADD COLUMN IF NOT EXISTS runtime_heartbeat_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS browser_slot_id TEXT,
+            ADD COLUMN IF NOT EXISTS browser_cdp_endpoint TEXT;
+
+        CREATE INDEX IF NOT EXISTS buyer_sessions_queue_claim_idx
+            ON buyer_sessions (status, queued_at, created_at)
+            WHERE status = 'queued';
+
+        CREATE INDEX IF NOT EXISTS buyer_sessions_runtime_claim_idx
+            ON buyer_sessions (runtime_claim_token)
+            WHERE runtime_claim_token IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS buyer_sessions_waiting_deadline_idx
+            ON buyer_sessions (waiting_deadline_at)
+            WHERE status = 'waiting_user';
+        """,
+    ),
 )
 
 
@@ -242,6 +269,67 @@ class PostgresSessionRepository:
                 error,
             )
 
+    async def claim_next_queued_session(
+        self,
+        *,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: Any,
+    ) -> SessionState | None:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    WITH candidate AS (
+                        SELECT session_id
+                        FROM buyer_sessions
+                        WHERE status = 'queued'
+                        ORDER BY queued_at ASC NULLS FIRST, created_at ASC, session_id ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE buyer_sessions AS session
+                    SET status = 'running',
+                        started_at = COALESCE(session.started_at, $3),
+                        updated_at = $3,
+                        runtime_worker_id = $1,
+                        runtime_claim_token = $2,
+                        runtime_heartbeat_at = $3
+                    FROM candidate
+                    WHERE session.session_id = candidate.session_id
+                    RETURNING session.session_id
+                    """,
+                    worker_id,
+                    claim_token,
+                    claimed_at,
+                )
+                if row is None:
+                    return None
+                return await _load_session(conn, row['session_id'])
+
+    async def fail_stale_runtime_sessions(self, *, failed_at: Any, reason: str) -> int:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE buyer_sessions
+                SET status = 'failed',
+                    last_error = $2,
+                    finished_at = $1,
+                    updated_at = $1,
+                    waiting_deadline_at = NULL,
+                    runtime_worker_id = NULL,
+                    runtime_claim_token = NULL,
+                    runtime_heartbeat_at = NULL
+                WHERE status IN ('running', 'waiting_user')
+                  AND runtime_claim_token IS NOT NULL
+                """,
+                failed_at,
+                reason,
+            )
+            return _row_count(status)
+
     async def _ensure_pool(self) -> asyncpg.Pool:
         if self._pool is None:
             await self.initialize()
@@ -275,9 +363,15 @@ async def _upsert_session(conn: asyncpg.Connection, state: SessionState) -> None
         """
         INSERT INTO buyer_sessions (
             session_id, task, start_url, callback_url, novnc_url,
-            status, metadata, last_error, created_at, updated_at
+            status, metadata, last_error, created_at, updated_at,
+            queued_at, started_at, finished_at, waiting_deadline_at,
+            runtime_worker_id, runtime_claim_token, runtime_heartbeat_at,
+            browser_slot_id, browser_cdp_endpoint
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17, $18, $19
+        )
         ON CONFLICT (session_id) DO UPDATE SET
             task = EXCLUDED.task,
             start_url = EXCLUDED.start_url,
@@ -286,7 +380,16 @@ async def _upsert_session(conn: asyncpg.Connection, state: SessionState) -> None
             status = EXCLUDED.status,
             metadata = EXCLUDED.metadata,
             last_error = EXCLUDED.last_error,
-            updated_at = EXCLUDED.updated_at
+            updated_at = EXCLUDED.updated_at,
+            queued_at = EXCLUDED.queued_at,
+            started_at = EXCLUDED.started_at,
+            finished_at = EXCLUDED.finished_at,
+            waiting_deadline_at = EXCLUDED.waiting_deadline_at,
+            runtime_worker_id = EXCLUDED.runtime_worker_id,
+            runtime_claim_token = EXCLUDED.runtime_claim_token,
+            runtime_heartbeat_at = EXCLUDED.runtime_heartbeat_at,
+            browser_slot_id = EXCLUDED.browser_slot_id,
+            browser_cdp_endpoint = EXCLUDED.browser_cdp_endpoint
         """,
         state.session_id,
         state.task,
@@ -298,6 +401,15 @@ async def _upsert_session(conn: asyncpg.Connection, state: SessionState) -> None
         state.last_error,
         state.created_at,
         state.updated_at,
+        state.queued_at,
+        state.started_at,
+        state.finished_at,
+        state.waiting_deadline_at,
+        state.runtime_worker_id,
+        state.runtime_claim_token,
+        state.runtime_heartbeat_at,
+        state.browser_slot_id,
+        state.browser_cdp_endpoint,
     )
 
 
@@ -409,7 +521,10 @@ async def _load_session(conn: asyncpg.Connection, session_id: str) -> SessionSta
     row = await conn.fetchrow(
         """
         SELECT session_id, task, start_url, callback_url, novnc_url,
-               status, metadata, last_error, created_at, updated_at
+               status, metadata, last_error, created_at, updated_at,
+               queued_at, started_at, finished_at, waiting_deadline_at,
+               runtime_worker_id, runtime_claim_token, runtime_heartbeat_at,
+               browser_slot_id, browser_cdp_endpoint
         FROM buyer_sessions
         WHERE session_id = $1
         """,
@@ -479,6 +594,15 @@ async def _load_session(conn: asyncpg.Connection, session_id: str) -> SessionSta
         status=SessionStatus(row['status']),
         created_at=row['created_at'],
         updated_at=row['updated_at'],
+        queued_at=row['queued_at'],
+        started_at=row['started_at'],
+        finished_at=row['finished_at'],
+        waiting_deadline_at=row['waiting_deadline_at'],
+        runtime_worker_id=row['runtime_worker_id'],
+        runtime_claim_token=row['runtime_claim_token'],
+        runtime_heartbeat_at=row['runtime_heartbeat_at'],
+        browser_slot_id=row['browser_slot_id'],
+        browser_cdp_endpoint=row['browser_cdp_endpoint'],
         waiting_reply_id=waiting_reply_id,
         waiting_question=waiting_question,
         last_error=row['last_error'],
@@ -492,7 +616,10 @@ async def _load_all_sessions(conn: asyncpg.Connection) -> list[SessionState]:
     session_rows = await conn.fetch(
         """
         SELECT session_id, task, start_url, callback_url, novnc_url,
-               status, metadata, last_error, created_at, updated_at
+               status, metadata, last_error, created_at, updated_at,
+               queued_at, started_at, finished_at, waiting_deadline_at,
+               runtime_worker_id, runtime_claim_token, runtime_heartbeat_at,
+               browser_slot_id, browser_cdp_endpoint
         FROM buyer_sessions
         ORDER BY created_at ASC, session_id ASC
         """
@@ -571,6 +698,15 @@ async def _load_all_sessions(conn: asyncpg.Connection) -> list[SessionState]:
             status=SessionStatus(row['status']),
             created_at=row['created_at'],
             updated_at=row['updated_at'],
+            queued_at=row['queued_at'],
+            started_at=row['started_at'],
+            finished_at=row['finished_at'],
+            waiting_deadline_at=row['waiting_deadline_at'],
+            runtime_worker_id=row['runtime_worker_id'],
+            runtime_claim_token=row['runtime_claim_token'],
+            runtime_heartbeat_at=row['runtime_heartbeat_at'],
+            browser_slot_id=row['browser_slot_id'],
+            browser_cdp_endpoint=row['browser_cdp_endpoint'],
             waiting_reply_id=waiting_reply_id,
             waiting_question=waiting_question,
             last_error=row['last_error'],
@@ -586,6 +722,13 @@ def _json_dict(value: Any) -> dict[str, Any]:
         parsed = json.loads(value)
         return parsed if isinstance(parsed, dict) else {}
     return value if isinstance(value, dict) else {}
+
+
+def _row_count(status: str) -> int:
+    try:
+        return int(status.rsplit(' ', 1)[-1])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ensure_json_safe(value: dict[str, Any]) -> None:

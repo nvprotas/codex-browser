@@ -22,8 +22,10 @@ Roadmap развития после MVP: `docs/buyer-roadmap.md`.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
 - Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
 - Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
+- Postgres task queue: `POST /v1/tasks` создает `queued`-сессию, worker атомарно забирает задачу и назначает browser slot.
+- Browser-slot runtime: compose поднимает статический пул `browser-1`/`browser-2`; `waiting_user` освобождает agent runner, но держит browser slot до TTL ожидания.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
-- Ограничение MVP: только 1 активная сессия одновременно.
+- Ограничение MVP: один `buyer` worker process; количество параллельных agent jobs и browser slots задается env.
 - Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
 
 ## Запуск
@@ -72,6 +74,15 @@ cp .env.example .env
 # POSTGRES_DB=buyer
 # POSTGRES_USER=buyer
 # POSTGRES_PASSWORD=buyer
+
+# Runtime queue и browser slots
+# MAX_ACTIVE_JOBS_PER_WORKER=1
+# MIN_BROWSER_SLOTS=1
+# MAX_BROWSER_SLOTS=2
+# WAITING_USER_TIMEOUT_SEC=300
+# MAX_HANDOFF_SESSIONS=1
+# BROWSER_SLOTS_JSON=[{"id":"browser-1","cdp_endpoint":"http://browser-1:9223","novnc_url":"http://localhost:6901/vnc.html?autoconnect=1&resize=scale"},{"id":"browser-2","cdp_endpoint":"http://browser-2:9223","novnc_url":"http://localhost:6902/vnc.html?autoconnect=1&resize=scale"}]
+# DOMAIN_CONCURRENCY_LIMITS=
 ```
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
@@ -84,8 +95,10 @@ docker compose up --build
 
 - `buyer` API: `http://localhost:8000`
 - `micro-ui`: `http://localhost:8080` (можно запускать новую сессию прямо из UI)
-- noVNC (из sidecar): `http://localhost:6901/vnc.html?autoconnect=1&resize=scale`
-- CDP endpoint sidecar (с host-машины): `http://localhost:9223`
+- noVNC slot 1: `http://localhost:6901/vnc.html?autoconnect=1&resize=scale`
+- noVNC slot 2: `http://localhost:6902/vnc.html?autoconnect=1&resize=scale`
+- CDP endpoint slot 1 (с host-машины): `http://localhost:9223`
+- CDP endpoint slot 2 (с host-машины): `http://localhost:9224`
 
 ## Пример сценария
 
@@ -208,8 +221,10 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 ## Важные ограничения MVP
 
 - Состояние задач, сессий, событий, ответов, agent memory и ссылок на артефакты хранится в Postgres при `STATE_BACKEND=postgres`.
+- Очередь задач хранится в Postgres. `POST /v1/tasks` возвращает `queued`, а worker переводит задачу в `running` после атомарного claim и аренды browser slot.
+- `waiting_user` удерживает browser slot до `WAITING_USER_TIMEOUT_SEC`; после timeout сессия завершается `failed`, поздний reply получает `accepted=false` и `reason_code=waiting_user_timeout`.
 - После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner и не восстанавливает утраченную browser page.
-- Следующий этап runtime заменяет Redis-подход на Postgres task queue и browser-slot manager: `waiting_user` освобождает agent runner, browser slot удерживается только до TTL ожидания, после timeout сессия завершается без resume.
+- Runtime markers активных `running`/`waiting_user` сессий после рестарта помечаются понятной ошибкой, потому что browser page/session-bound auth не восстанавливаются автоматически.
 - Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
 - noVNC поднят всегда и без пароля (только для MVP).
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).

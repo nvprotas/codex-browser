@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     postgres_pool_max_size: int = Field(default=5, ge=1)
 
     max_active_sessions: int = 1
+    max_active_jobs_per_worker: int = Field(default=1, ge=1)
+    min_browser_slots: int = Field(default=1, ge=1)
+    max_browser_slots: int = Field(default=2, ge=1)
+    waiting_user_timeout_sec: int = Field(default=300, ge=1)
+    max_handoff_sessions: int = Field(default=1, ge=1)
+    browser_slots_json: str = ''
+    domain_concurrency_limits: str = ''
 
     status_ttl_sec: int = Field(default=86400, ge=60)
 

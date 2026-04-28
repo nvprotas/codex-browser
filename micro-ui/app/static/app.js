@@ -130,7 +130,7 @@ function meta(label, value) {
 
 function statusClass(status) {
   const normalized = String(status || 'running').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-  const known = new Set(['running', 'waiting_user', 'failed', 'error', 'completed', 'success']);
+  const known = new Set(['queued', 'running', 'waiting_user', 'failed', 'error', 'completed', 'success']);
   return known.has(normalized) ? normalized : 'unknown';
 }
 

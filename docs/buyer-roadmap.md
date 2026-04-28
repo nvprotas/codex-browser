@@ -83,7 +83,7 @@
 **Value:** 4
 **Effort:** 3
 **V/E:** 1.33
-**Статус:** planned
+**Статус:** implemented
 **Зависимости:** задача 1.
 
 **Что сделать:**
@@ -103,6 +103,13 @@
   - доменные лимиты для одного магазина.
 - Реализовать timeout ожидания пользователя: если ответ не пришел за `waiting_user_timeout_sec`, сессия завершается без resume, browser slot освобождается, поздний reply получает machine-readable отказ.
 - Поддержать динамическое количество browser slots в пределах `min/max`. Для MVP предпочтителен статический compose-пул с динамической арендой слотов; Docker-managed autoscale допускается отдельным follow-up после оценки безопасности Docker socket.
+
+**Реализация 2026-04-28:**
+
+- Очередь реализована в Postgres через статус `queued` и атомарный claim `FOR UPDATE SKIP LOCKED`.
+- Runtime slots задаются статическим compose-пулом `browser-1`/`browser-2` и `BROWSER_SLOTS_JSON`.
+- `waiting_user` освобождает agent job capacity, удерживает browser slot до `WAITING_USER_TIMEOUT_SEC` и возвращает поздним reply `reason_code=waiting_user_timeout`.
+- Runtime markers активных сессий после restart завершаются понятной ошибкой без восстановления browser page или auth state.
 
 **Value для `openclaw`:**
 
