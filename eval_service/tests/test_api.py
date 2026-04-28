@@ -226,6 +226,56 @@ def test_get_run_detail_merges_registry_metadata_and_runtime_callbacks(tmp_path:
     assert missing_case['error'] == 'timeout after 600s'
 
 
+def test_get_run_detail_returns_micro_ui_friendly_evaluations(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(
+                eval_case_id='case-a',
+                case_version='1',
+                state=CaseRunState.PAYMENT_READY,
+                session_id='session-a',
+                artifact_paths={'trace': 'artifacts/session-a.trace.json'},
+            )
+        ],
+        status=EvalRunStatus.FINISHED,
+    )
+    _write_evaluation(
+        tmp_path,
+        'eval-run-001',
+        _evaluation(
+            'eval-run-001',
+            'case-a',
+            session_id='session-a',
+            duration_ms=2400,
+            buyer_tokens_used=321,
+            recommendations=2,
+        ),
+    )
+
+    response = client.get('/runs/eval-run-001')
+
+    assert response.status_code == 200
+    evaluation = response.json()['evaluations'][0]
+    assert evaluation['eval_case_id'] == 'case-a'
+    assert evaluation['host'] == 'shop.example'
+    assert evaluation['runtime_status'] == 'payment_ready'
+    assert evaluation['checks'] == [
+        'outcome_ok: ok',
+        'safety_ok: ok',
+        'payment_boundary_ok: ok',
+        'evidence_ok: ok',
+        'recommendations_ok: ok',
+    ]
+    assert evaluation['checks_detail']['outcome_ok']['reason'] == 'Цель проверена.'
+    assert evaluation['duration_ms'] == 2400
+    assert evaluation['buyer_tokens_used'] == 321
+    assert evaluation['recommendations_count'] == 2
+    assert evaluation['artifacts'] == ['trace: artifacts/session-a.trace.json']
+    assert evaluation['metrics']['duration_ms'] == 2400
+
+
 def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_path: Path) -> None:
     client, store = _client(tmp_path, cases=[_case('case-a')])
     judge_runner = FakeJudgeRunner()
@@ -251,7 +301,21 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     assert body['eval_run_id'] == 'eval-run-001'
     assert body['status'] == 'judged'
     assert [evaluation['eval_case_id'] for evaluation in body['evaluations']] == ['case-a']
-    assert body['evaluations'][0]['status'] == 'judged'
+    evaluation = body['evaluations'][0]
+    assert evaluation['status'] == 'judged'
+    assert evaluation['runtime_status'] == 'finished'
+    assert evaluation['checks'] == [
+        'outcome_ok: ok',
+        'safety_ok: ok',
+        'payment_boundary_ok: ok',
+        'evidence_ok: ok',
+        'recommendations_ok: ok',
+    ]
+    assert evaluation['checks_detail']['outcome_ok']['status'] == 'ok'
+    assert evaluation['duration_ms'] is None
+    assert evaluation['buyer_tokens_used'] is None
+    assert evaluation['recommendations_count'] == 0
+    assert evaluation['artifacts'] == ['receipt: artifacts/receipt.json']
     assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.judge-input.json').is_file()
     assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.evaluation.json').is_file()
     assert judge_runner.inputs[0]['case_run']['state'] == 'finished'
@@ -289,7 +353,8 @@ def test_post_run_judge_skips_auth_missing_without_real_codex_or_state_mutation(
     body = response.json()
     assert body['status'] == 'judged'
     assert body['evaluations'][0]['status'] == 'judge_skipped'
-    assert 'skipped_auth_missing' in body['evaluations'][0]['checks']['outcome_ok']['reason']
+    assert body['evaluations'][0]['checks'][0].startswith('outcome_ok: skipped')
+    assert 'skipped_auth_missing' in body['evaluations'][0]['checks_detail']['outcome_ok']['reason']
     assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.SKIPPED_AUTH_MISSING
 
 
@@ -359,11 +424,21 @@ def test_dashboard_cases_and_hosts_load_all_evaluation_files(tmp_path: Path) -> 
     assert case_rows[0]['eval_case_id'] == 'case-a'
     assert case_rows[0]['total'] == 2
     assert case_rows[0]['hosts'] == ['shop.example']
+    assert case_rows[0]['status'] == 'judge_failed'
+    assert case_rows[0]['duration_ms'] == [1000, 3000]
+    assert case_rows[0]['buyer_tokens_used'] == [100, 300]
+    assert case_rows[0]['baseline_duration_ms'] == 1000
+    assert case_rows[0]['baseline_tokens'] == 100
+    assert case_rows[0]['success_rate'] == '1/2'
     assert case_rows[0]['checks']['outcome_ok'] == {'ok': 1, 'not_ok': 0, 'skipped': 1}
     assert case_rows[0]['metrics']['duration_ms']['median'] == 2000
     assert host_rows[0]['host'] == 'shop.example'
     assert host_rows[0]['total'] == 2
     assert host_rows[0]['cases'] == ['case-a']
+    assert host_rows[0]['status'] == 'judge_failed'
+    assert host_rows[0]['duration_ms'] == [1000, 3000]
+    assert host_rows[0]['buyer_tokens_used'] == [100, 300]
+    assert host_rows[0]['success_rate'] == '1/2'
 
 
 def test_existing_post_runs_route_still_works_after_api_router_include(tmp_path: Path) -> None:
@@ -442,6 +517,7 @@ def _evaluation(
     duration_ms: int | None = 1000,
     buyer_tokens_used: int | None = 100,
     outcome: str = 'ok',
+    recommendations: int = 0,
 ) -> dict[str, Any]:
     return {
         'eval_run_id': eval_run_id,
@@ -463,6 +539,15 @@ def _evaluation(
             'recommendations_ok': {'status': 'ok', 'reason': 'Рекомендации применимы.', 'evidence_refs': []},
         },
         'evidence_refs': [],
-        'recommendations': [],
+        'recommendations': [
+            {
+                'category': 'prompt',
+                'priority': 'medium',
+                'rationale': f'Причина {index}.',
+                'evidence_refs': [],
+                'draft_text': f'Рекомендация {index}.',
+            }
+            for index in range(recommendations)
+        ],
         'judge_metadata': {'backend': 'codex_exec', 'model': 'gpt-5.5'},
     }

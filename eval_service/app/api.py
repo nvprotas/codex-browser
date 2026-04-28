@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from eval_service.app.aggregation import aggregate_evaluations
+from eval_service.app.aggregation import CHECK_NAMES, aggregate_evaluations
 from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.dashboard import build_cases_payload, build_hosts_payload
 from eval_service.app.judge_input import write_judge_input
@@ -57,7 +57,7 @@ async def get_run(eval_run_id: str, request: Request) -> dict[str, Any]:
     }
     return {
         'run': run,
-        'evaluations': _load_run_evaluations(store.run_dir(eval_run_id)),
+        'evaluations': _load_run_evaluations(store.run_dir(eval_run_id), manifest=manifest),
     }
 
 
@@ -94,7 +94,7 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
             case_run=run_case.model_dump(mode='json'),
         )
         result = judge_runner.run(judge_input_path)
-        evaluations.append(result.evaluation)
+        evaluations.append(_evaluation_item(result.evaluation, run_case=run_case))
 
     response_status = 'judge_failed' if any(item.get('status') == 'judge_failed' for item in evaluations) else 'judged'
     return {
@@ -110,7 +110,7 @@ async def dashboard_cases(request: Request) -> dict[str, list[dict[str, Any]]]:
         _load_all_evaluations(_get_run_store(request).runs_dir),
         baseline_window=request.app.state.settings.eval_baseline_window,
     )
-    return {'rows': build_cases_payload(summary)}
+    return {'rows': [_case_dashboard_row(row) for row in build_cases_payload(summary)]}
 
 
 @router.get('/dashboard/hosts')
@@ -119,7 +119,7 @@ async def dashboard_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
         _load_all_evaluations(_get_run_store(request).runs_dir),
         baseline_window=request.app.state.settings.eval_baseline_window,
     )
-    return {'rows': build_hosts_payload(summary)}
+    return {'rows': [_host_dashboard_row(row) for row in build_hosts_payload(summary)]}
 
 
 def _get_case_registry(request: Request) -> CaseRegistry:
@@ -151,7 +151,7 @@ def _case_item(case: EvalCase) -> dict[str, Any]:
 
 
 def _run_summary(manifest: EvalRunManifest, *, run_dir: Path) -> dict[str, Any]:
-    evaluations = _load_run_evaluations(run_dir)
+    evaluations = _load_raw_run_evaluations(run_dir)
     return {
         'eval_run_id': manifest.eval_run_id,
         'status': manifest.status.value,
@@ -237,11 +237,220 @@ def _case_metrics(run_case: EvalRunCase) -> dict[str, Any]:
     }
 
 
-def _load_run_evaluations(run_dir: Path) -> list[dict[str, Any]]:
+def _load_run_evaluations(run_dir: Path, *, manifest: EvalRunManifest | None = None) -> list[dict[str, Any]]:
+    run_cases = {
+        run_case.eval_case_id: run_case
+        for run_case in manifest.cases
+    } if manifest is not None else {}
+    return [
+        _evaluation_item(evaluation, run_case=run_cases.get(evaluation.get('eval_case_id')))
+        for evaluation in _load_raw_run_evaluations(run_dir)
+    ]
+
+
+def _load_raw_run_evaluations(run_dir: Path) -> list[dict[str, Any]]:
     evaluations_dir = run_dir / 'evaluations'
     if not evaluations_dir.is_dir():
         return []
     return [_read_json(path) for path in sorted(evaluations_dir.glob('*.evaluation.json'))]
+
+
+def _evaluation_item(evaluation: dict[str, Any], *, run_case: EvalRunCase | None = None) -> dict[str, Any]:
+    metrics = _dict_value(evaluation.get('metrics'))
+    checks_detail = _dict_value(evaluation.get('checks'))
+    recommendations = evaluation.get('recommendations')
+    recommendations_list = recommendations if isinstance(recommendations, list) else []
+    artifacts, artifacts_detail = _renderable_artifacts(evaluation, run_case=run_case)
+    return {
+        **evaluation,
+        'runtime_status': _runtime_status(evaluation, run_case),
+        'checks': _renderable_checks(checks_detail),
+        'checks_detail': checks_detail,
+        'duration_ms': metrics.get('duration_ms'),
+        'buyer_tokens_used': metrics.get('buyer_tokens_used'),
+        'recommendations_count': len(recommendations_list),
+        'artifacts': artifacts,
+        'artifacts_detail': artifacts_detail,
+        'metrics': metrics,
+    }
+
+
+def _runtime_status(evaluation: dict[str, Any], run_case: EvalRunCase | None) -> str | None:
+    if run_case is not None:
+        return run_case.state.value
+    status_value = evaluation.get('runtime_status') or evaluation.get('status')
+    return _string_value(status_value)
+
+
+def _renderable_checks(checks: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    for check_name in _ordered_check_names(checks):
+        check = checks.get(check_name)
+        if isinstance(check, dict):
+            check_status = _string_value(check.get('status')) or 'unknown'
+            label = f'{check_name}: {check_status}'
+            reason = _string_value(check.get('reason'))
+            if check_status != 'ok' and reason:
+                label = f'{label} - {reason}'
+            items.append(label)
+        else:
+            items.append(f'{check_name}: {_string_value(check) or "unknown"}')
+    return items
+
+
+def _ordered_check_names(checks: dict[str, Any]) -> list[str]:
+    known = [check_name for check_name in CHECK_NAMES if check_name in checks]
+    extra = sorted(check_name for check_name in checks if check_name not in CHECK_NAMES)
+    return [*known, *extra]
+
+
+def _renderable_artifacts(
+    evaluation: dict[str, Any],
+    *,
+    run_case: EvalRunCase | None,
+) -> tuple[list[str], dict[str, Any]]:
+    artifacts: list[str] = []
+    run_case_artifacts = run_case.artifact_paths if run_case is not None else {}
+    for name, path in sorted(run_case_artifacts.items()):
+        artifacts.append(f'{name}: {path}')
+
+    raw_artifacts = evaluation.get('artifacts')
+    for item in _artifact_items(raw_artifacts):
+        if item not in artifacts:
+            artifacts.append(item)
+
+    evidence_refs = _collect_evidence_refs(evaluation)
+    for evidence_ref in evidence_refs:
+        item = _evidence_ref_item(evidence_ref)
+        if item is not None and item not in artifacts:
+            artifacts.append(item)
+
+    return artifacts, {
+        'run_case': run_case_artifacts,
+        'evaluation': raw_artifacts,
+        'evidence_refs': evidence_refs,
+    }
+
+
+def _artifact_items(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [f'{name}: {_renderable_value(path)}' for name, path in sorted(value.items())]
+    if isinstance(value, list):
+        return [_renderable_value(item) for item in value]
+    if value is None:
+        return []
+    return [_renderable_value(value)]
+
+
+def _collect_evidence_refs(evaluation: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for evidence_ref in evaluation.get('evidence_refs') or []:
+        if isinstance(evidence_ref, dict):
+            refs.append(evidence_ref)
+    checks = _dict_value(evaluation.get('checks'))
+    for check in checks.values():
+        if not isinstance(check, dict):
+            continue
+        for evidence_ref in check.get('evidence_refs') or []:
+            if isinstance(evidence_ref, dict):
+                refs.append(evidence_ref)
+    return refs
+
+
+def _evidence_ref_item(evidence_ref: dict[str, Any]) -> str | None:
+    for key, label in (
+        ('screenshot_path', 'screenshot'),
+        ('trace_file', 'trace'),
+        ('browser_actions_file', 'browser_actions'),
+        ('event_id', 'event'),
+    ):
+        value = _string_value(evidence_ref.get(key))
+        if value:
+            return f'{label}: {value}'
+    step_index = evidence_ref.get('step_index')
+    if step_index is not None:
+        return f'step: {step_index}'
+    record_index = evidence_ref.get('record_index')
+    if record_index is not None:
+        return f'record: {record_index}'
+    return None
+
+
+def _case_dashboard_row(row: dict[str, Any]) -> dict[str, Any]:
+    baseline = _dict_value(row.get('baseline'))
+    return {
+        **row,
+        **_dashboard_micro_ui_fields(row),
+        'baseline_duration_ms': baseline.get('duration_ms'),
+        'baseline_tokens': baseline.get('buyer_tokens_used'),
+    }
+
+
+def _host_dashboard_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        **_dashboard_micro_ui_fields(row),
+    }
+
+
+def _dashboard_micro_ui_fields(row: dict[str, Any]) -> dict[str, Any]:
+    evaluations = _evaluations_history(row)
+    return {
+        'status': _latest_status(evaluations),
+        'duration_ms': _metric_history(evaluations, 'duration_ms'),
+        'buyer_tokens_used': _metric_history(evaluations, 'buyer_tokens_used'),
+        'success_rate': _success_rate(evaluations),
+    }
+
+
+def _evaluations_history(row: dict[str, Any]) -> list[dict[str, Any]]:
+    evaluations = row.get('evaluations')
+    return [item for item in evaluations if isinstance(item, dict)] if isinstance(evaluations, list) else []
+
+
+def _latest_status(evaluations: list[dict[str, Any]]) -> str | None:
+    for evaluation in reversed(evaluations):
+        status_value = _string_value(evaluation.get('status'))
+        if status_value:
+            return status_value
+    return None
+
+
+def _metric_history(evaluations: list[dict[str, Any]], metric_name: str) -> list[Any]:
+    return [
+        _dict_value(evaluation.get('metrics')).get(metric_name)
+        for evaluation in evaluations
+    ]
+
+
+def _success_rate(evaluations: list[dict[str, Any]]) -> str:
+    total = len(evaluations)
+    ok = sum(
+        1
+        for evaluation in evaluations
+        if _dict_value(evaluation.get('checks')).get('outcome_ok') == 'ok'
+    )
+    return f'{ok}/{total}'
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, 'value'):
+        return str(value.value)
+    return str(value)
+
+
+def _renderable_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return str(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load_all_evaluations(runs_dir: Path) -> list[EvaluationResult]:
