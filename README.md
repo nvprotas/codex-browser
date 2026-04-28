@@ -45,6 +45,10 @@ cp .env.example .env
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
+# Быстрый режим Codex CLI: minimal effort + отключенный image generation tool.
+# CODEX_REASONING_EFFORT=minimal
+# CODEX_IMAGE_GENERATION_ENABLED=false
+
 # Опционально: стратегия модели generic buyer-flow.
 # BUYER_MODEL_STRATEGY=single
 # BUYER_FAST_CODEX_MODEL=gpt-5.4-mini

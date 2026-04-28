@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     codex_reasoning_effort: Literal['minimal', 'low', 'medium', 'high', 'xhigh'] | None = 'minimal'
     codex_reasoning_summary: Literal['auto', 'concise', 'detailed', 'none'] | None = 'none'
     codex_web_search: Literal['disabled', 'cached', 'live'] | None = 'disabled'
+    codex_image_generation_enabled: bool = False
     buyer_trace_dir: str = '/workspace/.tmp/buyer-observability'
     buyer_prompt_preview_chars: int = Field(default=2000, ge=0)
     buyer_stream_tail_chars: int = Field(default=4000, ge=200)

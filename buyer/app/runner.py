@@ -913,16 +913,24 @@ def _build_codex_command(
 
 
 def _build_codex_config_overrides(settings: Settings) -> list[str]:
-    overrides: list[tuple[str, str | None]] = [
+    overrides: list[tuple[str, str | bool | None]] = [
         ('model_reasoning_effort', settings.codex_reasoning_effort),
         ('model_reasoning_summary', settings.codex_reasoning_summary),
         ('web_search', settings.codex_web_search),
     ]
+    if not settings.codex_image_generation_enabled:
+        overrides.append(('features.image_generation', False))
     cmd: list[str] = []
     for key, value in overrides:
-        if value:
-            cmd.extend(['-c', f'{key}="{value}"'])
+        if value is not None:
+            cmd.extend(['-c', f'{key}={_format_codex_config_value(value)}'])
     return cmd
+
+
+def _format_codex_config_value(value: str | bool) -> str:
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return f'"{value}"'
 
 
 class _AgentStreamPublisher:
