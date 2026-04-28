@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ratatouille buyer · Micro UI</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1724'/%3E%3Cpath d='M14 18h36v8H14zM14 30h22v8H14zM14 42h30v8H14z' fill='%23ff6b2d'/%3E%3C/svg%3E" />
+    <title>Ratatouille buyer · Buyer Console</title>
+    <link rel="icon" href="/static/assets/favicon.svg" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
@@ -12,8 +12,11 @@
     <main class="layout" data-poll-ms="{{ poll_interval_ms }}">
       <header class="topbar">
         <div class="brand">
-          <p class="kicker">Ratatouille / buyer</p>
-          <h1>Buyer Console</h1>
+          <img src="/static/assets/logo-mark.svg" alt="" aria-hidden="true" />
+          <div class="brand-text">
+            <p class="kicker">Ratatouille / buyer</p>
+            <h1>Buyer Console</h1>
+          </div>
         </div>
         <div class="status" id="global-status">Ожидание событий…</div>
       </header>
@@ -58,26 +61,52 @@
                 ></textarea>
               </label>
 
-              <label>
+              <label class="full">
                 Start URL
                 <input type="url" id="task-start-url" value="https://example.com" required />
               </label>
 
-              <label>
-                metadata (JSON)
-                <textarea id="task-metadata" rows="3" placeholder='{"city":"Москва","budget":2500}'>{}</textarea>
-              </label>
+              <div class="full json-field">
+                <div class="json-field-label">metadata (JSON)</div>
+                <div class="json-editor" data-json-editor="task-metadata">
+                  <div class="json-editor-frame">
+                    <pre id="task-metadata-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
+                    <textarea
+                      id="task-metadata"
+                      class="json-textarea"
+                      rows="4"
+                      spellcheck="false"
+                      placeholder='{"city":"Москва","budget":2500}'
+                    >{}</textarea>
+                  </div>
+                  <div class="json-editor-foot">
+                    <span class="json-editor-tag">application/json</span>
+                    <span id="task-metadata-json-state" class="json-editor-ok">parsed ok</span>
+                  </div>
+                </div>
+              </div>
 
               <details class="full auth-details">
                 <summary>auth (JSON, optional)</summary>
-                <label>
-                  <span class="sr-only">auth JSON</span>
-                  <textarea
-                    id="task-auth"
-                    rows="5"
-                    placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
-                  ></textarea>
-                </label>
+                <div class="auth-json-wrap json-field">
+                  <div class="sr-only">auth JSON</div>
+                  <div class="json-editor" data-json-editor="task-auth">
+                    <div class="json-editor-frame">
+                      <pre id="task-auth-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
+                      <textarea
+                        id="task-auth"
+                        class="json-textarea"
+                        rows="5"
+                        spellcheck="false"
+                        placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
+                      ></textarea>
+                    </div>
+                    <div class="json-editor-foot">
+                      <span class="json-editor-tag">application/json</span>
+                      <span id="task-auth-json-state" class="json-editor-ok">parsed ok</span>
+                    </div>
+                  </div>
+                </div>
               </details>
 
               <button type="submit" class="primary-action full">Запустить сессию</button>
@@ -92,6 +121,16 @@
                 <h2>Ответ пользователю</h2>
               </div>
             </div>
+
+            <div id="agent-question" class="agent-question" hidden>
+              <div class="agent-question-head">
+                <span class="agent-bubble-tag">agent · ask_user</span>
+                <span id="agent-question-ts" class="agent-question-ts code"></span>
+              </div>
+              <p id="agent-question-text" class="agent-question-text"></p>
+              <div id="agent-question-options" class="agent-question-options"></div>
+            </div>
+            <div id="reply-empty" class="empty">Сессия не ждёт ответа. Появится после <span class="code">ask_user</span>.</div>
 
             <form id="reply-form">
               <label>

@@ -32,6 +32,11 @@ const replySessionIdInput = document.getElementById('reply-session-id');
 const replyIdInput = document.getElementById('reply-id');
 const replyMessageInput = document.getElementById('reply-message');
 const replyResultNode = document.getElementById('reply-result');
+const agentQuestionNode = document.getElementById('agent-question');
+const agentQuestionTextNode = document.getElementById('agent-question-text');
+const agentQuestionTsNode = document.getElementById('agent-question-ts');
+const agentQuestionOptionsNode = document.getElementById('agent-question-options');
+const replyEmptyNode = document.getElementById('reply-empty');
 
 let selectedSessionId = null;
 let selectedSession = null;
@@ -125,6 +130,232 @@ function node(tag, className, text) {
     element.textContent = text;
   }
   return element;
+}
+
+function tokenizeJson(source) {
+  const tokens = [];
+  let i = 0;
+  const text = String(source || '');
+
+  while (i < text.length) {
+    const character = text[i];
+
+    if (/\s/.test(character)) {
+      let j = i;
+      while (j < text.length && /\s/.test(text[j])) {
+        j += 1;
+      }
+      tokens.push({ type: 'ws', value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+
+    if (character === '"') {
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (text[j] === '"') {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+
+      let k = j;
+      while (k < text.length && /\s/.test(text[k])) {
+        k += 1;
+      }
+      tokens.push({ type: text[k] === ':' ? 'key' : 'string', value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+
+    if (/[-0-9]/.test(character)) {
+      let j = i;
+      if (text[j] === '-') {
+        j += 1;
+      }
+      while (j < text.length && /[0-9.eE+-]/.test(text[j])) {
+        j += 1;
+      }
+      tokens.push({ type: 'num', value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+
+    if (/[a-zA-Z]/.test(character)) {
+      let j = i;
+      while (j < text.length && /[a-zA-Z]/.test(text[j])) {
+        j += 1;
+      }
+      const word = text.slice(i, j);
+      if (word === 'true' || word === 'false') {
+        tokens.push({ type: 'bool', value: word });
+      } else if (word === 'null') {
+        tokens.push({ type: 'null', value: word });
+      } else {
+        tokens.push({ type: 'ident', value: word });
+      }
+      i = j;
+      continue;
+    }
+
+    if (character === '/' && text[i + 1] === '/') {
+      let j = i;
+      while (j < text.length && text[j] !== '\n') {
+        j += 1;
+      }
+      tokens.push({ type: 'comment', value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+
+    tokens.push({ type: 'punct', value: character });
+    i += 1;
+  }
+
+  return tokens;
+}
+
+function tokenClassName(type) {
+  const classes = {
+    key: 'tok-key',
+    string: 'tok-string',
+    num: 'tok-num',
+    bool: 'tok-bool',
+    null: 'tok-null',
+    comment: 'tok-comment',
+    punct: 'tok-punct',
+    ident: 'tok-ident',
+  };
+  return classes[type] || '';
+}
+
+function appendHighlightedTokens(parent, tokens) {
+  for (const token of tokens) {
+    if (token.type === 'ws') {
+      parent.append(document.createTextNode(token.value));
+      continue;
+    }
+    const span = node('span', tokenClassName(token.type), token.value);
+    parent.append(span);
+  }
+}
+
+function splitTokensByLine(tokens) {
+  const lines = [[]];
+
+  for (const token of tokens) {
+    if (token.type === 'ws' && token.value.includes('\n')) {
+      const parts = token.value.split('\n');
+      if (parts[0]) {
+        lines[lines.length - 1].push({ type: 'ws', value: parts[0] });
+      }
+      for (let i = 1; i < parts.length; i += 1) {
+        lines.push([]);
+        if (parts[i]) {
+          lines[lines.length - 1].push({ type: 'ws', value: parts[i] });
+        }
+      }
+      continue;
+    }
+    lines[lines.length - 1].push(token);
+  }
+
+  if (lines.length > 1 && lines[lines.length - 1].length === 0) {
+    lines.pop();
+  }
+  return lines;
+}
+
+function renderHighlightedJson(editor) {
+  const textarea = editor.querySelector('.json-textarea');
+  const highlight = editor.querySelector('.json-highlight code');
+  if (!textarea || !highlight) {
+    return;
+  }
+
+  highlight.replaceChildren();
+  appendHighlightedTokens(highlight, tokenizeJson(textarea.value));
+  highlight.append(document.createTextNode('\n'));
+}
+
+function renderJsonEditorState(editor) {
+  const textarea = editor.querySelector('.json-textarea');
+  const state = editor.querySelector('.json-editor-ok, .json-editor-error');
+  if (!textarea || !state) {
+    return;
+  }
+
+  const value = textarea.value.trim();
+  let error = null;
+  if (value) {
+    try {
+      JSON.parse(value);
+    } catch (caught) {
+      error = caught.message.replace(/^JSON\.parse: /, '');
+    }
+  }
+
+  editor.classList.toggle('has-error', Boolean(error));
+  state.className = error ? 'json-editor-error' : 'json-editor-ok';
+  state.textContent = error ? `error: ${error}` : 'parsed ok';
+}
+
+function syncJsonEditor(editor) {
+  renderHighlightedJson(editor);
+  renderJsonEditorState(editor);
+}
+
+function setupJsonEditors() {
+  document.querySelectorAll('[data-json-editor]').forEach((editor) => {
+    const textarea = editor.querySelector('.json-textarea');
+    const highlight = editor.querySelector('.json-highlight');
+    if (!textarea || !highlight) {
+      return;
+    }
+
+    textarea.addEventListener('input', () => syncJsonEditor(editor));
+    textarea.addEventListener('scroll', () => {
+      highlight.scrollTop = textarea.scrollTop;
+      highlight.scrollLeft = textarea.scrollLeft;
+    });
+    syncJsonEditor(editor);
+  });
+}
+
+function createJsonView(value, maxHeight = 300) {
+  let text = '';
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value, null, 2);
+    } catch {
+      text = String(value);
+    }
+  }
+
+  const pre = node('pre', 'json-view');
+  pre.style.maxHeight = `${maxHeight}px`;
+  const codeNode = node('code');
+  const lines = splitTokensByLine(tokenizeJson(text));
+
+  lines.forEach((lineTokens, lineIndex) => {
+    const row = node('span', 'json-view-row');
+    row.append(
+      node('span', 'json-view-ln', String(lineIndex + 1)),
+      node('span', 'json-view-content'),
+    );
+    appendHighlightedTokens(row.lastChild, lineTokens);
+    codeNode.append(row);
+  });
+
+  pre.append(codeNode);
+  return pre;
 }
 
 function meta(label, value) {
@@ -243,10 +474,7 @@ function createEventItem(event) {
   const eventId = node('div', 'event-meta');
   eventId.append('event_id: ', node('span', 'code', event.event_id || '-'));
 
-  const payload = node('pre');
-  payload.textContent = JSON.stringify(event.payload || {}, null, 2);
-
-  item.append(top, eventId, payload);
+  item.append(top, eventId, createJsonView(event.payload || {}, 300));
   return item;
 }
 
@@ -283,10 +511,7 @@ function createStreamItem(event) {
     node('span', 'code', fmtDate(event.occurred_at)),
   );
 
-  const details = node('pre');
-  details.textContent = JSON.stringify(payload.items || [], null, 2);
-
-  item.append(top, metaNode, details);
+  item.append(top, metaNode, createJsonView(payload.items || [], 260));
   return item;
 }
 
@@ -364,9 +589,51 @@ function closeEventStream() {
   eventSourceSessionId = null;
 }
 
+function setReplyEmpty(message) {
+  replyEmptyNode.replaceChildren();
+  replyEmptyNode.append(message);
+}
+
+function renderAgentQuestion(session) {
+  const hasQuestion = Boolean(session?.waiting_reply_id && session?.ask_question);
+  agentQuestionNode.hidden = !hasQuestion;
+  replyEmptyNode.style.display = hasQuestion ? 'none' : 'block';
+  agentQuestionOptionsNode.replaceChildren();
+
+  if (!session) {
+    setReplyEmpty('Выберите сессию.');
+    return;
+  }
+
+  if (!session.waiting_reply_id) {
+    setReplyEmpty('Сессия не ждёт ответа. Появится после ');
+    replyEmptyNode.append(node('span', 'code', 'ask_user'), '.');
+    return;
+  }
+
+  if (!hasQuestion) {
+    setReplyEmpty('Агент ждёт ответа без текста вопроса.');
+    return;
+  }
+
+  agentQuestionTextNode.textContent = session.ask_question;
+  agentQuestionTsNode.textContent = session.ask_asked_at ? fmtDate(session.ask_asked_at) : '';
+  const options = Array.isArray(session.ask_options) ? session.ask_options : [];
+  for (const option of options) {
+    const chip = node('button', 'agent-option-chip', option);
+    chip.type = 'button';
+    chip.addEventListener('click', () => {
+      replyMessageInput.value = option;
+      replyMessageInput.focus();
+    });
+    agentQuestionOptionsNode.append(chip);
+  }
+}
+
 function hydrateReplyForm() {
   replySessionIdInput.value = selectedSessionId || '';
   replyIdInput.value = selectedSession?.waiting_reply_id || '';
+  renderAgentQuestion(selectedSession);
 }
 
 function showError(error) {
@@ -484,6 +751,7 @@ taskForm.addEventListener('submit', async (event) => {
   }
 });
 
+setupJsonEditors();
 refreshAll().catch(showError);
 setInterval(() => {
   refreshAll().catch(showError);

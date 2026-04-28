@@ -60,6 +60,9 @@ class CallbackStore:
                     continue
                 last_event = events[-1]
                 waiting_reply_id = None
+                ask_question = None
+                ask_options: list[str] = []
+                ask_asked_at = None
                 order_id = None
                 status = None
                 novnc_url = None
@@ -67,11 +70,24 @@ class CallbackStore:
                 for event in events:
                     if event.event_type == 'ask_user':
                         waiting_reply_id = event.payload.get('reply_id')
+                        question = event.payload.get('question')
+                        options = event.payload.get('options')
+                        ask_question = question if isinstance(question, str) else None
+                        ask_options = [item for item in options if isinstance(item, str)] if isinstance(options, list) else []
+                        ask_asked_at = event.occurred_at
+                    if event.event_type == 'handoff_resumed':
+                        waiting_reply_id = None
+                        ask_question = None
+                        ask_options = []
+                        ask_asked_at = None
                     if event.event_type == 'payment_ready':
                         order_id = event.payload.get('order_id')
                     if event.event_type == 'scenario_finished':
                         status = event.payload.get('status')
                         waiting_reply_id = None
+                        ask_question = None
+                        ask_options = []
+                        ask_asked_at = None
                     if event.event_type == 'session_started':
                         novnc_url = event.payload.get('novnc_url')
 
@@ -84,6 +100,9 @@ class CallbackStore:
                         last_event_type=last_event.event_type,
                         last_message=_extract_message(last_event),
                         waiting_reply_id=waiting_reply_id,
+                        ask_question=ask_question,
+                        ask_options=ask_options,
+                        ask_asked_at=ask_asked_at,
                         order_id=order_id,
                         status=status,
                         novnc_url=novnc_url,
@@ -117,9 +136,10 @@ def _offer(queue: asyncio.Queue[EventEnvelope], envelope: EventEnvelope) -> None
         pass
 
 def _extract_message(event: EventEnvelope) -> str | None:
-    value = event.payload.get('message')
-    if isinstance(value, str):
-        return value
+    for key in ('message', 'question', 'summary'):
+        value = event.payload.get(key)
+        if isinstance(value, str):
+            return value
     return None
 
 

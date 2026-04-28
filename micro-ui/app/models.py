@@ -49,6 +49,9 @@ class SessionSummary(BaseModel):
     last_event_type: str
     last_message: str | None = None
     waiting_reply_id: str | None = None
+    ask_question: str | None = None
+    ask_options: list[str] = Field(default_factory=list)
+    ask_asked_at: datetime | None = None
     order_id: str | None = None
     status: str | None = None
     novnc_url: str | None = None
