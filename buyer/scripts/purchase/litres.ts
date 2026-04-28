@@ -117,12 +117,39 @@ export function scoreBookCandidate(query: string, href: string, text: string, ti
 export function isSberPaymentUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
-    const method = (url.searchParams.get('method') || '').toLowerCase();
-    const system = (url.searchParams.get('system') || '').toLowerCase();
-    return method === 'sbp' || method.includes('sber') || system.includes('sber');
+    const markers = [
+      url.pathname,
+      url.search,
+      ...Array.from(url.searchParams.keys()),
+      ...Array.from(url.searchParams.values()),
+    ];
+    if (markers.some(hasSbpOrFpsMarker)) {
+      return false;
+    }
+    return markers.some(hasSberPayMarker);
   } catch {
     return false;
   }
+}
+
+function normalizePaymentMarker(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/ё/gu, 'е')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasSbpOrFpsMarker(value: string): boolean {
+  const marker = normalizePaymentMarker(value);
+  return /(?:^|\s)(?:sbersbp|sber\s*sbp|sbp|fps|сбп)(?:\s|$)/iu.test(marker)
+    || marker.includes('система быстрых платежей');
+}
+
+function hasSberPayMarker(value: string): boolean {
+  const marker = normalizePaymentMarker(value);
+  return /(?:^|\s)(?:sber\s*pay|sberpay|сбер\s*(?:pay|пэи|пеи)|сбер(?:pay|пэи|пеи))(?:\s|$)/iu.test(marker);
 }
 
 export function cartRowsMatchQuery(query: string, rows: string[]): boolean {
@@ -210,34 +237,52 @@ async function collectCartRows(page: Page): Promise<string[]> {
   return titles.map((title, index) => `${title} ${authors[index] || ''}`.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
-async function hasSelectedSberPayment(page: Page): Promise<boolean> {
+async function hasSelectedSberPay(page: Page): Promise<boolean> {
   if (isSberPaymentUrl(page.url())) {
     return true;
   }
-  const checkedCount = await page
-    .locator('#payment-method-input-sbp:checked, input[name="selectedPaymentMethodId"][value*="sbp"]:checked')
-    .count()
-    .catch(() => 0);
-  return checkedCount > 0;
+  const checkedMarkers = await page
+    .locator('input:checked')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const input = node as HTMLInputElement;
+        const labels = Array.from(input.labels || []).map((label) => label.textContent || '').join(' ');
+        return [
+          input.id,
+          input.name,
+          input.value,
+          input.getAttribute('aria-label') || '',
+          input.getAttribute('data-testid') || '',
+          labels,
+        ].join(' ');
+      }),
+    )
+    .catch(() => []);
+  return checkedMarkers.some((marker) => hasSberPayMarker(marker) && !hasSbpOrFpsMarker(marker));
 }
 
-async function selectSberPayment(page: Page): Promise<boolean> {
-  if (await hasSelectedSberPayment(page)) {
+async function selectSberPay(page: Page): Promise<boolean> {
+  if (await hasSelectedSberPay(page)) {
     return true;
   }
 
   await clickFirstVisible(
     [
-      page.locator('label[for="payment-method-input-sbp"]'),
-      page.locator('[data-testid="payment__method--sbp"] label'),
-      page.locator('#payment-method-input-sbp'),
-      page.getByRole('radio', { name: /сбп|sber|сбер/i }),
-      page.locator('label:has-text("СБП"), label:has-text("Sber"), label:has-text("Сбер")'),
+      page.getByRole('radio', { name: /sber\s*pay|сбер\s*(?:pay|пэй|пей)/i }),
+      page.locator('label:has-text("SberPay")'),
+      page.locator('label:has-text("Sber Pay")'),
+      page.locator('label:has-text("СберPay")'),
+      page.locator('label:has-text("СберПэй")'),
+      page.locator('label:has-text("Сбер Пэй")'),
+      page.locator('label[for*="sberpay" i]'),
+      page.locator('[data-testid*="sberpay" i] label'),
+      page.locator('input[id*="sberpay" i]'),
+      page.locator('input[value*="sberpay" i]'),
     ],
     3000,
   );
   await page.waitForTimeout(500).catch(() => undefined);
-  return hasSelectedSberPayment(page);
+  return hasSelectedSberPay(page);
 }
 
 async function main(): Promise<void> {
@@ -381,8 +426,8 @@ async function main(): Promise<void> {
     }
 
     await page.waitForURL(/\/purchase\/ppd\//, { timeout: 15000 }).catch(() => undefined);
-    if (!(await selectSberPayment(page))) {
-      fail(outputPath, 'purchase_script_sber_payment_missing', 'Страница оплаты открыта, но способ Sber/SBP не выбран.', {
+    if (!(await selectSberPay(page))) {
+      fail(outputPath, 'purchase_script_sberpay_missing', 'Страница оплаты открыта, но способ SberPay не выбран.', {
         script: 'litres',
         query,
         product_url: productUrl,
@@ -397,10 +442,10 @@ async function main(): Promise<void> {
       ts: new Date().toISOString(),
       event: 'payment_ready',
       url: finalUrl,
-      details: { order_id: orderId, sber_payment: true },
+      details: { order_id: orderId, sberpay: true },
     });
     if (!orderId) {
-      fail(outputPath, 'purchase_script_order_missing', 'Страница оплаты открыта, но orderId не найден.', {
+      fail(outputPath, 'purchase_script_order_missing', 'Страница SberPay открыта, но orderId не найден.', {
         script: 'litres',
         query,
         product_url: productUrl,
@@ -413,7 +458,7 @@ async function main(): Promise<void> {
     save(outputPath, {
       status: 'completed',
       reason_code: 'purchase_ready',
-      message: 'Litres purchase-скрипт дошел до шага оплаты без выполнения платежа.',
+      message: 'Litres purchase-скрипт дошел до страницы SberPay без выполнения платежа.',
       order_id: orderId,
       artifacts: {
         script: 'litres',
