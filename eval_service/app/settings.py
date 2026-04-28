@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     eval_auth_profiles_dir: Path = Path('/run/eval/auth-profiles')
     eval_judge_model: str = 'gpt-5.5'
     eval_baseline_window: int = Field(default=5, ge=1)
+    eval_callback_base_url: str | None = None
 
 
 @lru_cache

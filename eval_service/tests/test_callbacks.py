@@ -31,14 +31,21 @@ def _client_with_store(
     tmp_path: Path,
     *,
     raise_server_exceptions: bool = True,
+    eval_callback_base_url: str | None = None,
+    client_base_url: str = 'http://testserver',
 ) -> tuple[TestClient, RunStore, FakeBuyerClient]:
-    settings = Settings(_env_file=None, eval_runs_dir=tmp_path, buyer_api_base_url='http://buyer.test')
+    settings = Settings(
+        _env_file=None,
+        eval_runs_dir=tmp_path,
+        buyer_api_base_url='http://buyer.test',
+        eval_callback_base_url=eval_callback_base_url,
+    )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 1, tzinfo=UTC))
     buyer = FakeBuyerClient()
     app.state.run_store = store
     app.state.buyer_client = buyer
-    return TestClient(app, raise_server_exceptions=raise_server_exceptions), store, buyer
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions, base_url=client_base_url), store, buyer
 
 
 def _create_run(store: RunStore) -> None:
@@ -410,6 +417,53 @@ def test_operator_reply_schedules_resume_without_waiting_for_continuation(tmp_pa
 
     for coro in scheduled:
         coro.close()
+
+
+def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_host(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _buyer = _client_with_store(
+        tmp_path,
+        eval_callback_base_url='http://eval_service:8090',
+        client_base_url='http://localhost:8090',
+    )
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+    captured: dict[str, str] = {}
+
+    class FakeOrchestrator:
+        async def resume_after_operator_reply(
+            self,
+            *,
+            eval_run_id: str,
+            eval_case_id: str,
+            callback_url: str,
+        ) -> None:
+            captured['eval_run_id'] = eval_run_id
+            captured['eval_case_id'] = eval_case_id
+            captured['callback_url'] = callback_url
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    monkeypatch.setattr('eval_service.app.callbacks.get_run_orchestrator', lambda request: FakeOrchestrator())
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        'eval_run_id': 'eval-20260428-120000',
+        'eval_case_id': 'litres_book_odyssey_001',
+        'callback_url': 'http://eval_service:8090/callbacks/buyer',
+    }
 
 
 def test_operator_reply_inline_resume_failure_marks_run_failed(tmp_path: Path) -> None:

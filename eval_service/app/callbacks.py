@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import Field
 
 from eval_service.app.buyer_client import BuyerClient
+from eval_service.app.callback_urls import build_buyer_callback_url
 from eval_service.app.models import (
     BuyerCallbackEnvelope,
     CallbackEventType,
@@ -151,7 +152,7 @@ async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval
     resume_coro: Coroutine[Any, Any, Any] = get_run_orchestrator(request).resume_after_operator_reply(
         eval_run_id=eval_run_id,
         eval_case_id=eval_case_id,
-        callback_url=str(request.url_for('receive_buyer_callback')),
+        callback_url=build_buyer_callback_url(request),
     )
     scheduler = getattr(request.app.state, 'orchestrator_resume_scheduler', None)
     if scheduler is not None:

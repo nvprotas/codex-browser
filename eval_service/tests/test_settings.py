@@ -15,13 +15,16 @@ def test_settings_defaults_define_eval_runtime_paths() -> None:
     assert settings.eval_auth_profiles_dir == Path('/run/eval/auth-profiles')
     assert settings.eval_judge_model == 'gpt-5.5'
     assert settings.eval_baseline_window == 5
+    assert settings.eval_callback_base_url is None
 
 
 def test_settings_read_env_overrides(monkeypatch) -> None:
     monkeypatch.setenv('BUYER_API_BASE_URL', 'http://buyer.local:9000')
     monkeypatch.setenv('EVAL_BASELINE_WINDOW', '9')
+    monkeypatch.setenv('EVAL_CALLBACK_BASE_URL', 'http://eval_service:8090')
 
     settings = Settings(_env_file=None)
 
     assert settings.buyer_api_base_url == 'http://buyer.local:9000'
     assert settings.eval_baseline_window == 9
+    assert settings.eval_callback_base_url == 'http://eval_service:8090'

@@ -13,6 +13,7 @@ from pydantic import AliasChoices, Field
 
 from eval_service.app.auth_profiles import AuthProfileLoader
 from eval_service.app.buyer_client import BuyerClient
+from eval_service.app.callback_urls import build_buyer_callback_url
 from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.models import CaseRunState, EvalCase, EvalRunCase, EvalRunManifest, EvalRunStatus, StrictBaseModel
 from eval_service.app.run_store import RunStore
@@ -263,7 +264,7 @@ async def create_eval_run(request: Request, payload: RunCreateRequest | None = N
     try:
         return await orchestrator.create_run(
             selected_case_ids=payload.case_ids if payload is not None else None,
-            callback_url=str(request.url_for('receive_buyer_callback')),
+            callback_url=build_buyer_callback_url(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

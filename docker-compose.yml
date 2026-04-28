@@ -121,6 +121,7 @@ services:
       EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
       EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-gpt-5.5}
       EVAL_BASELINE_WINDOW: ${EVAL_BASELINE_WINDOW:-5}
+      EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}
     volumes:
       - ./:/workspace
       - type: volume

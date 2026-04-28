@@ -152,6 +152,21 @@ def test_post_runs_selected_cases_creates_manifest_and_calls_buyer_sequentially(
     assert buyer.calls[0]['storage_state'] == {'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}
 
 
+def test_post_runs_uses_configured_callback_url_instead_of_request_host(tmp_path: Path) -> None:
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-a')],
+        on_create=lambda call: _append_payment_ready(store, call),
+        eval_callback_base_url='http://eval_service:8090',
+        client_base_url='http://localhost:8090',
+    )
+
+    response = client.post('/runs', json={'case_ids': ['case-a']})
+
+    assert response.status_code == 200
+    assert buyer.calls[0]['callback_url'] == 'http://eval_service:8090/callbacks/buyer'
+
+
 def test_empty_case_ids_runs_all_cases(tmp_path: Path) -> None:
     client, store, buyer, _timer = _client_with_orchestrator(
         tmp_path,
@@ -448,6 +463,55 @@ def test_operator_reply_resumes_waiting_case_finishes_payment_ready_and_continue
     assert timer.sleeps == [0.1, 5.0]
 
 
+def test_operator_reply_resume_uses_configured_callback_url_for_next_case(tmp_path: Path) -> None:
+    payment_ready_sent = False
+    timer = FakeTimer()
+
+    def on_create(call: dict[str, Any]) -> None:
+        if call['metadata']['eval_case_id'] == 'case-needs-user':
+            _append_ask_user(store, call)
+            return
+        _append_payment_ready(store, call)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal payment_ready_sent
+        if not payment_ready_sent and store.read_manifest('eval-run-001').cases[0].state == CaseRunState.RUNNING:
+            payment_ready_sent = True
+            _append_payment_ready(store, buyer.calls[0])
+        await timer.sleep(seconds)
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-needs-user'),
+            _case('case-after-reply'),
+        ],
+        on_create=on_create,
+        sleep=sleep,
+        timer=timer,
+        eval_callback_base_url='http://eval_service:8090',
+        client_base_url='http://localhost:8090',
+    )
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    create_response = client.post('/runs', json={})
+    assert create_response.status_code == 200
+
+    reply_response = client.post(
+        '/runs/eval-run-001/cases/case-needs-user/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert reply_response.status_code == 200
+    assert [call['callback_url'] for call in buyer.calls] == [
+        'http://eval_service:8090/callbacks/buyer',
+        'http://eval_service:8090/callbacks/buyer',
+    ]
+
+
 def _client_with_orchestrator(
     tmp_path: Path,
     *,
@@ -460,8 +524,15 @@ def _client_with_orchestrator(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     timer: FakeTimer | None = None,
     raise_server_exceptions: bool = True,
+    eval_callback_base_url: str | None = None,
+    client_base_url: str = 'http://testserver',
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
-    settings = Settings(_env_file=None, eval_runs_dir=tmp_path, buyer_api_base_url='http://buyer.test')
+    settings = Settings(
+        _env_file=None,
+        eval_runs_dir=tmp_path,
+        buyer_api_base_url='http://buyer.test',
+        eval_callback_base_url=eval_callback_base_url,
+    )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))
     fake_timer = timer or FakeTimer(store)
@@ -476,7 +547,7 @@ def _client_with_orchestrator(
     if timeout_seconds is not None:
         app.state.orchestrator_timeout_seconds = timeout_seconds
     app.state.orchestrator_poll_interval_seconds = poll_interval_seconds
-    return TestClient(app, raise_server_exceptions=raise_server_exceptions), store, buyer, fake_timer
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions, base_url=client_base_url), store, buyer, fake_timer
 
 
 def _case(
