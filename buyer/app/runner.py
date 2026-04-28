@@ -880,6 +880,7 @@ def _build_codex_command(
         cmd.append('--skip-git-repo-check')
     if model:
         cmd.extend(['-m', model])
+    cmd.extend(_build_codex_config_overrides(settings))
     cmd.extend([
         '--output-schema',
         str(schema_path),
@@ -887,6 +888,19 @@ def _build_codex_command(
         output_path,
         prompt,
     ])
+    return cmd
+
+
+def _build_codex_config_overrides(settings: Settings) -> list[str]:
+    overrides: list[tuple[str, str | None]] = [
+        ('model_reasoning_effort', settings.codex_reasoning_effort),
+        ('model_reasoning_summary', settings.codex_reasoning_summary),
+        ('web_search', settings.codex_web_search),
+    ]
+    cmd: list[str] = []
+    for key, value in overrides:
+        if value:
+            cmd.extend(['-c', f'{key}="{value}"'])
     return cmd
 
 

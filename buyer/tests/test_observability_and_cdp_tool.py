@@ -11,6 +11,7 @@ from buyer.app.prompt_builder import build_agent_prompt
 from buyer.app.runner import (
     _browser_actions_have_mutating_commands,
     _build_browser_actions_metrics,
+    _build_codex_command,
     _build_model_attempt_specs,
     _extract_codex_tokens_used,
 )
@@ -231,6 +232,26 @@ class BrowserActionMetricsTests(unittest.TestCase):
         )
 
         self.assertEqual(attempts[-1].model, 'gpt-5.4')
+
+    def test_codex_command_applies_fast_cli_overrides(self) -> None:
+        cmd = _build_codex_command(
+            settings=Settings(
+                codex_reasoning_effort='minimal',
+                codex_reasoning_summary='none',
+                codex_web_search='disabled',
+            ),
+            schema_path=Path('/tmp/schema.json'),
+            output_path='/tmp/output.json',
+            prompt='task',
+            model='gpt-test',
+        )
+
+        self.assertEqual(cmd[:2], ['codex', 'exec'])
+        self.assertIn('-c', cmd)
+        self.assertIn('model_reasoning_effort="minimal"', cmd)
+        self.assertIn('model_reasoning_summary="none"', cmd)
+        self.assertIn('web_search="disabled"', cmd)
+        self.assertLess(cmd.index('-c'), cmd.index('task'))
 
     def test_mutating_action_detector_blocks_dirty_retry(self) -> None:
         with TemporaryDirectory() as tmpdir:
