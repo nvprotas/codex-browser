@@ -10,6 +10,8 @@
 ## Протоколы и данные
 
 - Взаимодействие `buyer` ↔ `middle`: HTTP callbacks с event envelope.
+- Каноническое описание HTTP endpoints: `docs/openapi.yaml`.
+- Каноническое описание callback envelope и текущих payload-схем: `docs/callbacks.openapi.yaml`.
 - Обязательные поля envelope: `event_id`, `session_id`, `event_type`, `occurred_at`, `idempotency_key`, `payload`.
 - Семантика доставки: `at-least-once` с дедупликацией на стороне `middle`.
 - Профиль доставки callback: `timeout=10s`, `3 retries`, exponential backoff + jitter.

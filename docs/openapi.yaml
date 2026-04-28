@@ -1,0 +1,408 @@
+openapi: 3.1.0
+info:
+  title: codex-browser buyer API
+  version: 0.1.0
+  summary: HTTP API сервиса buyer.
+  description: |
+    Документ фиксирует текущий MVP-контракт HTTP API сервиса `buyer`.
+
+    `buyer` принимает задачи покупки, ведет сессии и отправляет callback-события
+    в `callback_url`. Контракт исходящих callback-вызовов вынесен в
+    `docs/callbacks.openapi.yaml`.
+servers:
+  - url: http://localhost:8000
+    description: Локальный buyer API.
+tags:
+  - name: Buyer API
+    description: Основной API сервиса buyer.
+
+paths:
+  /healthz:
+    get:
+      tags:
+        - Buyer API
+      operationId: healthz
+      summary: Проверить доступность buyer.
+      responses:
+        '200':
+          description: Buyer отвечает.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/tasks:
+    post:
+      tags:
+        - Buyer API
+      operationId: createBuyerTask
+      summary: Создать сессию покупки.
+      description: |
+        Запускает асинхронный сценарий покупки. Ответ возвращается сразу после
+        создания сессии и постановки runner в работу.
+
+        Дальнейший прогресс приходит callback-событиями на `callback_url`.
+        Если `callback_url` не передан, buyer использует `MIDDLE_CALLBACK_URL`.
+        Формат callback-событий описан в `docs/callbacks.openapi.yaml`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+            examples:
+              litres:
+                summary: Покупка книги на Litres.
+                value:
+                  task: Ищи книгу 1984, доведи до шага оплаты через SberPay без финального платежа.
+                  start_url: https://www.litres.ru/
+                  callback_url: https://middle.example.com/callbacks
+                  metadata:
+                    source: openclaw
+      responses:
+        '201':
+          description: Сессия создана и переведена в работу.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskCreateResponse'
+        '409':
+          description: Нельзя создать новую активную сессию из-за runtime-лимита.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /v1/sessions:
+    get:
+      tags:
+        - Buyer API
+      operationId: listBuyerSessions
+      summary: Получить список сессий.
+      responses:
+        '200':
+          description: Список сессий.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionView'
+
+  /v1/sessions/{session_id}:
+    get:
+      tags:
+        - Buyer API
+      operationId: getBuyerSession
+      summary: Получить детальное состояние сессии.
+      parameters:
+        - $ref: '#/components/parameters/SessionIdPath'
+      responses:
+        '200':
+          description: Состояние сессии и сохраненные callback-события.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionDetail'
+        '404':
+          description: Сессия не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /v1/replies:
+    post:
+      tags:
+        - Buyer API
+      operationId: submitBuyerReply
+      summary: Передать ответ пользователя в ожидающую сессию.
+      description: |
+        Используется после callback-события `ask_user`. `reply_id` должен
+        совпадать с `payload.reply_id` из актуального события ожидания.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionReplyRequest'
+            examples:
+              reply:
+                value:
+                  session_id: 8b69d854-2d5d-4fb3-9946-d09736c8a461
+                  reply_id: 3c5c7077-d7af-4f55-9802-f9e3d71c8707
+                  message: Да, продолжай с этим вариантом.
+      responses:
+        '200':
+          description: Ответ принят и сессия продолжила выполнение.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionReplyResponse'
+        '404':
+          description: Сессия не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Сессия не ожидает этот ответ или не имеет активного runner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+components:
+  parameters:
+    SessionIdPath:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Идентификатор сессии buyer.
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации FastAPI/Pydantic.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPValidationError'
+
+  schemas:
+    JsonValue:
+      description: Любое JSON-значение.
+
+    JsonObject:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/JsonValue'
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ok
+
+    ErrorResponse:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          description: Текст или структурированное описание ошибки.
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties:
+                $ref: '#/components/schemas/JsonValue'
+            - type: array
+              items:
+                $ref: '#/components/schemas/JsonValue'
+
+    HTTPValidationError:
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationErrorItem'
+
+    ValidationErrorItem:
+      type: object
+      required:
+        - loc
+        - msg
+        - type
+      properties:
+        loc:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
+        input:
+          $ref: '#/components/schemas/JsonValue'
+
+    SessionStatus:
+      type: string
+      enum:
+        - created
+        - running
+        - waiting_user
+        - completed
+        - failed
+
+    PlaywrightStorageState:
+      type: object
+      description: Playwright `storageState` для восстановления браузерного auth-контекста.
+      properties:
+        cookies:
+          type: array
+          items:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/JsonValue'
+        origins:
+          type: array
+          items:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/JsonValue'
+      additionalProperties:
+        $ref: '#/components/schemas/JsonValue'
+
+    TaskAuthPayload:
+      type: object
+      description: Опциональный auth-пакет. В v1 поддерживается SberId.
+      properties:
+        provider:
+          type: string
+          default: sberid
+          description: Провайдер авторизации.
+        storageState:
+          oneOf:
+            - $ref: '#/components/schemas/PlaywrightStorageState'
+            - type: 'null'
+          description: Playwright storageState для восстановления сессии.
+      additionalProperties: false
+
+    TaskCreateRequest:
+      type: object
+      required:
+        - task
+        - start_url
+      properties:
+        task:
+          type: string
+          minLength: 1
+          description: Текст задачи для агента buyer.
+        start_url:
+          type: string
+          minLength: 1
+          description: URL магазина для начала сценария.
+        callback_url:
+          oneOf:
+            - type: string
+            - type: 'null'
+          default: null
+          description: |
+            Куда buyer отправляет callback-события. Схема исходящих callback-вызовов
+            описана в `docs/callbacks.openapi.yaml`.
+        metadata:
+          $ref: '#/components/schemas/JsonObject'
+          default: {}
+        auth:
+          oneOf:
+            - $ref: '#/components/schemas/TaskAuthPayload'
+            - type: 'null'
+          default: null
+      additionalProperties: false
+
+    TaskCreateResponse:
+      type: object
+      required:
+        - session_id
+        - status
+        - novnc_url
+      properties:
+        session_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+        novnc_url:
+          type: string
+
+    SessionReplyRequest:
+      type: object
+      required:
+        - session_id
+        - reply_id
+        - message
+      properties:
+        session_id:
+          type: string
+        reply_id:
+          type: string
+        message:
+          type: string
+          minLength: 1
+      additionalProperties: false
+
+    SessionReplyResponse:
+      type: object
+      required:
+        - session_id
+        - accepted
+        - status
+      properties:
+        session_id:
+          type: string
+        accepted:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+
+    SessionView:
+      type: object
+      required:
+        - session_id
+        - status
+        - start_url
+        - callback_url
+        - novnc_url
+        - created_at
+        - updated_at
+      properties:
+        session_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+        start_url:
+          type: string
+        callback_url:
+          type: string
+        novnc_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        waiting_reply_id:
+          oneOf:
+            - type: string
+            - type: 'null'
+          default: null
+        last_error:
+          oneOf:
+            - type: string
+            - type: 'null'
+          default: null
+
+    SessionDetail:
+      allOf:
+        - $ref: '#/components/schemas/SessionView'
+        - type: object
+          required:
+            - events
+          properties:
+            events:
+              type: array
+              items:
+                $ref: './callbacks.openapi.yaml#/components/schemas/CallbackEventEnvelope'

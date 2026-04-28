@@ -8,6 +8,9 @@
 
 Roadmap развития после MVP: `docs/buyer-roadmap.md`.
 
+OpenAPI-контракт HTTP API buyer: `docs/openapi.yaml`.
+OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.yaml`.
+
 ## Что уже реализовано
 
 - HTTP старт задачи: `POST /v1/tasks`.
@@ -184,6 +187,8 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 ```
 
 ## Контракт callback (MVP)
+
+Каноническая OpenAPI-спецификация callback-вызовов находится в `docs/callbacks.openapi.yaml`.
 
 Общий envelope:
 

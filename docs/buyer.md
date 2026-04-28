@@ -25,7 +25,10 @@
 - Ответственность `buyer` заканчивается на подготовке платежного шага и передаче `orderId`.
 - Финальное подтверждение и проведение платежа происходят вне `buyer` в клиентском контуре.
 
-## Концептуальные callback-события (без OpenAPI)
+## Концептуальные callback-события
+
+Актуальные callback-события, которые отправляет текущий код MVP, зафиксированы в `docs/callbacks.openapi.yaml`.
+`checkout_ready` остается концептуальным маркером доменного флоу и пока не отправляется отдельным событием.
 
 - `ask_user`: требуется уточнение от клиента (параметры товара, адрес, лимиты, замены и т.п.).
 - `checkout_ready`: корзина и checkout подготовлены к финальному этапу.
@@ -34,9 +37,11 @@
 - `handoff_resumed`: ручной этап завершен, управление возвращено `buyer`.
 - `scenario_finished`: итог сценария и артефакты выполнения.
 
-## Контракт v1 `buyer` ↔ `middle` (без OpenAPI)
+## Контракт v1 `buyer` ↔ `middle`
 
 - Транспорт: HTTP callbacks с версионированным event envelope.
+- OpenAPI-спецификация HTTP endpoints хранится в `docs/openapi.yaml`.
+- OpenAPI-спецификация callback envelope и текущих payload-ов хранится в `docs/callbacks.openapi.yaml`.
 - Обязательные поля envelope: `event_id`, `session_id`, `event_type`, `occurred_at`, `idempotency_key`, `payload`.
 - Семантика доставки: `at-least-once`; `middle` обязан дедуплицировать события по `event_id` и/или `idempotency_key`.
 - Профиль доставки по умолчанию: `timeout=10s`, `3 retries`, exponential backoff с jitter; после исчерпания попыток событие помечается как failed и поднимается в сессионную ошибку.
@@ -142,5 +147,5 @@
 ## Границы v1
 
 - В рамках v1 документ фиксирует MVP-ядро покупки и handoff.
-- Детальная OpenAPI-спецификация и жесткая схема payload-ов вынесены на следующий этап.
+- OpenAPI-спецификации `docs/openapi.yaml` и `docs/callbacks.openapi.yaml` фиксируют текущий MVP-контракт API и callback payload-ов.
 - Приоритизированный план развития после MVP описан в `docs/buyer-roadmap.md`.
