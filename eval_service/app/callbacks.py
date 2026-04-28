@@ -125,8 +125,10 @@ async def send_operator_reply(
     )
     accepted = bool(_response_field(buyer_response, 'accepted'))
     buyer_status = str(_response_field(buyer_response, 'status'))
+    manifest = store.read_manifest(eval_run_id)
+    case = _find_case(manifest.cases, eval_case_id)
 
-    if accepted:
+    if accepted and case.state == CaseRunState.WAITING_USER and case.waiting_reply_id == reply_id:
         manifest = store.update_case(
             eval_run_id,
             eval_case_id,

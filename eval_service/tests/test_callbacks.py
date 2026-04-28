@@ -7,7 +7,13 @@ from typing import Any, Awaitable
 from fastapi.testclient import TestClient
 
 from eval_service.app.main import create_app
-from eval_service.app.models import CaseRunState, EvalRunCase, EvalRunStatus
+from eval_service.app.models import (
+    BuyerCallbackEnvelope,
+    CallbackEventType,
+    CaseRunState,
+    EvalRunCase,
+    EvalRunStatus,
+)
 from eval_service.app.run_store import RunStore
 from eval_service.app.settings import Settings
 
@@ -417,6 +423,68 @@ def test_operator_reply_schedules_resume_without_waiting_for_continuation(tmp_pa
 
     for coro in scheduled:
         coro.close()
+
+
+def test_operator_reply_keeps_terminal_callback_state_when_buyer_finishes_during_send_reply(
+    tmp_path: Path,
+) -> None:
+    client, store, buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+    finished_at = datetime(2026, 4, 28, 12, 2, tzinfo=UTC)
+
+    async def finish_during_send_reply(*, session_id: str, reply_id: str, message: str) -> dict[str, Any]:
+        buyer.replies.append(
+            {
+                'session_id': session_id,
+                'reply_id': reply_id,
+                'message': message,
+            }
+        )
+        store.append_callback_event(
+            'eval-20260428-120000',
+            'litres_book_odyssey_001',
+            BuyerCallbackEnvelope(
+                event_id='event-scenario_finished-race',
+                session_id=session_id,
+                event_type=CallbackEventType.SCENARIO_FINISHED,
+                occurred_at=finished_at,
+                idempotency_key='idem-scenario_finished-race',
+                payload={'result': 'ok'},
+                eval_run_id='eval-20260428-120000',
+                eval_case_id='litres_book_odyssey_001',
+            ),
+            state=CaseRunState.FINISHED,
+            finished_at=finished_at,
+            waiting_reply_id=None,
+        )
+        return {'session_id': session_id, 'accepted': True, 'status': 'finished'}
+
+    buyer.send_reply = finish_during_send_reply
+    scheduled: list[Any] = []
+
+    async def reject_resume(coro: Any) -> None:
+        scheduled.append(coro)
+        coro.close()
+
+    client.app.state.orchestrator_resume_scheduler = reject_resume
+
+    response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['state'] == 'finished'
+    assert scheduled == []
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.FINISHED
+    assert case.finished_at == finished_at
+    assert case.waiting_reply_id is None
+    assert case.callback_events[-1].event_type == CallbackEventType.SCENARIO_FINISHED
 
 
 def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_host(
