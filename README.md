@@ -196,7 +196,7 @@ Post-session анализ не отправляет дополнительный
 docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
 
-`micro-ui` также показывает live-поток `agent_stream_event` через SSE `/api/events/stream?session_id=...`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`.
+`micro-ui` также показывает live-поток `agent_stream_event` через общий SSE `/api/events/stream`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`. UI обновляется по callback-событиям от `buyer`; периодический polling для списка сессий и событий не используется.
 MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; предполагается локальный trusted контур разработки.
 
 ## Контракт callback (MVP)

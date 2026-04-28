@@ -13,6 +13,7 @@ class CallbackStore:
         self._seen_event_ids: set[str] = set()
         self._seen_idempotency_keys: set[str] = set()
         self._subscribers_by_session: dict[str, set[asyncio.Queue[EventEnvelope]]] = {}
+        self._global_subscribers: set[asyncio.Queue[EventEnvelope]] = set()
 
     async def add(self, envelope: EventEnvelope) -> bool:
         async with self._lock:
@@ -32,6 +33,12 @@ class CallbackStore:
             self._subscribers_by_session.setdefault(session_id, set()).add(queue)
         return queue
 
+    async def subscribe_all(self) -> asyncio.Queue[EventEnvelope]:
+        queue: asyncio.Queue[EventEnvelope] = asyncio.Queue(maxsize=200)
+        async with self._lock:
+            self._global_subscribers.add(queue)
+        return queue
+
     async def unsubscribe(self, session_id: str, queue: asyncio.Queue[EventEnvelope]) -> None:
         async with self._lock:
             subscribers = self._subscribers_by_session.get(session_id)
@@ -40,6 +47,10 @@ class CallbackStore:
             subscribers.discard(queue)
             if not subscribers:
                 self._subscribers_by_session.pop(session_id, None)
+
+    async def unsubscribe_all(self, queue: asyncio.Queue[EventEnvelope]) -> None:
+        async with self._lock:
+            self._global_subscribers.discard(queue)
 
     async def list_events(self, session_id: str | None = None) -> list[EventEnvelope]:
         async with self._lock:
@@ -116,6 +127,8 @@ class CallbackStore:
     def _publish_locked(self, envelope: EventEnvelope) -> None:
         subscribers = self._subscribers_by_session.get(envelope.session_id, set())
         for queue in list(subscribers):
+            _offer(queue, envelope)
+        for queue in list(self._global_subscribers):
             _offer(queue, envelope)
 
 
