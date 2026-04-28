@@ -13,6 +13,8 @@ def build_agent_prompt(
     metadata: dict[str, Any],
     auth_payload: dict[str, Any] | None,
     auth_context: dict[str, Any] | None,
+    user_profile_text: str | None,
+    user_profile_truncated: bool,
     memory: list[dict[str, str]],
     latest_user_reply: str | None,
 ) -> str:
@@ -20,6 +22,10 @@ def build_agent_prompt(
     metadata_dump = json.dumps(metadata, ensure_ascii=False, indent=2)
     auth_payload_dump = json.dumps(auth_payload, ensure_ascii=False, indent=2) if auth_payload is not None else 'null'
     auth_context_dump = json.dumps(auth_context, ensure_ascii=False, indent=2) if auth_context is not None else 'null'
+    user_profile_block = _build_user_profile_block(
+        user_profile_text=user_profile_text,
+        user_profile_truncated=user_profile_truncated,
+    )
 
     latest_reply_block = latest_user_reply or 'Нет новых ответов от пользователя на этом шаге.'
 
@@ -47,6 +53,9 @@ def build_agent_prompt(
 5. Если не хватает данных, верни status=needs_user_input и задай один конкретный вопрос в поле message.
 6. Если сценарий завершен успешно, верни status=completed; в message краткий итог, в order_id передай найденный orderId (или null).
 7. Если сценарий невозможно продолжать, верни status=failed и объяснение в message.
+8. Если в последнем ответе пользователя появились новые долговременные факты о пользователе, верни их в profile_updates как массив коротких строк.
+9. В profile_updates добавляй только новые факты, которых еще нет в постоянном профиле пользователя. Если новых фактов нет, верни пустой массив.
+10. В profile_updates нельзя включать auth, storageState, cookies, платежные данные и одноразовые детали текущего заказа.
 
 Контекст задачи:
 - task: {task}
@@ -56,11 +65,31 @@ def build_agent_prompt(
 - auth_context: {auth_context_dump}
 - cdp_preflight: {cdp_preflight_summary}
 
+{user_profile_block}
+
 История диалога (последние шаги):
 {memory_dump}
 
 Последний ответ пользователя:
 {latest_reply_block}
 
-Ответь только структурированным результатом по схеме.
+Ответь только структурированным результатом по схеме. Поле profile_updates верни всегда: либо массив новых фактов, либо [].
 """.strip()
+
+
+def _build_user_profile_block(*, user_profile_text: str | None, user_profile_truncated: bool) -> str:
+    if not user_profile_text:
+        return 'Постоянная информация о пользователе:\n- Постоянный профиль пользователя пока не задан.'
+
+    truncation_note = ''
+    if user_profile_truncated:
+        truncation_note = '\n- Профиль обрезан по лимиту, учитывай только видимую часть.'
+
+    return (
+        'Постоянная информация о пользователе:\n'
+        '- Это отдельный долговременный контекст пользователя.\n'
+        '- Используй его как предпочтения и устойчивые ограничения по умолчанию.\n'
+        '- Если он конфликтует с текущей задачей или свежим ответом пользователя, приоритет у текущих данных.'
+        f'{truncation_note}\n\n'
+        f'```md\n{user_profile_text}\n```'
+    )

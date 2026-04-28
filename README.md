@@ -30,7 +30,6 @@ OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.
 - Post-session Codex-анализ знаний: после доставки `scenario_finished` buyer асинхронно анализирует trace завершенной сессии и сохраняет черновики знаний как внутренние артефакты.
 
 ## Запуск
-
 Перед запуском задайте авторизацию для `codex` (любой один вариант):
 
 ```bash
@@ -40,6 +39,11 @@ cp .env.example .env
 
 # Вариант 2: OAuth auth.json с host-машины
 # CODEX_AUTH_JSON_PATH=/absolute/path/to/auth.json
+
+# Абсолютный путь на host к user-buyer-info.md с постоянной информацией о пользователе.
+# Пример: /Users/<you>/Documents/user-buyer-info.md
+# Файл монтируется только в runtime и не попадает в image.
+USER_BUYER_INFO_PATH=
 
 # Режим sandbox для codex внутри buyer.
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
@@ -81,7 +85,9 @@ cp .env.example .env
 # POSTGRES_PASSWORD=buyer
 ```
 
-`CODEX_AUTH_JSON_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
+`CODEX_AUTH_JSON_PATH` и `USER_BUYER_INFO_PATH` монтируются в `buyer` только на этапе runtime и не попадают в image.
+`buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
+Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
 ```bash
 docker compose up --build

@@ -103,6 +103,8 @@ class CdpToolOutputTests(unittest.TestCase):
             metadata={},
             auth_payload=None,
             auth_context=None,
+            user_profile_text='Предпочитает электронные книги',
+            user_profile_truncated=False,
             memory=[],
             latest_user_reply=None,
         )
@@ -116,6 +118,9 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('`text --selector body` допускается только как fallback и с лимитом', prompt)
         self.assertIn('Не печатай полный HTML в stdout', prompt)
         self.assertIn('`html --path <file>` и `screenshot` используй только как fallback', prompt)
+        self.assertIn('html --path', prompt)
+        self.assertIn('profile_updates', prompt)
+        self.assertIn('только новые факты', prompt)
 
 
 class BrowserActionMetricsTests(unittest.TestCase):

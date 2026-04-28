@@ -45,6 +45,7 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
       CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}
+      BUYER_USER_INFO_PATH: /run/buyer/user-buyer-info.md
       MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
       NOVNC_PUBLIC_URL: http://localhost:6901/vnc.html?autoconnect=1&resize=scale
       BROWSER_CDP_ENDPOINT: http://browser:9223
@@ -84,6 +85,10 @@ services:
         source: ${CODEX_AUTH_JSON_PATH:-./buyer/docker/codex-auth.placeholder.json}
         target: /run/codex/host-auth
         read_only: true
+      - type: bind
+        source: ${USER_BUYER_INFO_PATH:-./buyer/docker/user-buyer-info.placeholder.md}
+        target: /run/buyer/user-buyer-info.md
+        read_only: false
     ports:
       - "8000:8000"
     depends_on:

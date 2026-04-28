@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     codex_web_search: Literal['disabled', 'cached', 'live'] | None = 'disabled'
     codex_image_generation: Literal['disabled', 'enabled'] = 'disabled'
     buyer_trace_dir: str = '/workspace/.tmp/buyer-observability'
+    buyer_user_info_path: str = '/run/buyer/user-buyer-info.md'
+    buyer_user_info_max_chars: int = Field(default=12000, ge=1)
     buyer_prompt_preview_chars: int = Field(default=2000, ge=0)
     buyer_stream_tail_chars: int = Field(default=4000, ge=200)
     buyer_browser_actions_tail: int = Field(default=40, ge=1)

@@ -29,6 +29,7 @@ from .state import (
     SessionState,
     SessionStore,
 )
+from .user_profile import append_profile_updates
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -50,6 +51,7 @@ class BuyerService:
         purchase_script_allowlist: set[str] | None = None,
         purchase_script_runner: PurchaseScriptRunner | None = None,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
+        buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -66,6 +68,7 @@ class BuyerService:
         self._knowledge_analyzer = knowledge_analyzer
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
+        self._buyer_user_info_path = buyer_user_info_path
 
     async def create_session(
         self,
@@ -178,6 +181,7 @@ class BuyerService:
                         payload,
                     ),
                 )
+                self._persist_profile_updates(session_id=session_id, step_index=step_index, updates=result.profile_updates)
                 await self._emit_event(
                     state,
                     event_type='agent_step_finished',
@@ -664,6 +668,18 @@ class BuyerService:
                 'operator_reply': operator_reply,
             },
             idempotency_suffix=f'handoff-resumed-{reason_code}',
+        )
+
+    def _persist_profile_updates(self, *, session_id: str, step_index: int, updates: list[str]) -> None:
+        appended = append_profile_updates(self._buyer_user_info_path, updates)
+        if appended <= 0:
+            return
+        logger.info(
+            'buyer_user_info_updated session_id=%s step=%s appended=%s path=%s',
+            session_id,
+            step_index,
+            appended,
+            self._buyer_user_info_path,
         )
 
     @staticmethod
