@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     cdp_recovery_interval_ms: int = Field(default=500, ge=1)
 
     codex_bin: str = 'codex'
-    codex_model: str | None = None
+    codex_model: str | None = 'gpt-5.5'
     buyer_model_strategy: Literal['single', 'fast_then_strong'] = 'single'
     buyer_fast_codex_model: str = 'gpt-5.4-mini'
     buyer_strong_codex_model: str | None = None
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     codex_reasoning_effort: Literal['none', 'low', 'medium', 'high', 'xhigh'] | None = 'none'
     codex_reasoning_summary: Literal['auto', 'concise', 'detailed', 'none'] | None = 'none'
     codex_web_search: Literal['disabled', 'cached', 'live'] | None = 'disabled'
-    codex_image_generation_enabled: bool = False
+    codex_image_generation: Literal['disabled', 'enabled'] = 'disabled'
     buyer_trace_dir: str = '/workspace/.tmp/buyer-observability'
     buyer_prompt_preview_chars: int = Field(default=2000, ge=0)
     buyer_stream_tail_chars: int = Field(default=4000, ge=200)

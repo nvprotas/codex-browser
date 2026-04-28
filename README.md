@@ -47,7 +47,7 @@ cp .env.example .env
 
 # Быстрый режим Codex CLI: no reasoning + отключенный image generation tool.
 # CODEX_REASONING_EFFORT=none
-# CODEX_IMAGE_GENERATION_ENABLED=false
+# CODEX_IMAGE_GENERATION=disabled
 
 # Опционально: стратегия модели generic buyer-flow.
 # BUYER_MODEL_STRATEGY=single

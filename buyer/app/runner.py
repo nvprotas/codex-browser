@@ -872,7 +872,7 @@ def _int_or_zero(value: Any) -> int:
 def _build_model_attempt_specs(settings: Settings) -> list[_CodexAttemptSpec]:
     if settings.buyer_model_strategy == 'fast_then_strong':
         fast_model = _non_empty(settings.buyer_fast_codex_model) or 'gpt-5.4-mini'
-        strong_model = _non_empty(settings.buyer_strong_codex_model) or _non_empty(settings.codex_model) or 'gpt-5.4'
+        strong_model = _non_empty(settings.buyer_strong_codex_model) or _non_empty(settings.codex_model) or 'gpt-5.5'
         if fast_model == strong_model:
             return [_CodexAttemptSpec(role='fast', model=fast_model)]
         return [
@@ -918,8 +918,7 @@ def _build_codex_config_overrides(settings: Settings) -> list[str]:
         ('model_reasoning_summary', settings.codex_reasoning_summary),
         ('web_search', settings.codex_web_search),
     ]
-    if not settings.codex_image_generation_enabled:
-        overrides.append(('features.image_generation', False))
+    overrides.append(('features.image_generation', settings.codex_image_generation == 'enabled'))
     cmd: list[str] = []
     for key, value in overrides:
         if value is not None:

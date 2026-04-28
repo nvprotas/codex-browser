@@ -225,6 +225,11 @@ class BrowserActionMetricsTests(unittest.TestCase):
 
         self.assertEqual([(item.role, item.model) for item in attempts], [('single', 'gpt-5.4')])
 
+    def test_settings_default_codex_model_is_gpt_55(self) -> None:
+        settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.codex_model, 'gpt-5.5')
+
     def test_codex_tokens_used_sums_multiple_attempts(self) -> None:
         tokens = _extract_codex_tokens_used(stdout_text='tokens used 10', stderr_text='tokens used 1,250')
 
@@ -255,7 +260,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(attempts[-1].model, 'gpt-5.4')
+        self.assertEqual(attempts[-1].model, 'gpt-5.5')
 
     def test_codex_command_disables_image_generation_with_no_reasoning(self) -> None:
         cmd = _build_codex_command(
@@ -263,7 +268,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
                 codex_reasoning_effort='none',
                 codex_reasoning_summary='none',
                 codex_web_search='disabled',
-                codex_image_generation_enabled=False,
+                codex_image_generation='disabled',
             ),
             schema_path=Path('/tmp/schema.json'),
             output_path='/tmp/output.json',
@@ -285,7 +290,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
                 codex_reasoning_effort='none',
                 codex_reasoning_summary='none',
                 codex_web_search='disabled',
-                codex_image_generation_enabled=True,
+                codex_image_generation='enabled',
             ),
             schema_path=Path('/tmp/schema.json'),
             output_path='/tmp/output.json',
@@ -299,7 +304,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="none"', cmd)
         self.assertIn('model_reasoning_summary="none"', cmd)
         self.assertIn('web_search="disabled"', cmd)
-        self.assertNotIn('features.image_generation=false', cmd)
+        self.assertIn('features.image_generation=true', cmd)
         self.assertLess(cmd.index('-c'), cmd.index('task'))
 
     def test_mutating_action_detector_blocks_dirty_retry(self) -> None:
