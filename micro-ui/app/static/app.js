@@ -1,6 +1,3 @@
-const layout = document.querySelector('.layout');
-const pollMs = Number(layout?.dataset.pollMs || 3000);
-
 const statusNode = document.getElementById('global-status');
 const sessionsNode = document.getElementById('sessions-list');
 const sessionsEmptyNode = document.getElementById('sessions-empty');
@@ -45,7 +42,7 @@ let pendingSessionSelectionId = null;
 let selectedEvents = [];
 let seenEventIds = new Set();
 let eventSource = null;
-let eventSourceSessionId = null;
+let streamNeedsRecovery = false;
 const noVncBlank = `<!doctype html>
 <html lang="ru">
   <body style="margin:0;min-height:100vh;background:#0d0f12;"></body>
@@ -564,33 +561,42 @@ function renderEvents(events) {
 }
 
 function connectEventStream() {
-  if (!selectedSessionId) {
-    closeEventStream();
-    return;
-  }
-  if (eventSource && eventSourceSessionId === selectedSessionId) {
+  if (eventSource) {
     return;
   }
 
-  closeEventStream();
-  eventSourceSessionId = selectedSessionId;
-  eventSource = new EventSource(`/api/events/stream?session_id=${encodeURIComponent(selectedSessionId)}`);
+  eventSource = new EventSource('/api/events/stream');
+  eventSource.onopen = () => {
+    if (!streamNeedsRecovery) {
+      return;
+    }
+    streamNeedsRecovery = false;
+    refreshAll().catch(showError);
+  };
   eventSource.onmessage = (message) => {
     try {
       const event = JSON.parse(message.data);
-      if (event.session_id !== selectedSessionId || seenEventIds.has(event.event_id)) {
-        return;
+      const hadSelectedSession = Boolean(selectedSessionId);
+      if (event.session_id === selectedSessionId && !seenEventIds.has(event.event_id)) {
+        selectedEvents = [...selectedEvents, event];
+        seenEventIds.add(event.event_id);
+        renderEvents(selectedEvents);
       }
-      selectedEvents = [...selectedEvents, event];
-      seenEventIds.add(event.event_id);
-      renderEvents(selectedEvents);
-      refreshSessions().catch(showError);
+      refreshSessions()
+        .then(() => {
+          if (!hadSelectedSession && selectedSessionId) {
+            return refreshEvents();
+          }
+          return null;
+        })
+        .catch(showError);
     } catch (error) {
       showError(error);
     }
   };
   eventSource.onerror = () => {
-    statusNode.textContent = `SSE reconnect: ${eventSourceSessionId}`;
+    streamNeedsRecovery = true;
+    statusNode.textContent = 'SSE reconnect';
   };
 }
 
@@ -599,7 +605,6 @@ function closeEventStream() {
     eventSource.close();
   }
   eventSource = null;
-  eventSourceSessionId = null;
 }
 
 function setReplyEmpty(message) {
@@ -672,13 +677,11 @@ async function refreshEvents() {
     eventsEmptyNode.textContent = 'Выберите сессию.';
     eventsEmptyNode.style.display = 'block';
     renderLiveEvents([]);
-    closeEventStream();
     return;
   }
 
   const events = await fetchJson(`/api/events?session_id=${encodeURIComponent(selectedSessionId)}`);
   renderEvents(events);
-  connectEventStream();
 }
 
 async function refreshAll() {
@@ -766,7 +769,6 @@ taskForm.addEventListener('submit', async (event) => {
 });
 
 setupJsonEditors();
-refreshAll().catch(showError);
-setInterval(() => {
-  refreshAll().catch(showError);
-}, pollMs);
+refreshAll()
+  .then(() => connectEventStream())
+  .catch(showError);

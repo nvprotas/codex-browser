@@ -31,6 +31,21 @@ def _event(*, event_id: str = 'event-1', idempotency_key: str = 'session-1:key')
 
 
 class CallbackStoreStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_store_publishes_accepted_event_to_global_subscriber(self) -> None:
+        store = CallbackStore()
+        queue = await store.subscribe_all()
+
+        try:
+            accepted = await store.add(_event())
+
+            received = await asyncio.wait_for(queue.get(), timeout=0.2)
+        finally:
+            await store.unsubscribe_all(queue)
+
+        self.assertTrue(accepted)
+        self.assertEqual(received.session_id, 'session-1')
+        self.assertEqual(received.event_type, 'agent_stream_event')
+
     async def test_store_publishes_accepted_event_to_session_subscriber(self) -> None:
         store = CallbackStore()
         queue = await store.subscribe('session-1')

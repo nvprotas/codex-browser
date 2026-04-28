@@ -41,9 +41,7 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name='index.html',
-        context={
-            'poll_interval_ms': settings.ui_poll_interval_sec * 1000,
-        },
+        context={},
     )
 
 
@@ -59,8 +57,8 @@ async def api_events(session_id: str | None = None) -> list[EventEnvelope]:
 
 
 @app.get('/api/events/stream')
-async def api_events_stream(request: Request, session_id: str) -> StreamingResponse:
-    queue = await store.subscribe(session_id)
+async def api_events_stream(request: Request, session_id: str | None = None) -> StreamingResponse:
+    queue = await store.subscribe(session_id) if session_id else await store.subscribe_all()
 
     async def event_source():
         try:
@@ -74,7 +72,10 @@ async def api_events_stream(request: Request, session_id: str) -> StreamingRespo
                     continue
                 yield f'data: {envelope.model_dump_json()}\n\n'
         finally:
-            await store.unsubscribe(session_id, queue)
+            if session_id:
+                await store.unsubscribe(session_id, queue)
+            else:
+                await store.unsubscribe_all(queue)
 
     return StreamingResponse(
         event_source(),

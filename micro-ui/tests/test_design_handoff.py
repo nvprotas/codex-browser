@@ -85,6 +85,8 @@ class MicroUiDesignHandoffStaticTests(unittest.TestCase):
         self.assertIn('function shortId', js)
         self.assertIn('replyStateBadgeNode.hidden', js)
         self.assertIn('STREAM EVENTS', js)
+        self.assertIn("new EventSource('/api/events/stream')", js)
+        self.assertNotIn('setInterval(', js)
 
     def test_callback_and_stream_items_expand_without_inner_scroll(self) -> None:
         css = _read('app/static/app.css')
