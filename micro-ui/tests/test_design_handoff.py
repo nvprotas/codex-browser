@@ -44,6 +44,17 @@ class MicroUiDesignHandoffStaticTests(unittest.TestCase):
         self.assertIn('data-json-editor="task-auth"', template)
         self.assertIn('id="agent-question"', template)
 
+    def test_template_matches_reference_telemetry_layout_and_copy(self) -> None:
+        template = _read('app/templates/index.html')
+
+        self.assertIn('value="https://www.litres.ru/"', template)
+        self.assertIn('{"city":"Москва","budget":2500}', template)
+        self.assertIn('<h2>Ответить агенту</h2>', template)
+        self.assertIn('id="reply-state-badge"', template)
+        self.assertIn('<section class="telemetry-grid two">', template)
+        self.assertIn('<section class="stream-row">', template)
+        self.assertLess(template.index('class="panel events"'), template.index('class="stream-row"'))
+
     def test_css_contains_handoff_components(self) -> None:
         css = _read('app/static/app.css')
 
@@ -51,6 +62,11 @@ class MicroUiDesignHandoffStaticTests(unittest.TestCase):
         self.assertIn('.agent-question', css)
         self.assertIn('.json-editor', css)
         self.assertIn('.json-view', css)
+        self.assertIn('.stream-row', css)
+        self.assertIn('.telemetry-grid.two', css)
+        self.assertIn('.badge[hidden]', css)
+        self.assertIn('  .telemetry-grid.two {\n    grid-template-columns: 1fr;\n  }', css)
+        self.assertIn('  .event-top,\n  .stream-top {\n    display: grid;', css)
 
     def test_js_contains_json_highlighting_and_question_hydration(self) -> None:
         js = _read('app/static/app.js')
@@ -58,6 +74,10 @@ class MicroUiDesignHandoffStaticTests(unittest.TestCase):
         self.assertIn('function tokenizeJson', js)
         self.assertIn('function renderAgentQuestion', js)
         self.assertIn('function createJsonView', js)
+        self.assertIn('function formatMetric', js)
+        self.assertIn('function shortId', js)
+        self.assertIn('replyStateBadgeNode.hidden', js)
+        self.assertIn('STREAM EVENTS', js)
 
 
 class CallbackStoreAskUserSummaryTests(unittest.IsolatedAsyncioTestCase):

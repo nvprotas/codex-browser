@@ -37,6 +37,7 @@ const agentQuestionTextNode = document.getElementById('agent-question-text');
 const agentQuestionTsNode = document.getElementById('agent-question-ts');
 const agentQuestionOptionsNode = document.getElementById('agent-question-options');
 const replyEmptyNode = document.getElementById('reply-empty');
+const replyStateBadgeNode = document.getElementById('reply-state-badge');
 
 let selectedSessionId = null;
 let selectedSession = null;
@@ -81,7 +82,9 @@ function setNoVncUrl(url) {
 }
 
 function setNoVncLabel(session) {
-  noVncSessionLabel.textContent = session?.session_id || 'session.novnc_url';
+  noVncSessionLabel.textContent = session?.session_id
+    ? `session.novnc_url · ${shortId(session.session_id)}`
+    : 'session.novnc_url';
 }
 
 async function fetchJson(url, options = {}) {
@@ -111,6 +114,15 @@ function fmtDate(value) {
     return String(value);
   }
   return date.toLocaleString('ru-RU');
+}
+
+function formatMetric(value) {
+  return String(value).padStart(2, '0');
+}
+
+function shortId(value, maxLength = 18) {
+  const text = String(value || '');
+  return text ? text.slice(0, maxLength) : '-';
 }
 
 function shortenText(value, maxLength = 180) {
@@ -383,11 +395,11 @@ function isErrorSession(session) {
 }
 
 function updateMetrics(sessions) {
-  metricSessionsNode.textContent = String(sessions.length);
-  metricWaitingNode.textContent = String(sessions.filter(isWaitingSession).length);
-  metricOrdersNode.textContent = String(sessions.filter((item) => item.order_id).length);
-  metricErrorsNode.textContent = String(sessions.filter(isErrorSession).length);
-  sessionsCountNode.textContent = `${sessions.length} active`;
+  metricSessionsNode.textContent = formatMetric(sessions.length);
+  metricWaitingNode.textContent = formatMetric(sessions.filter(isWaitingSession).length);
+  metricOrdersNode.textContent = formatMetric(sessions.filter((item) => item.order_id).length);
+  metricErrorsNode.textContent = formatMetric(sessions.filter(isErrorSession).length);
+  sessionsCountNode.textContent = `${sessions.length} ACTIVE`;
 }
 
 function createSessionItem(session, sessions) {
@@ -395,8 +407,10 @@ function createSessionItem(session, sessions) {
   item.type = 'button';
 
   const top = node('div', 'session-top');
+  const sessionIdNode = node('span', 'code', shortId(session.session_id));
+  sessionIdNode.title = session.session_id || '';
   top.append(
-    node('span', 'code', session.session_id),
+    sessionIdNode,
     node('span', `badge ${statusClass(session.status)}`, session.status || 'running'),
   );
 
@@ -518,7 +532,7 @@ function createStreamItem(event) {
 function renderLiveEvents(events) {
   const streamEvents = events.filter((event) => event.event_type === 'agent_stream_event');
   streamNode.replaceChildren();
-  streamCountNode.textContent = `${streamEvents.length} stream events`;
+  streamCountNode.textContent = `${streamEvents.length} STREAM EVENTS`;
   streamEmptyNode.textContent = selectedSessionId ? 'Пока нет live-событий.' : 'Выберите сессию.';
   streamEmptyNode.style.display = streamEvents.length ? 'none' : 'block';
 
@@ -531,7 +545,7 @@ function renderEvents(events) {
   selectedEvents = events;
   seenEventIds = new Set(events.map((event) => event.event_id).filter(Boolean));
   eventsNode.replaceChildren();
-  eventsCountNode.textContent = `${events.length} events`;
+  eventsCountNode.textContent = `${events.length} EVENTS`;
   eventsEmptyNode.textContent = selectedSessionId ? 'Пока нет событий в сессии.' : 'Выберите сессию.';
   eventsEmptyNode.style.display = events.length ? 'none' : 'block';
 
@@ -597,6 +611,7 @@ function setReplyEmpty(message) {
 function renderAgentQuestion(session) {
   const hasQuestion = Boolean(session?.waiting_reply_id && session?.ask_question);
   agentQuestionNode.hidden = !hasQuestion;
+  replyStateBadgeNode.hidden = !isWaitingSession(session || {});
   replyEmptyNode.style.display = hasQuestion ? 'none' : 'block';
   agentQuestionOptionsNode.replaceChildren();
 
@@ -645,7 +660,7 @@ async function refreshSessions() {
   renderSessions(sessions);
 
   if (sessions.length) {
-    statusNode.textContent = `Сессий: ${sessions.length}. Активная: ${selectedSessionId || sessions[0].session_id}`;
+    statusNode.textContent = `Сессий: ${sessions.length}. Активная: ${shortId(selectedSessionId || sessions[0].session_id)}`;
   } else {
     statusNode.textContent = 'Пока нет активных callback-событий.';
   }
@@ -654,7 +669,7 @@ async function refreshSessions() {
 async function refreshEvents() {
   if (!selectedSessionId) {
     eventsNode.replaceChildren();
-    eventsCountNode.textContent = '0 events';
+    eventsCountNode.textContent = '0 EVENTS';
     eventsEmptyNode.textContent = 'Выберите сессию.';
     eventsEmptyNode.style.display = 'block';
     renderLiveEvents([]);
