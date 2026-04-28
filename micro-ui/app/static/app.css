@@ -238,8 +238,7 @@ input,
   justify-self: stretch;
 }
 
-.telemetry-grid.two .sessions-list,
-.telemetry-grid.two .events-list {
+.telemetry-grid.two .sessions-list {
   max-height: 560px;
 }
 
@@ -251,11 +250,6 @@ input,
   display: grid;
   gap: 18px;
   min-width: 0;
-}
-
-.panel.stream .stream-list {
-  max-height: 420px;
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .panel {
@@ -640,15 +634,19 @@ input[readonly] {
   display: none;
 }
 
-.sessions-list,
-.events-list,
-.stream-list {
+.sessions-list {
   display: grid;
   gap: 10px;
   max-height: 520px;
   overflow: auto;
   padding-right: 4px;
   scrollbar-color: rgba(88, 104, 122, 0.42) transparent;
+}
+
+.events-list,
+.stream-list {
+  display: grid;
+  gap: 10px;
 }
 
 .session-item,
@@ -808,26 +806,10 @@ input[readonly] {
   font-size: 0.94rem;
 }
 
-.event-item pre,
-.stream-item pre {
-  max-width: 100%;
-  max-height: 300px;
-  margin: 0;
-  padding: 10px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: #0d1f2d;
-  color: #d8e2ee;
-  font-size: 0.76rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
 .json-view {
   margin: 8px 0 0;
   padding: 10px 0;
-  overflow: auto;
+  overflow: visible;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   background: #0b1724;
@@ -846,7 +828,6 @@ input[readonly] {
 
 .json-view code {
   display: block;
-  min-width: max-content;
   font-family: inherit;
 }
 
@@ -866,7 +847,10 @@ input[readonly] {
 
 .json-view-content {
   padding-right: 14px;
-  white-space: pre;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .tok-punct {
