@@ -18,6 +18,7 @@ from eval_service.app.models import (
     EvalRunStatus,
     ExpectedOutcome,
 )
+from eval_service.app.orchestrator import DEFAULT_CASE_TIMEOUT_SECONDS
 from eval_service.app.run_store import RunStore
 from eval_service.app.settings import Settings
 
@@ -133,6 +134,26 @@ def test_post_runs_selected_cases_creates_manifest_and_calls_buyer_sequentially(
     assert buyer.calls[0]['storage_state'] == {'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}
 
 
+def test_empty_case_ids_runs_all_cases(tmp_path: Path) -> None:
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-a'),
+            _case('case-b'),
+        ],
+        on_create=lambda call: _append_payment_ready(store, call),
+    )
+
+    response = client.post('/runs', json={'case_ids': []})
+
+    assert response.status_code == 200
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [case.eval_case_id for case in manifest.cases] == ['case-a', 'case-b']
+    assert [case.state for case in manifest.cases] == [CaseRunState.FINISHED, CaseRunState.FINISHED]
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-a', 'case-b']
+
+
 def test_missing_auth_profile_skips_case_and_continues_with_later_case(tmp_path: Path) -> None:
     client, store, buyer, _timer = _client_with_orchestrator(
         tmp_path,
@@ -170,12 +191,69 @@ def test_missing_auth_profile_skips_case_and_continues_with_later_case(tmp_path:
     assert later_case.state == CaseRunState.FINISHED
 
 
-def test_timeout_marks_case_timeout_and_preserves_session_id(tmp_path: Path) -> None:
+def test_invalid_auth_profile_skips_case_and_continues_with_later_case(tmp_path: Path) -> None:
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-invalid-auth', auth_profile='invalid-auth'),
+            _case('case-later', auth_profile=None),
+        ],
+        auth_results={
+            'invalid-auth': AuthProfileLoadResult(
+                skip_reason=AuthProfileSkipReason(
+                    reason='auth_profile_invalid',
+                    auth_profile='invalid-auth',
+                    message='Auth-профиль не является валидным storageState JSON.',
+                )
+            )
+        },
+        on_create=lambda call: _append_payment_ready(store, call),
+    )
+
+    response = client.post('/runs')
+
+    assert response.status_code == 200
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-later']
+    skipped_case, later_case = manifest.cases
+    assert skipped_case.state == CaseRunState.SKIPPED_AUTH_MISSING
+    assert skipped_case.finished_at is not None
+    assert json.loads(skipped_case.error or '{}') == {
+        'state': 'skipped_auth_missing',
+        'reason': 'auth_profile_invalid',
+        'auth_profile': 'invalid-auth',
+        'message': 'Auth-профиль не является валидным storageState JSON.',
+    }
+    assert later_case.state == CaseRunState.FINISHED
+
+
+def test_default_timeout_marks_case_timeout_and_preserves_session_id(tmp_path: Path) -> None:
+    client, store, buyer, timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-timeout')],
+        poll_interval_seconds=DEFAULT_CASE_TIMEOUT_SECONDS,
+    )
+
+    response = client.post('/runs', json={})
+
+    assert response.status_code == 200
+    assert len(buyer.calls) == 1
+    case = store.read_manifest('eval-run-001').cases[0]
+    assert case.state == CaseRunState.TIMEOUT
+    assert case.session_id == 'session-1'
+    assert case.error == f'timeout after {DEFAULT_CASE_TIMEOUT_SECONDS}s'
+    assert case.callback_events == []
+    assert timer.sleeps == [DEFAULT_CASE_TIMEOUT_SECONDS]
+
+
+def test_timeout_preserves_callback_events_and_session_id(tmp_path: Path) -> None:
     client, store, buyer, timer = _client_with_orchestrator(
         tmp_path,
         cases=[_case('case-timeout')],
         timeout_seconds=1.0,
-        poll_interval_seconds=0.25,
+        poll_interval_seconds=1.0,
+        on_create=lambda call: _append_status_update(store, call),
     )
 
     response = client.post('/runs', json={})
@@ -186,8 +264,12 @@ def test_timeout_marks_case_timeout_and_preserves_session_id(tmp_path: Path) -> 
     assert case.state == CaseRunState.TIMEOUT
     assert case.session_id == 'session-1'
     assert case.error == 'timeout after 1.0s'
-    assert case.callback_events == []
-    assert timer.sleeps == [0.25, 0.25, 0.25, 0.25]
+    assert timer.sleeps == [1.0]
+    assert len(case.callback_events) == 1
+    event = case.callback_events[0]
+    assert event.event_type == CallbackEventType.STATUS_UPDATE
+    assert event.session_id == 'session-1'
+    assert event.payload == {'status': 'buyer_started'}
 
 
 def test_payment_ready_waits_grace_period_before_finishing_case(tmp_path: Path) -> None:
@@ -246,7 +328,7 @@ def _client_with_orchestrator(
     cases: list[EvalCase],
     auth_results: dict[str | None, AuthProfileLoadResult] | None = None,
     on_create: Callable[[dict[str, Any]], None] | None = None,
-    timeout_seconds: float = 600.0,
+    timeout_seconds: float | None = None,
     poll_interval_seconds: float = 0.1,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     timer: FakeTimer | None = None,
@@ -263,7 +345,8 @@ def _client_with_orchestrator(
     app.state.eval_run_id_generator = lambda: 'eval-run-001'
     app.state.orchestrator_monotonic = fake_timer.monotonic
     app.state.orchestrator_sleep = sleep or fake_timer.sleep
-    app.state.orchestrator_timeout_seconds = timeout_seconds
+    if timeout_seconds is not None:
+        app.state.orchestrator_timeout_seconds = timeout_seconds
     app.state.orchestrator_poll_interval_seconds = poll_interval_seconds
     return TestClient(app), store, buyer, fake_timer
 
@@ -328,4 +411,24 @@ def _append_ask_user(store: RunStore, call: dict[str, Any]) -> None:
         envelope,
         state=CaseRunState.WAITING_USER,
         waiting_reply_id=reply_id,
+    )
+
+
+def _append_status_update(store: RunStore, call: dict[str, Any]) -> None:
+    metadata = call['metadata']
+    envelope = BuyerCallbackEnvelope(
+        event_id=f'event-status-{call["session_id"]}',
+        session_id=call['session_id'],
+        event_type=CallbackEventType.STATUS_UPDATE,
+        occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
+        idempotency_key=f'idem-status-{call["session_id"]}',
+        payload={'status': 'buyer_started'},
+        eval_run_id=metadata['eval_run_id'],
+        eval_case_id=metadata['eval_case_id'],
+    )
+    store.append_callback_event(
+        metadata['eval_run_id'],
+        metadata['eval_case_id'],
+        envelope,
+        state=CaseRunState.RUNNING,
     )
