@@ -151,14 +151,18 @@ class RunOrchestrator:
             started_at=self.clock(),
             error=None,
         )
-        response = await self.buyer_client.create_task(
-            task=case.task,
-            start_url=case.start_url,
-            metadata={**case.buyer_metadata(), 'eval_run_id': eval_run_id},
-            callback_url=callback_url,
-            storage_state=storage_state,
-        )
-        session_id = str(_response_field(response, 'session_id'))
+        try:
+            response = await self.buyer_client.create_task(
+                task=case.task,
+                start_url=case.start_url,
+                metadata={**case.buyer_metadata(), 'eval_run_id': eval_run_id},
+                callback_url=callback_url,
+                storage_state=storage_state,
+            )
+            session_id = _required_response_string(response, 'session_id')
+        except Exception as exc:
+            return self._mark_case_runtime_failure(eval_run_id, case.eval_case_id, exc)
+
         self._record_created_task(eval_run_id, case.eval_case_id, session_id)
         return await self._wait_for_case(eval_run_id, case.eval_case_id)
 
@@ -205,6 +209,17 @@ class RunOrchestrator:
             )
             return
         self.run_store.update_case(eval_run_id, eval_case_id, session_id=session_id)
+
+    def _mark_case_runtime_failure(self, eval_run_id: str, eval_case_id: str, exc: Exception) -> CaseRunState:
+        manifest = self.run_store.update_case(
+            eval_run_id,
+            eval_case_id,
+            state=CaseRunState.TIMEOUT,
+            finished_at=self.clock(),
+            waiting_reply_id=None,
+            error=f'buyer runtime failure: {type(exc).__name__}: {exc}',
+        )
+        return _find_case(manifest.cases, eval_case_id).state
 
     def _refresh_run_status(self, eval_run_id: str) -> EvalRunManifest:
         manifest = self.run_store.read_manifest(eval_run_id)
@@ -343,3 +358,13 @@ def _response_field(response: object, field_name: str) -> object:
     if isinstance(response, dict):
         return response[field_name]
     return getattr(response, field_name)
+
+
+def _required_response_string(response: object, field_name: str) -> str:
+    try:
+        value = _response_field(response, field_name)
+    except (AttributeError, KeyError) as exc:
+        raise ValueError(f'buyer response не содержит {field_name}') from exc
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'buyer response.{field_name} должен быть непустой строкой')
+    return value

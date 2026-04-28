@@ -147,6 +147,40 @@ def test_operator_reply_uses_saved_reply_id_and_moves_case_back_to_running(tmp_p
     assert case.waiting_reply_id is None
 
 
+def test_operator_reply_rejects_stale_explicit_reply_after_terminal_state_without_calling_buyer(
+    tmp_path: Path,
+) -> None:
+    client, store, buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('scenario_finished', {'result': 'ok'}),
+    )
+    before_case = store.read_manifest('eval-20260428-120000').cases[0]
+    scheduled: list[Any] = []
+
+    async def reject_resume(coro: Any) -> None:
+        scheduled.append(coro)
+        coro.close()
+
+    client.app.state.orchestrator_resume_scheduler = reject_resume
+
+    response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'reply_id': 'reply-42', 'message': 'Да, продолжай.'},
+    )
+
+    assert response.status_code == 409
+    assert buyer.replies == []
+    assert scheduled == []
+    after_case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert after_case.model_dump(mode='json') == before_case.model_dump(mode='json')
+
+
 def test_operator_reply_schedules_resume_without_waiting_for_continuation(tmp_path: Path) -> None:
     class EmptyCaseRegistry:
         def load_cases(self) -> list[Any]:

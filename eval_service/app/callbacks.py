@@ -99,6 +99,12 @@ async def send_operator_reply(
             detail=f'eval case не найден: {eval_case_id}',
         ) from exc
 
+    if case.state != CaseRunState.WAITING_USER:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'case не ожидает ответ оператора: state={case.state}',
+        )
+
     session_id = _require_case_value(case.session_id, 'session_id')
     reply_id = reply.reply_id or _require_case_value(case.waiting_reply_id, 'reply_id')
     buyer_response = await _get_buyer_client(request).send_reply(

@@ -209,6 +209,40 @@ def test_missing_auth_profile_skips_case_and_continues_with_later_case(tmp_path:
     assert later_case.state == CaseRunState.FINISHED
 
 
+def test_create_task_failure_marks_case_timeout_and_continues_with_later_case(tmp_path: Path) -> None:
+    def fail_first_case_and_finish_later(call: dict[str, Any]) -> None:
+        if call['metadata']['eval_case_id'] == 'case-create-fails':
+            raise RuntimeError('buyer create_task недоступен')
+
+        failed_case = store.read_manifest('eval-run-001').cases[0]
+        assert failed_case.state == CaseRunState.TIMEOUT
+        _append_payment_ready(store, call)
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-create-fails'),
+            _case('case-later'),
+        ],
+        on_create=fail_first_case_and_finish_later,
+        raise_server_exceptions=False,
+    )
+
+    response = client.post('/runs', json={})
+
+    assert response.status_code == 200
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-create-fails', 'case-later']
+    failed_case, later_case = manifest.cases
+    assert failed_case.state == CaseRunState.TIMEOUT
+    assert failed_case.started_at is not None
+    assert failed_case.finished_at is not None
+    assert failed_case.error is not None
+    assert 'buyer create_task недоступен' in failed_case.error
+    assert later_case.state == CaseRunState.FINISHED
+
+
 def test_invalid_auth_profile_skips_case_and_continues_with_later_case(tmp_path: Path) -> None:
     client, store, buyer, _timer = _client_with_orchestrator(
         tmp_path,
@@ -425,6 +459,7 @@ def _client_with_orchestrator(
     poll_interval_seconds: float = 0.1,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     timer: FakeTimer | None = None,
+    raise_server_exceptions: bool = True,
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
     settings = Settings(_env_file=None, eval_runs_dir=tmp_path, buyer_api_base_url='http://buyer.test')
     app = create_app(settings)
@@ -441,7 +476,7 @@ def _client_with_orchestrator(
     if timeout_seconds is not None:
         app.state.orchestrator_timeout_seconds = timeout_seconds
     app.state.orchestrator_poll_interval_seconds = poll_interval_seconds
-    return TestClient(app), store, buyer, fake_timer
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions), store, buyer, fake_timer
 
 
 def _case(
