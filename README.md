@@ -45,6 +45,10 @@ cp .env.example .env
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
+# Быстрый режим Codex CLI: no reasoning + отключенный image generation tool.
+# CODEX_REASONING_EFFORT=none
+# CODEX_IMAGE_GENERATION=disabled
+
 # Опционально: стратегия модели generic buyer-flow.
 # BUYER_MODEL_STRATEGY=single
 # BUYER_FAST_CODEX_MODEL=gpt-5.4-mini
@@ -183,8 +187,11 @@ Post-session анализ не отправляет дополнительный
 Чтобы смотреть это в реальном времени в логах контейнера:
 
 ```bash
-docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_ready"
+docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
+
+`micro-ui` также показывает live-поток `agent_stream_event` через SSE `/api/events/stream?session_id=...`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`.
+MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; предполагается локальный trusted контур разработки.
 
 ## Контракт callback (MVP)
 
@@ -203,6 +210,7 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 
 - `session_started`
 - `agent_step_started`
+- `agent_stream_event`
 - `agent_step_finished`
 - `ask_user`
 - `handoff_requested`

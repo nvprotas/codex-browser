@@ -8,6 +8,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-buyer}
     volumes:
       - buyer-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-buyer} -d ${POSTGRES_DB:-buyer}"]
       interval: 5s
@@ -49,11 +51,15 @@ services:
       CDP_RECOVERY_WINDOW_SEC: ${CDP_RECOVERY_WINDOW_SEC:-20}
       CDP_RECOVERY_INTERVAL_MS: ${CDP_RECOVERY_INTERVAL_MS:-500}
       CODEX_BIN: codex
-      CODEX_MODEL: ${CODEX_MODEL:-gpt-5.4}
+      CODEX_MODEL: ${CODEX_MODEL:-gpt-5.5}
       BUYER_MODEL_STRATEGY: ${BUYER_MODEL_STRATEGY:-single}
       BUYER_FAST_CODEX_MODEL: ${BUYER_FAST_CODEX_MODEL:-gpt-5.4-mini}
       BUYER_STRONG_CODEX_MODEL: ${BUYER_STRONG_CODEX_MODEL:-}
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
+      CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-none}
+      CODEX_REASONING_SUMMARY: ${CODEX_REASONING_SUMMARY:-none}
+      CODEX_WEB_SEARCH: ${CODEX_WEB_SEARCH:-disabled}
+      CODEX_IMAGE_GENERATION: ${CODEX_IMAGE_GENERATION:-disabled}
       CODEX_WORKDIR: /workspace
       BUYER_TRACE_DIR: ${BUYER_TRACE_DIR:-/workspace/.tmp/buyer-observability}
       BUYER_PROMPT_PREVIEW_CHARS: ${BUYER_PROMPT_PREVIEW_CHARS:-2000}

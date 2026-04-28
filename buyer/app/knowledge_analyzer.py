@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
 from ._utils import duration_ms_since, remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
+from .runner import _build_codex_config_overrides
 from .settings import Settings
 
 logger = logging.getLogger('uvicorn.error')
@@ -201,6 +202,7 @@ class PostSessionKnowledgeAnalyzer:
             cmd.append('--skip-git-repo-check')
         if self._settings.codex_model:
             cmd.extend(['-m', self._settings.codex_model])
+        cmd.extend(_build_codex_config_overrides(self._settings))
         cmd.extend([
             '--output-schema',
             str(self._schema_path),
@@ -1179,4 +1181,3 @@ def validate_written_fixed_output(path: Path, *, session_dir: Path) -> None:
         raise ValueError('Файл knowledge analysis должен быть обычным файлом.')
     if not is_relative_to_path(resolved, session_resolved):
         raise ValueError('Записанный файл knowledge analysis вышел за пределы session_dir.')
-

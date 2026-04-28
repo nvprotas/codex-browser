@@ -8,6 +8,9 @@ const sessionsCountNode = document.getElementById('sessions-count');
 const eventsNode = document.getElementById('events-list');
 const eventsEmptyNode = document.getElementById('events-empty');
 const eventsCountNode = document.getElementById('events-count');
+const streamNode = document.getElementById('stream-list');
+const streamEmptyNode = document.getElementById('stream-empty');
+const streamCountNode = document.getElementById('stream-count');
 const noVncFrame = document.getElementById('novnc-frame');
 const noVncSessionLabel = document.getElementById('novnc-session-label');
 const noVncPlaceholderNode = document.getElementById('novnc-placeholder');
@@ -33,6 +36,10 @@ const replyResultNode = document.getElementById('reply-result');
 let selectedSessionId = null;
 let selectedSession = null;
 let pendingSessionSelectionId = null;
+let selectedEvents = [];
+let seenEventIds = new Set();
+let eventSource = null;
+let eventSourceSessionId = null;
 const noVncBlank = `<!doctype html>
 <html lang="ru">
   <body style="margin:0;min-height:100vh;background:#0d0f12;"></body>
@@ -224,30 +231,90 @@ function renderSessions(sessions) {
   setNoVncLabel(selectedSession);
 }
 
+function createEventItem(event) {
+  const item = node('div', 'event-item');
+
+  const top = node('div', 'event-top');
+  top.append(
+    node('strong', null, event.event_type || '-'),
+    node('span', 'event-meta code', fmtDate(event.occurred_at)),
+  );
+
+  const eventId = node('div', 'event-meta');
+  eventId.append('event_id: ', node('span', 'code', event.event_id || '-'));
+
+  const payload = node('pre');
+  payload.textContent = JSON.stringify(event.payload || {}, null, 2);
+
+  item.append(top, eventId, payload);
+  return item;
+}
+
+function streamSummary(event) {
+  const payload = event.payload || {};
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const last = items.length ? items[items.length - 1] : {};
+  const source = payload.source || 'stream';
+  const stream = payload.stream || '-';
+
+  if (source === 'browser') {
+    const command = last.command || last.event || payload.message || 'browser';
+    const status = last.ok === false ? 'failed' : last.ok === true ? 'ok' : '';
+    const target = last.details?.selector || last.details?.url || last.result?.url || '';
+    return [command, status, target].filter(Boolean).join(' · ');
+  }
+
+  return payload.message || last.message || last.type || last.line || `${source}/${stream}`;
+}
+
+function createStreamItem(event) {
+  const payload = event.payload || {};
+  const item = node('div', 'stream-item');
+
+  const top = node('div', 'stream-top');
+  top.append(
+    node('strong', null, streamSummary(event)),
+    node('span', 'stream-meta code', `${payload.source || '-'}:${payload.stream || '-'}`),
+  );
+
+  const metaNode = node('div', 'stream-meta');
+  metaNode.append(
+    `step ${payload.step || '-'} · seq ${payload.sequence || '-'} · `,
+    node('span', 'code', fmtDate(event.occurred_at)),
+  );
+
+  const details = node('pre');
+  details.textContent = JSON.stringify(payload.items || [], null, 2);
+
+  item.append(top, metaNode, details);
+  return item;
+}
+
+function renderLiveEvents(events) {
+  const streamEvents = events.filter((event) => event.event_type === 'agent_stream_event');
+  streamNode.replaceChildren();
+  streamCountNode.textContent = `${streamEvents.length} stream events`;
+  streamEmptyNode.textContent = selectedSessionId ? 'Пока нет live-событий.' : 'Выберите сессию.';
+  streamEmptyNode.style.display = streamEvents.length ? 'none' : 'block';
+
+  for (const event of streamEvents.slice(-80)) {
+    streamNode.appendChild(createStreamItem(event));
+  }
+}
+
 function renderEvents(events) {
+  selectedEvents = events;
+  seenEventIds = new Set(events.map((event) => event.event_id).filter(Boolean));
   eventsNode.replaceChildren();
   eventsCountNode.textContent = `${events.length} events`;
   eventsEmptyNode.textContent = selectedSessionId ? 'Пока нет событий в сессии.' : 'Выберите сессию.';
   eventsEmptyNode.style.display = events.length ? 'none' : 'block';
 
   for (const event of events) {
-    const item = node('div', 'event-item');
-
-    const top = node('div', 'event-top');
-    top.append(
-      node('strong', null, event.event_type || '-'),
-      node('span', 'event-meta code', fmtDate(event.occurred_at)),
-    );
-
-    const eventId = node('div', 'event-meta');
-    eventId.append('event_id: ', node('span', 'code', event.event_id || '-'));
-
-    const payload = node('pre');
-    payload.textContent = JSON.stringify(event.payload || {}, null, 2);
-
-    item.append(top, eventId, payload);
-    eventsNode.appendChild(item);
+    eventsNode.appendChild(createEventItem(event));
   }
+
+  renderLiveEvents(events);
 
   setNoVncUrl(selectedSession?.novnc_url);
   setNoVncLabel(selectedSession);
@@ -256,6 +323,45 @@ function renderEvents(events) {
   if (last && last.event_type === 'ask_user') {
     replyIdInput.value = last.payload?.reply_id || '';
   }
+}
+
+function connectEventStream() {
+  if (!selectedSessionId) {
+    closeEventStream();
+    return;
+  }
+  if (eventSource && eventSourceSessionId === selectedSessionId) {
+    return;
+  }
+
+  closeEventStream();
+  eventSourceSessionId = selectedSessionId;
+  eventSource = new EventSource(`/api/events/stream?session_id=${encodeURIComponent(selectedSessionId)}`);
+  eventSource.onmessage = (message) => {
+    try {
+      const event = JSON.parse(message.data);
+      if (event.session_id !== selectedSessionId || seenEventIds.has(event.event_id)) {
+        return;
+      }
+      selectedEvents = [...selectedEvents, event];
+      seenEventIds.add(event.event_id);
+      renderEvents(selectedEvents);
+      refreshSessions().catch(showError);
+    } catch (error) {
+      showError(error);
+    }
+  };
+  eventSource.onerror = () => {
+    statusNode.textContent = `SSE reconnect: ${eventSourceSessionId}`;
+  };
+}
+
+function closeEventStream() {
+  if (eventSource) {
+    eventSource.close();
+  }
+  eventSource = null;
+  eventSourceSessionId = null;
 }
 
 function hydrateReplyForm() {
@@ -284,11 +390,14 @@ async function refreshEvents() {
     eventsCountNode.textContent = '0 events';
     eventsEmptyNode.textContent = 'Выберите сессию.';
     eventsEmptyNode.style.display = 'block';
+    renderLiveEvents([]);
+    closeEventStream();
     return;
   }
 
   const events = await fetchJson(`/api/events?session_id=${encodeURIComponent(selectedSessionId)}`);
   renderEvents(events);
+  connectEventStream();
 }
 
 async function refreshAll() {

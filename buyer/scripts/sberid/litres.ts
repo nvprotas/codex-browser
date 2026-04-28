@@ -293,13 +293,13 @@ function sberIdTargets(): ClickTarget[] {
   return [
     {
       label: 'litres-sb-icon',
-      timeoutMs: 1000,
-      locator: (page) => page.locator('[data-testid="authorization-popup"] [data-testid="icon"]:has(img[alt="sb"])'),
+      timeoutMs: 1200,
+      locator: (page) => page.locator('button:has([data-testid="icon"] img[alt="sb"]), button:has(img[alt="sb"])'),
     },
     {
       label: 'litres-sb-img',
       timeoutMs: 1000,
-      locator: (page) => page.locator('[data-testid="authorization-popup"] img[alt="sb"]'),
+      locator: (page) => page.locator('img[alt="sb"]'),
     },
     {
       label: 'role-button-sber-id',
@@ -321,7 +321,7 @@ function sberIdTargets(): ClickTarget[] {
       timeoutMs: 1000,
       locator: (page) =>
         page.locator(
-          'button:has-text("Sber ID"), a:has-text("Sber ID"), button:has-text("Сбер"), a:has-text("Сбер"), [aria-label*="Sber"], [aria-label*="Сбер"], a[href*="sber"], button[data-testid*="sber"], [data-testid*="sber"], img[alt="sb"]',
+          'button:has-text("Sber ID"), a:has-text("Sber ID"), button:has-text("Сбер"), a:has-text("Сбер"), [aria-label*="Sber"], [aria-label*="Сбер"], a[href*="sber"], button[data-testid*="sber"], [data-testid*="sber"], button:has(img[alt="sb"]), img[alt="sb"]',
         ),
     },
   ];
@@ -464,8 +464,12 @@ async function main(): Promise<void> {
     });
 
     let loginClickLabel = 'direct-auth-login-url';
-    let otherWaysClick = await clickFirstVisible(page, otherWaysTargets(), { timeoutMs: 4000 });
-    if (!otherWaysClick) {
+    let otherWaysClick: ClickResult | null = null;
+    let sberVisibleTarget = await waitForFirstVisible(page, sberIdTargets(), 1200);
+    if (!sberVisibleTarget) {
+      otherWaysClick = await clickFirstVisible(page, otherWaysTargets(), { timeoutMs: 4000 });
+    }
+    if (!sberVisibleTarget && !otherWaysClick) {
       const loginClick = await clickFirstVisible(page, loginTargets(), { timeoutMs: 4000 });
       if (!loginClick) {
         const currentUrl = page.url();
@@ -496,7 +500,7 @@ async function main(): Promise<void> {
 
       otherWaysClick = await clickFirstVisible(page, otherWaysTargets(), { timeoutMs: 4000 });
     }
-    if (!otherWaysClick) {
+    if (!sberVisibleTarget && !otherWaysClick) {
       const currentUrl = page.url();
       const currentHost = hostFromUrl(currentUrl);
       save(outputPath, {
@@ -519,12 +523,15 @@ async function main(): Promise<void> {
       return;
     }
 
-    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
-    await page.waitForTimeout(700);
-    await tracePage(page, tracePath, 'after_other_ways_click', {
-      login_click: loginClickLabel,
-      other_ways_click: otherWaysClick.label,
-    });
+    if (otherWaysClick) {
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
+      await page.waitForTimeout(700);
+      await tracePage(page, tracePath, 'after_other_ways_click', {
+        login_click: loginClickLabel,
+        other_ways_click: otherWaysClick.label,
+      });
+      sberVisibleTarget = await waitForFirstVisible(page, sberIdTargets(), 2000);
+    }
 
     const sberClickStartedAt = Date.now();
     appendTrace(tracePath, {
@@ -534,12 +541,13 @@ async function main(): Promise<void> {
       host: hostFromUrl(page.url()),
       details: {
         target_labels: sberIdTargetLabels(),
-        default_timeout_ms: 900,
+        matched_before_click: sberVisibleTarget,
+        default_timeout_ms: 1200,
         popup_timeout_ms: 1200,
       },
     });
     const sberClick = await clickFirstVisible(page, sberIdTargets(), {
-      timeoutMs: 900,
+      timeoutMs: 1200,
       popupContext: context,
       popupTimeoutMs: 1200,
       tracePath,
@@ -570,7 +578,7 @@ async function main(): Promise<void> {
           auth_entry_url: entryUrl,
           cookies_loaded: cookiesLoaded,
           login_click: loginClickLabel,
-          other_ways_click: otherWaysClick.label,
+          other_ways_click: otherWaysClick?.label ?? null,
           trace_path: tracePath,
           sber_loops: sberLoops,
           context_prepared_for_reuse: false,
@@ -582,7 +590,7 @@ async function main(): Promise<void> {
     const authPage = sberClick.page;
     await tracePage(authPage, tracePath, 'after_sber_id_click', {
       login_click: loginClickLabel,
-      other_ways_click: otherWaysClick.label,
+      other_ways_click: otherWaysClick?.label ?? null,
       sber_id_click: sberClick.label,
     });
     if (authPage !== page) {
@@ -616,7 +624,7 @@ async function main(): Promise<void> {
             auth_entry_url: entryUrl,
             cookies_loaded: cookiesLoaded,
             login_click: loginClickLabel,
-            other_ways_click: otherWaysClick.label,
+            other_ways_click: otherWaysClick?.label ?? null,
             sber_id_click: sberClick.label,
             trace_path: tracePath,
             sber_loops: sberLoops,
@@ -639,7 +647,7 @@ async function main(): Promise<void> {
             auth_entry_url: entryUrl,
             cookies_loaded: cookiesLoaded,
             login_click: loginClickLabel,
-            other_ways_click: otherWaysClick.label,
+            other_ways_click: otherWaysClick?.label ?? null,
             sber_id_click: sberClick.label,
             trace_path: tracePath,
             sber_loops: sberLoops,
@@ -664,7 +672,7 @@ async function main(): Promise<void> {
         auth_entry_url: entryUrl,
         cookies_loaded: cookiesLoaded,
         login_click: loginClickLabel,
-        other_ways_click: otherWaysClick.label,
+        other_ways_click: otherWaysClick?.label ?? null,
         sber_id_click: sberClick.label,
         trace_path: tracePath,
         sber_loops: sberLoops,

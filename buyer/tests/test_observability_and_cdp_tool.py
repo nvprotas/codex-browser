@@ -11,8 +11,10 @@ from buyer.app.prompt_builder import build_agent_prompt
 from buyer.app.runner import (
     _browser_actions_have_mutating_commands,
     _build_browser_actions_metrics,
+    _build_codex_command,
     _build_model_attempt_specs,
     _extract_codex_tokens_used,
+    _read_new_jsonl_records,
 )
 from buyer.app.settings import Settings
 from buyer.tools.cdp_tool import (
@@ -195,10 +197,38 @@ class BrowserActionMetricsTests(unittest.TestCase):
         self.assertEqual(metrics['browser_busy_union_ms'], 900)
         self.assertEqual(metrics['inter_command_idle_ms'], 0)
 
+    def test_new_jsonl_reader_keeps_partial_line_for_next_read(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'actions.jsonl'
+            path.write_text(
+                json.dumps({'event': 'browser_command_started', 'command': 'goto'})
+                + '\n'
+                + '{"event":"browser_command_finished"',
+                encoding='utf-8',
+            )
+
+            offset, records = _read_new_jsonl_records(path, offset=0)
+
+            self.assertEqual(records, [{'event': 'browser_command_started', 'command': 'goto'}])
+            self.assertEqual(offset, path.read_text(encoding='utf-8').index('{"event":"browser_command_finished"'))
+
+            with path.open('a', encoding='utf-8') as fh:
+                fh.write(',"command":"goto","ok":true}\n')
+
+            next_offset, next_records = _read_new_jsonl_records(path, offset=offset)
+
+            self.assertGreater(next_offset, offset)
+            self.assertEqual(next_records, [{'event': 'browser_command_finished', 'command': 'goto', 'ok': True}])
+
     def test_model_attempts_default_to_single_legacy_model(self) -> None:
         attempts = _build_model_attempt_specs(Settings(codex_model='gpt-5.4', buyer_model_strategy='single'))
 
         self.assertEqual([(item.role, item.model) for item in attempts], [('single', 'gpt-5.4')])
+
+    def test_settings_default_codex_model_is_gpt_55(self) -> None:
+        settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.codex_model, 'gpt-5.5')
 
     def test_codex_tokens_used_sums_multiple_attempts(self) -> None:
         tokens = _extract_codex_tokens_used(stdout_text='tokens used 10', stderr_text='tokens used 1,250')
@@ -230,7 +260,52 @@ class BrowserActionMetricsTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(attempts[-1].model, 'gpt-5.4')
+        self.assertEqual(attempts[-1].model, 'gpt-5.5')
+
+    def test_codex_command_disables_image_generation_with_no_reasoning(self) -> None:
+        cmd = _build_codex_command(
+            settings=Settings(
+                codex_reasoning_effort='none',
+                codex_reasoning_summary='none',
+                codex_web_search='disabled',
+                codex_image_generation='disabled',
+            ),
+            schema_path=Path('/tmp/schema.json'),
+            output_path='/tmp/output.json',
+            prompt='task',
+            model='gpt-test',
+        )
+
+        self.assertEqual(cmd[:2], ['codex', 'exec'])
+        self.assertIn('--json', cmd)
+        self.assertIn('model_reasoning_effort="none"', cmd)
+        self.assertIn('model_reasoning_summary="none"', cmd)
+        self.assertIn('web_search="disabled"', cmd)
+        self.assertIn('features.image_generation=false', cmd)
+        self.assertLess(cmd.index('-c'), cmd.index('task'))
+
+    def test_codex_command_keeps_image_generation_when_explicitly_enabled(self) -> None:
+        cmd = _build_codex_command(
+            settings=Settings(
+                codex_reasoning_effort='none',
+                codex_reasoning_summary='none',
+                codex_web_search='disabled',
+                codex_image_generation='enabled',
+            ),
+            schema_path=Path('/tmp/schema.json'),
+            output_path='/tmp/output.json',
+            prompt='task',
+            model='gpt-test',
+        )
+
+        self.assertEqual(cmd[:2], ['codex', 'exec'])
+        self.assertIn('--json', cmd)
+        self.assertIn('-c', cmd)
+        self.assertIn('model_reasoning_effort="none"', cmd)
+        self.assertIn('model_reasoning_summary="none"', cmd)
+        self.assertIn('web_search="disabled"', cmd)
+        self.assertIn('features.image_generation=true', cmd)
+        self.assertLess(cmd.index('-c'), cmd.index('task'))
 
     def test_mutating_action_detector_blocks_dirty_retry(self) -> None:
         with TemporaryDirectory() as tmpdir:

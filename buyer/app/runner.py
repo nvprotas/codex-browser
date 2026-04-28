@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ._utils import (
     duration_ms_since as _duration_ms_since,
@@ -26,6 +26,10 @@ from .settings import Settings
 logger = logging.getLogger('uvicorn.error')
 
 MUTATING_BROWSER_COMMANDS = {'click', 'fill', 'press'}
+STREAM_BATCH_INTERVAL_SEC = 0.5
+STREAM_BATCH_SIZE = 20
+
+AgentStreamCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,7 @@ class AgentRunner:
         auth_context: dict[str, Any] | None,
         memory: list[dict[str, str]],
         latest_user_reply: str | None,
+        stream_callback: AgentStreamCallback | None = None,
     ) -> AgentOutput:
         trace = self._prepare_trace_context(session_id=session_id, step_index=step_index)
         logger.info(
@@ -173,6 +178,7 @@ class AgentRunner:
                 prompt=prompt,
                 env=env,
                 attempt_spec=attempt_spec,
+                stream_callback=stream_callback,
             )
             latest_attempt = attempt
             attempt_results.append(attempt)
@@ -300,6 +306,7 @@ class AgentRunner:
         prompt: str,
         env: dict[str, str],
         attempt_spec: _CodexAttemptSpec,
+        stream_callback: AgentStreamCallback | None,
     ) -> _CodexAttemptResult:
         with tempfile.NamedTemporaryFile(
             prefix=f'codex-result-step-{step_index:03d}-{attempt_spec.role}-',
@@ -323,6 +330,11 @@ class AgentRunner:
             output_path=output_path,
             codex_started_at=datetime.now(timezone.utc),
         )
+        stream_publisher = _AgentStreamPublisher(
+            session_id=trace['session_id'],
+            step_index=step_index,
+            callback=stream_callback,
+        )
 
         logger.info(
             'codex_step_exec step=%s prompt_path=%s model=%s role=%s sandbox=%s',
@@ -334,6 +346,7 @@ class AgentRunner:
         )
 
         try:
+            browser_actions_offset = _file_size(trace['browser_actions_log_path'])
             try:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -354,10 +367,19 @@ class AgentRunner:
                 return attempt
 
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._settings.codex_timeout_sec)
+                attempt.stdout_text, attempt.stderr_text = await asyncio.wait_for(
+                    _collect_process_streams(
+                        process,
+                        publisher=stream_publisher,
+                        browser_actions_log_path=trace['browser_actions_log_path'],
+                        browser_actions_offset=browser_actions_offset,
+                    ),
+                    timeout=self._settings.codex_timeout_sec,
+                )
             except asyncio.TimeoutError:
                 process.kill()
-                await process.communicate()
+                await _communicate_quietly(process)
+                await stream_publisher.aclose()
                 attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
                 attempt.failure_reason = 'timeout'
                 attempt.failure_message = f'Команда codex превысила таймаут {self._settings.codex_timeout_sec} секунд.'
@@ -371,8 +393,6 @@ class AgentRunner:
                 )
                 return attempt
 
-            attempt.stdout_text = stdout.decode('utf-8', errors='ignore')
-            attempt.stderr_text = stderr.decode('utf-8', errors='ignore')
             attempt.codex_returncode = process.returncode
             attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
             logger.info(
@@ -852,7 +872,7 @@ def _int_or_zero(value: Any) -> int:
 def _build_model_attempt_specs(settings: Settings) -> list[_CodexAttemptSpec]:
     if settings.buyer_model_strategy == 'fast_then_strong':
         fast_model = _non_empty(settings.buyer_fast_codex_model) or 'gpt-5.4-mini'
-        strong_model = _non_empty(settings.buyer_strong_codex_model) or _non_empty(settings.codex_model) or 'gpt-5.4'
+        strong_model = _non_empty(settings.buyer_strong_codex_model) or _non_empty(settings.codex_model) or 'gpt-5.5'
         if fast_model == strong_model:
             return [_CodexAttemptSpec(role='fast', model=fast_model)]
         return [
@@ -873,6 +893,7 @@ def _build_codex_command(
     cmd = [
         settings.codex_bin,
         'exec',
+        '--json',
         '-s',
         settings.codex_sandbox_mode,
     ]
@@ -880,6 +901,7 @@ def _build_codex_command(
         cmd.append('--skip-git-repo-check')
     if model:
         cmd.extend(['-m', model])
+    cmd.extend(_build_codex_config_overrides(settings))
     cmd.extend([
         '--output-schema',
         str(schema_path),
@@ -888,6 +910,319 @@ def _build_codex_command(
         prompt,
     ])
     return cmd
+
+
+def _build_codex_config_overrides(settings: Settings) -> list[str]:
+    overrides: list[tuple[str, str | bool | None]] = [
+        ('model_reasoning_effort', settings.codex_reasoning_effort),
+        ('model_reasoning_summary', settings.codex_reasoning_summary),
+        ('web_search', settings.codex_web_search),
+    ]
+    overrides.append(('features.image_generation', settings.codex_image_generation == 'enabled'))
+    cmd: list[str] = []
+    for key, value in overrides:
+        if value is not None:
+            cmd.extend(['-c', f'{key}={_format_codex_config_value(value)}'])
+    return cmd
+
+
+def _format_codex_config_value(value: str | bool) -> str:
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return f'"{value}"'
+
+
+class _AgentStreamPublisher:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        step_index: int,
+        callback: AgentStreamCallback | None,
+        batch_size: int = STREAM_BATCH_SIZE,
+        batch_interval_sec: float = STREAM_BATCH_INTERVAL_SEC,
+    ) -> None:
+        self._session_id = session_id
+        self._step_index = step_index
+        self._callback = callback
+        self._batch_size = batch_size
+        self._batch_interval_sec = batch_interval_sec
+        self._lock = asyncio.Lock()
+        self._sequence = 0
+        self._pending_source: str | None = None
+        self._pending_stream: str | None = None
+        self._pending_items: list[dict[str, Any]] = []
+        self._pending_message: str | None = None
+        self._flush_task: asyncio.Task[None] | None = None
+
+    async def publish(self, *, source: str, stream: str, item: dict[str, Any], message: str | None = None) -> None:
+        if self._callback is None:
+            async with self._lock:
+                self._sequence += 1
+                payload = {
+                    'step': self._step_index,
+                    'source': source,
+                    'stream': stream,
+                    'sequence': self._sequence,
+                    'items': [item],
+                    'message': message or _stream_item_message(item),
+                }
+            self._log_payload(payload)
+            return
+
+        payloads_to_send: list[dict[str, Any]] = []
+        async with self._lock:
+            if self._pending_items and (self._pending_source != source or self._pending_stream != stream):
+                payloads_to_send.append(self._build_pending_payload_locked())
+                self._clear_pending_locked(cancel_timer=True)
+
+            if not self._pending_items:
+                self._pending_source = source
+                self._pending_stream = stream
+                self._schedule_flush_locked()
+
+            self._pending_items.append(item)
+            self._pending_message = message or _stream_item_message(item)
+            if len(self._pending_items) >= self._batch_size:
+                payloads_to_send.append(self._build_pending_payload_locked())
+                self._clear_pending_locked(cancel_timer=True)
+
+        for payload in payloads_to_send:
+            await self._send_payload(payload)
+
+    async def aclose(self) -> None:
+        payload: dict[str, Any] | None = None
+        async with self._lock:
+            if self._pending_items:
+                payload = self._build_pending_payload_locked()
+            self._clear_pending_locked(cancel_timer=True)
+        if payload is not None:
+            await self._send_payload(payload)
+
+    def _build_pending_payload_locked(self) -> dict[str, Any]:
+        self._sequence += 1
+        return {
+            'step': self._step_index,
+            'source': self._pending_source or 'unknown',
+            'stream': self._pending_stream or 'unknown',
+            'sequence': self._sequence,
+            'items': list(self._pending_items),
+            'message': self._pending_message or f'{self._pending_source}/{self._pending_stream}',
+        }
+
+    def _clear_pending_locked(self, *, cancel_timer: bool) -> None:
+        self._pending_source = None
+        self._pending_stream = None
+        self._pending_items = []
+        self._pending_message = None
+        if cancel_timer and self._flush_task is not None:
+            self._flush_task.cancel()
+            self._flush_task = None
+
+    def _schedule_flush_locked(self) -> None:
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_later())
+
+    async def _flush_later(self) -> None:
+        try:
+            await asyncio.sleep(self._batch_interval_sec)
+            await self._flush_pending()
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_pending(self) -> None:
+        payload: dict[str, Any] | None = None
+        async with self._lock:
+            if self._pending_items:
+                payload = self._build_pending_payload_locked()
+            self._clear_pending_locked(cancel_timer=False)
+            self._flush_task = None
+        if payload is not None:
+            await self._send_payload(payload)
+
+    async def _send_payload(self, payload: dict[str, Any]) -> None:
+        self._log_payload(payload)
+        if self._callback is not None:
+            try:
+                await self._callback(payload)
+            except Exception as exc:  # noqa: BLE001 - stream callback не должен ломать шаг
+                logger.warning(
+                    'agent_stream_callback_failed session_id=%s step=%s source=%s stream=%s error=%s',
+                    self._session_id,
+                    payload.get('step'),
+                    payload.get('source'),
+                    payload.get('stream'),
+                    _tail_text(str(exc), limit=500),
+                )
+
+    def _log_payload(self, payload: dict[str, Any]) -> None:
+        logger.info(
+            'agent_stream_event session_id=%s step=%s source=%s stream=%s sequence=%s items=%s',
+            self._session_id,
+            payload.get('step'),
+            payload.get('source'),
+            payload.get('stream'),
+            payload.get('sequence'),
+            json.dumps(payload.get('items', []), ensure_ascii=False, default=str),
+        )
+
+
+async def _collect_process_streams(
+    process: Any,
+    *,
+    publisher: _AgentStreamPublisher,
+    browser_actions_log_path: Path,
+    browser_actions_offset: int,
+) -> tuple[str, str]:
+    if getattr(process, 'stdout', None) is None or getattr(process, 'stderr', None) is None or not hasattr(process, 'wait'):
+        stdout, stderr = await process.communicate()
+        await publisher.aclose()
+        return stdout.decode('utf-8', errors='ignore'), stderr.decode('utf-8', errors='ignore')
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stop_browser_tail = asyncio.Event()
+    tasks = [
+        asyncio.create_task(_read_process_stream(process.stdout, source='codex', stream='stdout', chunks=stdout_chunks, publisher=publisher)),
+        asyncio.create_task(_read_process_stream(process.stderr, source='codex', stream='stderr', chunks=stderr_chunks, publisher=publisher)),
+        asyncio.create_task(
+            _tail_browser_actions(
+                browser_actions_log_path,
+                initial_offset=browser_actions_offset,
+                publisher=publisher,
+                stop_event=stop_browser_tail,
+            )
+        ),
+    ]
+    try:
+        await process.wait()
+        stop_browser_tail.set()
+        await asyncio.gather(*tasks)
+        await publisher.aclose()
+        return ''.join(stdout_chunks), ''.join(stderr_chunks)
+    except Exception:
+        stop_browser_tail.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await publisher.aclose()
+        raise
+
+
+async def _communicate_quietly(process: Any) -> None:
+    try:
+        if hasattr(process, 'communicate'):
+            await process.communicate()
+        elif hasattr(process, 'wait'):
+            await process.wait()
+    except Exception:  # noqa: BLE001 - cleanup best-effort after timeout
+        return
+
+
+async def _read_process_stream(
+    reader: Any,
+    *,
+    source: str,
+    stream: str,
+    chunks: list[str],
+    publisher: _AgentStreamPublisher,
+) -> None:
+    while True:
+        raw = await reader.readline()
+        if not raw:
+            return
+        text = raw.decode('utf-8', errors='ignore')
+        chunks.append(text)
+        for payload_stream, item, message in _normalize_process_stream_line(stream=stream, text=text):
+            await publisher.publish(source=source, stream=payload_stream, item=item, message=message)
+
+
+def _normalize_process_stream_line(*, stream: str, text: str) -> list[tuple[str, dict[str, Any], str]]:
+    line = text.rstrip('\r\n')
+    if not line:
+        return []
+    if stream == 'stdout':
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            return [('stdout', {'line': _tail_text(line, limit=2000)}, _tail_text(line, limit=140))]
+        if isinstance(parsed, dict):
+            return [('codex_json', parsed, _stream_item_message(parsed))]
+        return [('stdout', {'value': parsed}, _tail_text(str(parsed), limit=140))]
+    return [('stderr', {'line': _tail_text(line, limit=2000)}, _tail_text(line, limit=140))]
+
+
+async def _tail_browser_actions(
+    path: Path,
+    *,
+    initial_offset: int,
+    publisher: _AgentStreamPublisher,
+    stop_event: asyncio.Event,
+) -> None:
+    offset = initial_offset
+    while True:
+        offset, records = _read_new_jsonl_records(path, offset=offset)
+        for record in records:
+            await publisher.publish(
+                source='browser',
+                stream='browser_actions',
+                item=record,
+                message=_stream_item_message(record),
+            )
+        if stop_event.is_set():
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.2)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _read_new_jsonl_records(path: Path, *, offset: int) -> tuple[int, list[dict[str, Any]]]:
+    try:
+        with path.open('rb') as fh:
+            fh.seek(offset)
+            data = fh.read()
+    except OSError:
+        return offset, []
+    if not data:
+        return offset, []
+
+    last_newline_index = data.rfind(b'\n')
+    if last_newline_index < 0:
+        return offset, []
+
+    complete_data = data[: last_newline_index + 1]
+    new_offset = offset + last_newline_index + 1
+
+    records: list[dict[str, Any]] = []
+    for raw_line in complete_data.decode('utf-8', errors='ignore').splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            records.append({'event': 'json_parse_error', 'line_tail': _tail_text(raw_line, limit=500)})
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+        else:
+            records.append({'event': 'json_non_object', 'value': parsed})
+    return new_offset, records
+
+
+def _stream_item_message(item: dict[str, Any]) -> str:
+    for key in ('message', 'event', 'type', 'command'):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return _tail_text(value.strip(), limit=160)
+    return 'stream event'
 
 
 def _browser_actions_have_mutating_commands(path: Path) -> bool:

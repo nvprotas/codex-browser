@@ -213,7 +213,7 @@ textarea,
 }
 
 .telemetry-grid {
-  grid-template-columns: minmax(360px, 0.9fr) minmax(520px, 1.1fr);
+  grid-template-columns: minmax(320px, 0.8fr) minmax(360px, 1fr) minmax(520px, 1.2fr);
 }
 
 .stack {
@@ -425,7 +425,8 @@ input[readonly] {
 }
 
 .sessions-list,
-.events-list {
+.events-list,
+.stream-list {
   display: grid;
   gap: 10px;
   max-height: 520px;
@@ -435,7 +436,8 @@ input[readonly] {
 }
 
 .session-item,
-.event-item {
+.event-item,
+.stream-item {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -466,7 +468,8 @@ input[readonly] {
 }
 
 .session-top,
-.event-top {
+.event-top,
+.stream-top {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -475,7 +478,8 @@ input[readonly] {
 }
 
 .session-top .code,
-.event-top strong {
+.event-top strong,
+.stream-top strong {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -488,7 +492,8 @@ input[readonly] {
 }
 
 .session-meta,
-.event-meta {
+.event-meta,
+.stream-meta {
   color: var(--muted);
   font-size: 0.78rem;
 }
@@ -551,14 +556,16 @@ input[readonly] {
   border-color: rgba(88, 104, 122, 0.18);
 }
 
-.event-item {
+.event-item,
+.stream-item {
   position: relative;
   display: grid;
   gap: 8px;
   padding-left: 16px;
 }
 
-.event-item::before {
+.event-item::before,
+.stream-item::before {
   content: '';
   position: absolute;
   top: 17px;
@@ -566,14 +573,23 @@ input[readonly] {
   width: 4px;
   height: calc(100% - 34px);
   border-radius: var(--radius-pill);
+}
+
+.event-item::before {
   background: rgba(255, 107, 45, 0.58);
 }
 
-.event-top strong {
+.stream-item::before {
+  background: rgba(22, 103, 168, 0.58);
+}
+
+.event-top strong,
+.stream-top strong {
   font-size: 0.94rem;
 }
 
-.event-item pre {
+.event-item pre,
+.stream-item pre {
   max-width: 100%;
   max-height: 300px;
   margin: 0;

@@ -12,6 +12,7 @@ class CallbackStore:
         self._events_by_session: dict[str, list[EventEnvelope]] = {}
         self._seen_event_ids: set[str] = set()
         self._seen_idempotency_keys: set[str] = set()
+        self._subscribers_by_session: dict[str, set[asyncio.Queue[EventEnvelope]]] = {}
 
     async def add(self, envelope: EventEnvelope) -> bool:
         async with self._lock:
@@ -22,7 +23,23 @@ class CallbackStore:
             self._seen_idempotency_keys.add(envelope.idempotency_key)
             bucket = self._events_by_session.setdefault(envelope.session_id, [])
             bucket.append(envelope)
+            self._publish_locked(envelope)
             return True
+
+    async def subscribe(self, session_id: str) -> asyncio.Queue[EventEnvelope]:
+        queue: asyncio.Queue[EventEnvelope] = asyncio.Queue(maxsize=200)
+        async with self._lock:
+            self._subscribers_by_session.setdefault(session_id, set()).add(queue)
+        return queue
+
+    async def unsubscribe(self, session_id: str, queue: asyncio.Queue[EventEnvelope]) -> None:
+        async with self._lock:
+            subscribers = self._subscribers_by_session.get(session_id)
+            if subscribers is None:
+                return
+            subscribers.discard(queue)
+            if not subscribers:
+                self._subscribers_by_session.pop(session_id, None)
 
     async def list_events(self, session_id: str | None = None) -> list[EventEnvelope]:
         async with self._lock:
@@ -77,7 +94,27 @@ class CallbackStore:
             summaries.sort(key=lambda item: item.updated_at, reverse=True)
             return summaries
 
+    def _publish_locked(self, envelope: EventEnvelope) -> None:
+        subscribers = self._subscribers_by_session.get(envelope.session_id, set())
+        for queue in list(subscribers):
+            _offer(queue, envelope)
 
+
+def _offer(queue: asyncio.Queue[EventEnvelope], envelope: EventEnvelope) -> None:
+    try:
+        queue.put_nowait(envelope)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+    try:
+        queue.put_nowait(envelope)
+    except asyncio.QueueFull:
+        pass
 
 def _extract_message(event: EventEnvelope) -> str | None:
     value = event.payload.get('message')

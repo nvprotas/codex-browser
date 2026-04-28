@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -55,6 +56,34 @@ async def callbacks(envelope: EventEnvelope) -> CallbackAck:
 @app.get('/api/events', response_model=list[EventEnvelope])
 async def api_events(session_id: str | None = None) -> list[EventEnvelope]:
     return await store.list_events(session_id=session_id)
+
+
+@app.get('/api/events/stream')
+async def api_events_stream(request: Request, session_id: str) -> StreamingResponse:
+    queue = await store.subscribe(session_id)
+
+    async def event_source():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    envelope = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ': keepalive\n\n'
+                    continue
+                yield f'data: {envelope.model_dump_json()}\n\n'
+        finally:
+            await store.unsubscribe(session_id, queue)
+
+    return StreamingResponse(
+        event_source(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
 
 @app.get('/api/sessions', response_model=list[SessionSummary])
