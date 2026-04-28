@@ -18,6 +18,13 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding='utf-8')
 
 
+def _css_block(css: str, selector: str) -> str:
+    start = css.index(selector)
+    block_start = css.index('{', start)
+    block_end = css.index('}', block_start)
+    return css[block_start + 1:block_end]
+
+
 def _ask_event() -> EventEnvelope:
     return EventEnvelope(
         event_id='evt-ask',
@@ -78,6 +85,24 @@ class MicroUiDesignHandoffStaticTests(unittest.TestCase):
         self.assertIn('function shortId', js)
         self.assertIn('replyStateBadgeNode.hidden', js)
         self.assertIn('STREAM EVENTS', js)
+
+    def test_callback_and_stream_items_expand_without_inner_scroll(self) -> None:
+        css = _read('app/static/app.css')
+        js = _read('app/static/app.js')
+
+        list_block = _css_block(css, '.events-list,\n.stream-list')
+        json_view_block = _css_block(css, '.json-view')
+        json_content_block = _css_block(css, '.json-view-content')
+
+        self.assertNotIn('max-height', list_block)
+        self.assertNotIn('overflow: auto', list_block)
+        self.assertIn('overflow: visible', json_view_block)
+        self.assertIn('white-space: pre-wrap', json_content_block)
+        self.assertIn('overflow-wrap: anywhere', json_content_block)
+        self.assertNotIn('.event-item pre,\n.stream-item pre {\n  max-width: 100%;\n  max-height: 300px;', css)
+        self.assertNotIn('pre.style.maxHeight', js)
+        self.assertIn('createJsonView(event.payload || {})', js)
+        self.assertIn('createJsonView(payload.items || [])', js)
 
 
 class CallbackStoreAskUserSummaryTests(unittest.IsolatedAsyncioTestCase):

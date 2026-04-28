@@ -339,7 +339,7 @@ function setupJsonEditors() {
   });
 }
 
-function createJsonView(value, maxHeight = 300) {
+function createJsonView(value) {
   let text = '';
   if (typeof value === 'string') {
     text = value;
@@ -352,7 +352,6 @@ function createJsonView(value, maxHeight = 300) {
   }
 
   const pre = node('pre', 'json-view');
-  pre.style.maxHeight = `${maxHeight}px`;
   const codeNode = node('code');
   const lines = splitTokensByLine(tokenizeJson(text));
 
@@ -488,7 +487,7 @@ function createEventItem(event) {
   const eventId = node('div', 'event-meta');
   eventId.append('event_id: ', node('span', 'code', event.event_id || '-'));
 
-  item.append(top, eventId, createJsonView(event.payload || {}, 300));
+  item.append(top, eventId, createJsonView(event.payload || {}));
   return item;
 }
 
@@ -525,7 +524,7 @@ function createStreamItem(event) {
     node('span', 'code', fmtDate(event.occurred_at)),
   );
 
-  item.append(top, metaNode, createJsonView(payload.items || [], 260));
+  item.append(top, metaNode, createJsonView(payload.items || []));
   return item;
 }
 
