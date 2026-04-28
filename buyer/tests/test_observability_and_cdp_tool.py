@@ -122,6 +122,29 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('profile_updates', prompt)
         self.assertIn('только новые факты', prompt)
 
+    def test_prompt_requires_sberpay_not_sbp_or_fps(self) -> None:
+        prompt = build_agent_prompt(
+            task='Открой litres. Ищи книгу одиссея гомера',
+            start_url='https://www.litres.ru/',
+            browser_cdp_endpoint='http://browser:9223',
+            cdp_preflight_summary='OK',
+            metadata={},
+            auth_payload=None,
+            auth_context=None,
+            user_profile_text=None,
+            user_profile_truncated=False,
+            memory=[],
+            latest_user_reply=None,
+        )
+
+        self.assertIn('SberPay', prompt)
+        self.assertIn('не СБП', prompt)
+        self.assertIn('Система быстрых платежей', prompt)
+        self.assertIn('SBP', prompt)
+        self.assertIn('FPS', prompt)
+        self.assertIn('order_id', prompt)
+        self.assertIn('странице SberPay', prompt)
+
 
 class BrowserActionMetricsTests(unittest.TestCase):
     def test_trace_metrics_are_built_from_jsonl(self) -> None:
@@ -351,16 +374,28 @@ class LitresPurchaseScriptSmokeTests(unittest.TestCase):
             (
                 "import { cartRowsMatchQuery, extractLitresQuery, isSberPaymentUrl, parseOrderId } from './purchase/litres.ts';"
                 "const query = extractLitresQuery('Открой litres и дойди до шага оплаты. Ищи книгу одиссея гомера');"
-                "const order = parseOrderId('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sbp');"
-                "const sber = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sbp&system=sbersbp');"
+                "const order = parseOrderId('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay');"
+                "const sberpay = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay&system=sberpay');"
+                "const sbp = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sbp&system=sbersbp');"
+                "const fps = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=fps');"
                 "const cart = cartRowsMatchQuery('одиссея гомера', ['Одиссея Гомер']);"
-                "console.log(JSON.stringify({ query, order, sber, cart }));"
+                "console.log(JSON.stringify({ query, order, sberpay, sbp, fps, cart }));"
             ),
         ]
         completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
 
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload, {'query': 'одиссея гомера', 'order': '1585051118', 'sber': True, 'cart': True})
+        self.assertEqual(
+            payload,
+            {
+                'query': 'одиссея гомера',
+                'order': '1585051118',
+                'sberpay': True,
+                'sbp': False,
+                'fps': False,
+                'cart': True,
+            },
+        )
 
 
 class LitresAuthScriptSmokeTests(unittest.TestCase):
