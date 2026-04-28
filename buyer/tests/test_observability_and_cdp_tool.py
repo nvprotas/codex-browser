@@ -247,6 +247,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
         )
 
         self.assertEqual(cmd[:2], ['codex', 'exec'])
+        self.assertIn('--json', cmd)
         self.assertIn('-c', cmd)
         self.assertIn('model_reasoning_effort="minimal"', cmd)
         self.assertIn('model_reasoning_summary="none"', cmd)

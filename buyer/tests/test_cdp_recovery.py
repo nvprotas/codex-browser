@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
@@ -28,6 +29,38 @@ class _FakeProcess:
 
     def kill(self) -> None:
         return
+
+
+class _FakeLineReader:
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = list(lines)
+
+    async def readline(self) -> bytes:
+        if not self._lines:
+            return b''
+        await asyncio.sleep(0)
+        return self._lines.pop(0)
+
+
+class _StreamingFakeProcess:
+    def __init__(self, *, returncode: int, stdout_lines: list[bytes], stderr_lines: list[bytes]) -> None:
+        self.returncode = returncode
+        self.stdout = _FakeLineReader(stdout_lines)
+        self.stderr = _FakeLineReader(stderr_lines)
+
+    async def wait(self) -> int:
+        await asyncio.sleep(0)
+        return self.returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        stdout = b''.join(self.stdout._lines)
+        stderr = b''.join(self.stderr._lines)
+        self.stdout._lines.clear()
+        self.stderr._lines.clear()
+        return stdout, stderr
+
+    def kill(self) -> None:
+        self.returncode = -9
 
 
 class _SequenceRunner:
@@ -60,6 +93,15 @@ class _RecordingCallbackClient:
     async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
         _ = callback_url
         self.delivered.append(envelope)
+
+
+class _FailingStreamCallbackClient(_RecordingCallbackClient):
+    async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
+        if envelope.event_type == 'agent_stream_event':
+            from buyer.app.callback import CallbackDeliveryError
+
+            raise CallbackDeliveryError('stream receiver unavailable')
+        await super().deliver(callback_url, envelope)
 
 
 class _NoopAuthScriptRunner:
@@ -250,6 +292,72 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace['codex_tokens_used'], 123)
         self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
 
+    async def test_run_step_streams_codex_stdout_json_and_browser_actions(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-test',
+                buyer_model_strategy='single',
+            )
+            runner = AgentRunner(settings)
+            stream_events: list[dict[str, Any]] = []
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _StreamingFakeProcess:
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                output_path.write_text(
+                    json.dumps({'status': 'completed', 'message': 'ok', 'order_id': None, 'artifacts': {}}),
+                    encoding='utf-8',
+                )
+                actions_path = Path(kwargs['env']['BUYER_CDP_ACTIONS_LOG_PATH'])
+                actions_path.write_text(
+                    json.dumps(
+                        {
+                            'event': 'browser_command_finished',
+                            'command': 'goto',
+                            'ok': True,
+                            'duration_ms': 10,
+                        }
+                    )
+                    + '\n',
+                    encoding='utf-8',
+                )
+                return _StreamingFakeProcess(
+                    returncode=0,
+                    stdout_lines=[json.dumps({'type': 'agent_message', 'message': 'Ищу товар'}).encode() + b'\n'],
+                    stderr_lines=[b'progress line\n'],
+                )
+
+            async def stream_callback(payload: dict[str, Any]) -> None:
+                stream_events.append(payload)
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                result = await runner.run_step(
+                    session_id='session-stream',
+                    step_index=1,
+                    task='test-task',
+                    start_url='https://example.com',
+                    metadata={},
+                    auth=None,
+                    auth_context=None,
+                    memory=[],
+                    latest_user_reply=None,
+                    stream_callback=stream_callback,
+                )
+
+        self.assertEqual(result.status, 'completed')
+        self.assertTrue(any(item['source'] == 'codex' and item['stream'] == 'codex_json' for item in stream_events))
+        self.assertTrue(any(item['source'] == 'codex' and item['stream'] == 'stderr' for item in stream_events))
+        self.assertTrue(any(item['source'] == 'browser' and item['stream'] == 'browser_actions' for item in stream_events))
+        self.assertTrue(all(isinstance(item.get('items'), list) and item['items'] for item in stream_events))
+
     async def test_run_step_fast_then_strong_retries_clean_failed_attempt(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = Settings(
@@ -308,6 +416,46 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         trace = result.artifacts['trace']
         self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
         self.assertEqual(trace['codex_tokens_used'], 30)
+
+    async def test_stream_event_delivery_failure_is_best_effort_and_saved(self) -> None:
+        callback_client = _FailingStreamCallbackClient()
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,
+            runner=_SequenceRunner([]),
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=0,
+            auth_script_runner=_NoopAuthScriptRunner(),
+        )
+        state = await store.create_session(
+            task='test',
+            start_url='https://example.com',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+
+        await service._emit_stream_event_best_effort(
+            state,
+            {
+                'step': 1,
+                'source': 'codex',
+                'stream': 'codex_json',
+                'sequence': 1,
+                'items': [{'type': 'agent_message'}],
+                'message': 'agent_message',
+            },
+        )
+
+        refreshed = await store.get(state.session_id)
+        self.assertEqual([event.event_type for event in refreshed.events], ['agent_stream_event'])
+        self.assertEqual(refreshed.events[0].payload['source'], 'codex')
 
     async def test_transient_failure_does_not_finish_session_immediately(self) -> None:
         callback_client = _RecordingCallbackClient()

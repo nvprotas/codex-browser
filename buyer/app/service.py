@@ -173,6 +173,10 @@ class BuyerService:
                     auth_context=auth_summary,
                     memory=memory,
                     latest_user_reply=latest_user_reply,
+                    stream_callback=lambda payload, current_state=state: self._emit_stream_event_best_effort(
+                        current_state,
+                        payload,
+                    ),
                 )
                 await self._emit_event(
                     state,
@@ -707,6 +711,38 @@ class BuyerService:
             raise
         await self._store.mark_event_delivery(envelope.event_id, 'delivered')
         return envelope
+
+    async def _emit_stream_event_best_effort(self, state: SessionState, payload: dict[str, Any]) -> None:
+        safe_payload = dict(payload)
+        envelope = self._callback_client.build_envelope(
+            session_id=state.session_id,
+            event_type='agent_stream_event',
+            payload=safe_payload,
+            idempotency_suffix=(
+                f"stream-{safe_payload.get('step', 'unknown')}-"
+                f"{safe_payload.get('source', 'unknown')}-"
+                f"{safe_payload.get('stream', 'unknown')}-"
+                f"{safe_payload.get('sequence', uuid4())}"
+            ),
+        )
+        try:
+            await self._store.append_event(state.session_id, envelope)
+            await self._callback_client.deliver(state.callback_url, envelope)
+        except Exception as exc:  # noqa: BLE001 - stream не должен валить покупку
+            try:
+                await self._store.mark_event_delivery(envelope.event_id, 'failed', str(exc))
+            except Exception:  # noqa: BLE001 - best-effort диагностика
+                pass
+            logger.warning(
+                'agent_stream_delivery_failed session_id=%s step=%s source=%s stream=%s error=%s',
+                state.session_id,
+                safe_payload.get('step'),
+                safe_payload.get('source'),
+                safe_payload.get('stream'),
+                _tail_text(str(exc), limit=500),
+            )
+            return
+        await self._store.mark_event_delivery(envelope.event_id, 'delivered')
 
 
 TRANSIENT_CDP_MARKERS = (

@@ -183,8 +183,10 @@ Post-session анализ не отправляет дополнительный
 Чтобы смотреть это в реальном времени в логах контейнера:
 
 ```bash
-docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_ready"
+docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
+
+`micro-ui` также показывает live-поток `agent_stream_event` через SSE `/api/events/stream?session_id=...`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`.
 
 ## Контракт callback (MVP)
 
@@ -203,6 +205,7 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|session_|payment_r
 
 - `session_started`
 - `agent_step_started`
+- `agent_stream_event`
 - `agent_step_finished`
 - `ask_user`
 - `handoff_requested`

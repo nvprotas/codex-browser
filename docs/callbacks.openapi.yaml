@@ -126,6 +126,7 @@ components:
       enum:
         - session_started
         - agent_step_started
+        - agent_stream_event
         - agent_step_finished
         - ask_user
         - handoff_requested
@@ -170,6 +171,7 @@ components:
       anyOf:
         - $ref: '#/components/schemas/SessionStartedPayload'
         - $ref: '#/components/schemas/AgentStepStartedPayload'
+        - $ref: '#/components/schemas/AgentStreamEventPayload'
         - $ref: '#/components/schemas/AgentStepFinishedPayload'
         - $ref: '#/components/schemas/AskUserPayload'
         - $ref: '#/components/schemas/HandoffRequestedPayload'
@@ -202,6 +204,45 @@ components:
         step:
           type: integer
           minimum: 1
+        message:
+          type: string
+      additionalProperties:
+        $ref: '#/components/schemas/JsonValue'
+
+    AgentStreamEventPayload:
+      type: object
+      description: Батч live-событий, опубликованных во время выполнения агентного шага.
+      required:
+        - step
+        - source
+        - stream
+        - sequence
+        - items
+        - message
+      properties:
+        step:
+          type: integer
+          minimum: 1
+        source:
+          type: string
+          enum:
+            - codex
+            - browser
+        stream:
+          type: string
+          enum:
+            - stdout
+            - stderr
+            - codex_json
+            - browser_actions
+        sequence:
+          type: integer
+          minimum: 1
+          description: Монотонный номер stream-батча внутри шага.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JsonObject'
         message:
           type: string
       additionalProperties:
