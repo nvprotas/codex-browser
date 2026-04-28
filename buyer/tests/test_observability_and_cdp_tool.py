@@ -14,6 +14,7 @@ from buyer.app.runner import (
     _build_codex_command,
     _build_model_attempt_specs,
     _extract_codex_tokens_used,
+    _read_new_jsonl_records,
 )
 from buyer.app.settings import Settings
 from buyer.tools.cdp_tool import (
@@ -195,6 +196,29 @@ class BrowserActionMetricsTests(unittest.TestCase):
         self.assertEqual(metrics['command_duration_ms'], 1500)
         self.assertEqual(metrics['browser_busy_union_ms'], 900)
         self.assertEqual(metrics['inter_command_idle_ms'], 0)
+
+    def test_new_jsonl_reader_keeps_partial_line_for_next_read(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'actions.jsonl'
+            path.write_text(
+                json.dumps({'event': 'browser_command_started', 'command': 'goto'})
+                + '\n'
+                + '{"event":"browser_command_finished"',
+                encoding='utf-8',
+            )
+
+            offset, records = _read_new_jsonl_records(path, offset=0)
+
+            self.assertEqual(records, [{'event': 'browser_command_started', 'command': 'goto'}])
+            self.assertEqual(offset, path.read_text(encoding='utf-8').index('{"event":"browser_command_finished"'))
+
+            with path.open('a', encoding='utf-8') as fh:
+                fh.write(',"command":"goto","ok":true}\n')
+
+            next_offset, next_records = _read_new_jsonl_records(path, offset=offset)
+
+            self.assertGreater(next_offset, offset)
+            self.assertEqual(next_records, [{'event': 'browser_command_finished', 'command': 'goto', 'ok': True}])
 
     def test_model_attempts_default_to_single_legacy_model(self) -> None:
         attempts = _build_model_attempt_specs(Settings(codex_model='gpt-5.4', buyer_model_strategy='single'))

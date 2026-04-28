@@ -1182,14 +1182,20 @@ def _read_new_jsonl_records(path: Path, *, offset: int) -> tuple[int, list[dict[
         with path.open('rb') as fh:
             fh.seek(offset)
             data = fh.read()
-            new_offset = fh.tell()
     except OSError:
         return offset, []
     if not data:
-        return new_offset, []
+        return offset, []
+
+    last_newline_index = data.rfind(b'\n')
+    if last_newline_index < 0:
+        return offset, []
+
+    complete_data = data[: last_newline_index + 1]
+    new_offset = offset + last_newline_index + 1
 
     records: list[dict[str, Any]] = []
-    for raw_line in data.decode('utf-8', errors='ignore').splitlines():
+    for raw_line in complete_data.decode('utf-8', errors='ignore').splitlines():
         if not raw_line.strip():
             continue
         try:
