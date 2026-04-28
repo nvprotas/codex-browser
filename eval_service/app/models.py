@@ -50,6 +50,12 @@ class CallbackEventType(StrEnum):
     SCENARIO_FINISHED = 'scenario_finished'
     STATUS_UPDATE = 'status_update'
     ERROR = 'error'
+    SESSION_STARTED = 'session_started'
+    AGENT_STEP_STARTED = 'agent_step_started'
+    AGENT_STEP_FINISHED = 'agent_step_finished'
+    AGENT_STREAM_EVENT = 'agent_stream_event'
+    HANDOFF_REQUESTED = 'handoff_requested'
+    HANDOFF_RESUMED = 'handoff_resumed'
 
 
 class EvaluationStatus(StrEnum):

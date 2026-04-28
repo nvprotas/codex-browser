@@ -13,6 +13,7 @@ from eval_service.app.models import (
     CallbackEventType,
     CaseRunState,
     EvalRunCase,
+    EvalRunStatus,
     StrictBaseModel,
 )
 from eval_service.app.orchestrator import get_run_orchestrator
@@ -48,15 +49,18 @@ async def receive_buyer_callback(
     envelope: BuyerCallbackEnvelope,
     request: Request,
 ) -> CallbackAcceptedResponse:
-    eval_run_id, eval_case_id = _require_eval_ids(envelope)
     store = _get_run_store(request)
+    eval_run_id, eval_case_id = _resolve_eval_ids(envelope, store)
 
     try:
+        manifest = store.read_manifest(eval_run_id)
+        case = _find_case(manifest.cases, eval_case_id)
+        envelope = envelope.model_copy(update={'eval_run_id': eval_run_id, 'eval_case_id': eval_case_id})
         manifest = store.append_callback_event(
             eval_run_id,
             eval_case_id,
             envelope,
-            **_state_updates_for_callback(envelope),
+            **_state_updates_for_callback(envelope, case),
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -106,7 +110,13 @@ async def send_operator_reply(
         )
 
     session_id = _require_case_value(case.session_id, 'session_id')
-    reply_id = reply.reply_id or _require_case_value(case.waiting_reply_id, 'reply_id')
+    current_reply_id = _require_case_value(case.waiting_reply_id, 'reply_id')
+    if reply.reply_id is not None and reply.reply_id != current_reply_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='reply_id не совпадает с активным ожиданием оператора',
+        )
+    reply_id = reply.reply_id or current_reply_id
     buyer_response = await _get_buyer_client(request).send_reply(
         session_id=session_id,
         reply_id=reply_id,
@@ -137,6 +147,7 @@ async def send_operator_reply(
 
 
 async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval_case_id: str) -> None:
+    store = _get_run_store(request)
     resume_coro: Coroutine[Any, Any, Any] = get_run_orchestrator(request).resume_after_operator_reply(
         eval_run_id=eval_run_id,
         eval_case_id=eval_case_id,
@@ -144,7 +155,11 @@ async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval
     )
     scheduler = getattr(request.app.state, 'orchestrator_resume_scheduler', None)
     if scheduler is not None:
-        await scheduler(resume_coro)
+        try:
+            await scheduler(resume_coro)
+        except Exception as exc:
+            resume_coro.close()
+            _mark_resume_failure(store, eval_run_id, exc)
         return
 
     tasks = getattr(request.app.state, 'orchestrator_resume_tasks', None)
@@ -153,10 +168,12 @@ async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval
         request.app.state.orchestrator_resume_tasks = tasks
     task = asyncio.create_task(resume_coro)
     tasks.add(task)
-    task.add_done_callback(tasks.discard)
+    task.add_done_callback(lambda done_task: _finalize_resume_task(done_task, tasks, store, eval_run_id))
 
 
-def _state_updates_for_callback(envelope: BuyerCallbackEnvelope) -> dict[str, Any]:
+def _state_updates_for_callback(envelope: BuyerCallbackEnvelope, case: EvalRunCase) -> dict[str, Any]:
+    if _is_terminal_case_state(case.state):
+        return {'session_id': case.session_id}
     if envelope.event_type == CallbackEventType.ASK_USER:
         return {
             'state': CaseRunState.WAITING_USER,
@@ -176,6 +193,25 @@ def _state_updates_for_callback(envelope: BuyerCallbackEnvelope) -> dict[str, An
     return {}
 
 
+def _finalize_resume_task(
+    task: asyncio.Task[Any],
+    tasks: set[asyncio.Task[Any]],
+    store: RunStore,
+    eval_run_id: str,
+) -> None:
+    tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        _mark_resume_failure(store, eval_run_id, exc)
+
+
+def _mark_resume_failure(store: RunStore, eval_run_id: str, _exc: Exception) -> None:
+    store.update_run_status(eval_run_id, EvalRunStatus.FAILED)
+
+
 def _get_run_store(request: Request) -> RunStore:
     store = getattr(request.app.state, 'run_store', None)
     if store is None:
@@ -192,13 +228,20 @@ def _get_buyer_client(request: Request) -> BuyerClient:
     return client
 
 
-def _require_eval_ids(envelope: BuyerCallbackEnvelope) -> tuple[str, str]:
-    if not envelope.eval_run_id or not envelope.eval_case_id:
+def _resolve_eval_ids(envelope: BuyerCallbackEnvelope, store: RunStore) -> tuple[str, str]:
+    if envelope.eval_run_id and envelope.eval_case_id:
+        return envelope.eval_run_id, envelope.eval_case_id
+
+    try:
+        resolved = store.find_case_by_session_id(envelope.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if resolved is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail='callback должен содержать eval_run_id и eval_case_id',
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'callback session_id не найден в eval manifests: {envelope.session_id}',
         )
-    return envelope.eval_run_id, envelope.eval_case_id
+    return resolved
 
 
 def _payload_string(envelope: BuyerCallbackEnvelope, key: str) -> str:
@@ -218,6 +261,16 @@ def _require_case_value(value: str | None, name: str) -> str:
             detail=f'case не содержит активный {name}',
         )
     return value
+
+
+def _is_terminal_case_state(state: CaseRunState) -> bool:
+    return state in {
+        CaseRunState.SKIPPED_AUTH_MISSING,
+        CaseRunState.FINISHED,
+        CaseRunState.TIMEOUT,
+        CaseRunState.JUDGED,
+        CaseRunState.JUDGE_FAILED,
+    }
 
 
 def _find_case(cases: list[EvalRunCase], eval_case_id: str) -> EvalRunCase:

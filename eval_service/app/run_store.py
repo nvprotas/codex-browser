@@ -60,6 +60,29 @@ class RunStore:
         _write_json_atomic(path, manifest.model_dump(mode='json'))
         return path
 
+    def update_run_status(self, eval_run_id: str, status: EvalRunStatus) -> EvalRunManifest:
+        manifest = self.read_manifest(eval_run_id)
+        updated = _replace_manifest_fields(manifest, status=status, updated_at=self._now())
+        self.write_manifest(updated)
+        return updated
+
+    def find_case_by_session_id(self, session_id: str) -> tuple[str, str] | None:
+        matches: list[tuple[str, str]] = []
+        if not self.runs_dir.exists():
+            return None
+
+        for manifest_path in sorted(self.runs_dir.glob('*/manifest.json')):
+            manifest = EvalRunManifest.model_validate_json(manifest_path.read_text(encoding='utf-8'))
+            for case in manifest.cases:
+                if case.session_id == session_id:
+                    matches.append((manifest.eval_run_id, case.eval_case_id))
+
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(f'session_id неоднозначен в eval manifests: {session_id}')
+        return matches[0]
+
     def update_case(
         self,
         eval_run_id: str,
