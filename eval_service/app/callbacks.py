@@ -14,6 +14,7 @@ from eval_service.app.models import (
     CallbackEventType,
     CaseRunState,
     EvalRunCase,
+    EvalRunManifest,
     EvalRunStatus,
     StrictBaseModel,
 )
@@ -118,25 +119,43 @@ async def send_operator_reply(
             detail='reply_id не совпадает с активным ожиданием оператора',
         )
     reply_id = reply.reply_id or current_reply_id
-    buyer_response = await _get_buyer_client(request).send_reply(
-        session_id=session_id,
-        reply_id=reply_id,
-        message=reply.message,
+    store.update_case(
+        eval_run_id,
+        eval_case_id,
+        state=CaseRunState.RUNNING,
+        waiting_reply_id=None,
     )
+    try:
+        buyer_response = await _get_buyer_client(request).send_reply(
+            session_id=session_id,
+            reply_id=reply_id,
+            message=reply.message,
+        )
+    except Exception:
+        _restore_operator_waiting_if_still_claimed(store, eval_run_id, eval_case_id, reply_id)
+        raise
+
     accepted = bool(_response_field(buyer_response, 'accepted'))
     buyer_status = str(_response_field(buyer_response, 'status'))
     manifest = store.read_manifest(eval_run_id)
     case = _find_case(manifest.cases, eval_case_id)
 
-    if accepted and case.state == CaseRunState.WAITING_USER and case.waiting_reply_id == reply_id:
-        manifest = store.update_case(
-            eval_run_id,
-            eval_case_id,
-            state=CaseRunState.RUNNING,
-            waiting_reply_id=None,
-        )
+    if accepted:
+        should_resume = case.state != CaseRunState.WAITING_USER
+        if case.state == CaseRunState.WAITING_USER and case.waiting_reply_id == reply_id:
+            manifest = store.update_case(
+                eval_run_id,
+                eval_case_id,
+                state=CaseRunState.RUNNING,
+                waiting_reply_id=None,
+            )
+            case = _find_case(manifest.cases, eval_case_id)
+            should_resume = True
+        if should_resume:
+            await _schedule_orchestrator_resume(request, eval_run_id, eval_case_id)
+    else:
+        manifest = _restore_operator_waiting_if_still_claimed(store, eval_run_id, eval_case_id, reply_id)
         case = _find_case(manifest.cases, eval_case_id)
-        await _schedule_orchestrator_resume(request, eval_run_id, eval_case_id)
 
     return OperatorReplyResponse(
         eval_run_id=eval_run_id,
@@ -147,6 +166,24 @@ async def send_operator_reply(
         buyer_status=buyer_status,
         state=case.state,
     )
+
+
+def _restore_operator_waiting_if_still_claimed(
+    store: RunStore,
+    eval_run_id: str,
+    eval_case_id: str,
+    reply_id: str,
+) -> EvalRunManifest:
+    manifest = store.read_manifest(eval_run_id)
+    case = _find_case(manifest.cases, eval_case_id)
+    if case.state == CaseRunState.RUNNING and case.waiting_reply_id is None:
+        return store.update_case(
+            eval_run_id,
+            eval_case_id,
+            state=CaseRunState.WAITING_USER,
+            waiting_reply_id=reply_id,
+        )
+    return manifest
 
 
 async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval_case_id: str) -> None:

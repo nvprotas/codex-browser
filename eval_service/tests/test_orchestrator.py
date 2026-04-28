@@ -320,7 +320,7 @@ def test_timeout_preserves_callback_events_and_session_id(tmp_path: Path) -> Non
         cases=[_case('case-timeout')],
         timeout_seconds=1.0,
         poll_interval_seconds=1.0,
-        on_create=lambda call: _append_status_update(store, call),
+        on_create=lambda call: _append_agent_stream_event(store, call),
     )
 
     response = client.post('/runs', json={})
@@ -334,7 +334,7 @@ def test_timeout_preserves_callback_events_and_session_id(tmp_path: Path) -> Non
     assert timer.sleeps == [1.0]
     assert len(case.callback_events) == 1
     event = case.callback_events[0]
-    assert event.event_type == CallbackEventType.STATUS_UPDATE
+    assert event.event_type == CallbackEventType.AGENT_STREAM_EVENT
     assert event.session_id == 'session-1'
     assert event.payload == {'status': 'buyer_started'}
 
@@ -461,6 +461,77 @@ def test_operator_reply_resumes_waiting_case_finishes_payment_ready_and_continue
     assert second_case.waiting_reply_id == 'reply-session-2'
     assert third_case.state == CaseRunState.PENDING
     assert timer.sleeps == [0.1, 5.0]
+
+
+def test_operator_reply_resumes_next_case_when_current_case_finishes_during_reply(
+    tmp_path: Path,
+) -> None:
+    def on_create(call: dict[str, Any]) -> None:
+        eval_case_id = call['metadata']['eval_case_id']
+        if eval_case_id == 'case-needs-user':
+            _append_ask_user(store, call)
+            return
+
+        assert eval_case_id == 'case-after-terminal-race'
+        _append_payment_ready(store, call)
+
+    def on_reply(reply: dict[str, str]) -> None:
+        first_call = buyer.calls[0]
+        metadata = first_call['metadata']
+        finished_at = datetime(2026, 4, 28, 12, 0, 45, tzinfo=UTC)
+        store.append_callback_event(
+            metadata['eval_run_id'],
+            metadata['eval_case_id'],
+            BuyerCallbackEnvelope(
+                event_id='event-finished-during-reply',
+                session_id=reply['session_id'],
+                event_type=CallbackEventType.SCENARIO_FINISHED,
+                occurred_at=finished_at,
+                idempotency_key='idem-finished-during-reply',
+                payload={'result': 'ok'},
+                eval_run_id=metadata['eval_run_id'],
+                eval_case_id=metadata['eval_case_id'],
+            ),
+            state=CaseRunState.FINISHED,
+            finished_at=finished_at,
+            waiting_reply_id=None,
+        )
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-needs-user'),
+            _case('case-after-terminal-race'),
+        ],
+        on_create=on_create,
+        on_reply=on_reply,
+    )
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    create_response = client.post('/runs', json={})
+    assert create_response.status_code == 200
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.WAITING_USER
+
+    reply_response = client.post(
+        '/runs/eval-run-001/cases/case-needs-user/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert reply_response.status_code == 200
+    assert reply_response.json()['state'] == 'finished'
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == [
+        'case-needs-user',
+        'case-after-terminal-race',
+    ]
+    first_case, second_case = manifest.cases
+    assert first_case.state == CaseRunState.FINISHED
+    assert first_case.waiting_reply_id is None
+    assert second_case.state == CaseRunState.FINISHED
 
 
 def test_operator_reply_resume_uses_configured_callback_url_for_next_case(tmp_path: Path) -> None:
@@ -613,14 +684,14 @@ def _append_ask_user(store: RunStore, call: dict[str, Any]) -> None:
     )
 
 
-def _append_status_update(store: RunStore, call: dict[str, Any]) -> None:
+def _append_agent_stream_event(store: RunStore, call: dict[str, Any]) -> None:
     metadata = call['metadata']
     envelope = BuyerCallbackEnvelope(
-        event_id=f'event-status-{call["session_id"]}',
+        event_id=f'event-stream-{call["session_id"]}',
         session_id=call['session_id'],
-        event_type=CallbackEventType.STATUS_UPDATE,
+        event_type=CallbackEventType.AGENT_STREAM_EVENT,
         occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
-        idempotency_key=f'idem-status-{call["session_id"]}',
+        idempotency_key=f'idem-stream-{call["session_id"]}',
         payload={'status': 'buyer_started'},
         eval_run_id=metadata['eval_run_id'],
         eval_case_id=metadata['eval_case_id'],

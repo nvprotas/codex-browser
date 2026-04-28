@@ -161,6 +161,9 @@ class RunStore:
         cases = list(manifest.cases)
         case_index = _find_case_index(cases, eval_case_id)
         case = cases[case_index]
+        if callback_event is not None and _has_callback_event(case, callback_event):
+            return manifest
+
         case_data = case.model_dump()
 
         _set_if_present(case_data, 'state', state)
@@ -194,6 +197,13 @@ def _find_case_index(cases: Sequence[EvalRunCase], eval_case_id: str) -> int:
         if case.eval_case_id == eval_case_id:
             return index
     raise KeyError(f'eval case is absent from run manifest: {eval_case_id}')
+
+
+def _has_callback_event(case: EvalRunCase, event: BuyerCallbackEnvelope) -> bool:
+    return any(
+        existing.event_id == event.event_id or existing.idempotency_key == event.idempotency_key
+        for existing in case.callback_events
+    )
 
 
 def _set_if_present(data: dict[str, Any], key: str, value: Any) -> None:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable
 
+import httpx
 from fastapi.testclient import TestClient
 
 from eval_service.app.main import create_app
@@ -466,11 +468,11 @@ def test_operator_reply_keeps_terminal_callback_state_when_buyer_finishes_during
     buyer.send_reply = finish_during_send_reply
     scheduled: list[Any] = []
 
-    async def reject_resume(coro: Any) -> None:
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
         scheduled.append(coro)
-        coro.close()
+        await coro
 
-    client.app.state.orchestrator_resume_scheduler = reject_resume
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
 
     response = client.post(
         '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
@@ -479,12 +481,108 @@ def test_operator_reply_keeps_terminal_callback_state_when_buyer_finishes_during
 
     assert response.status_code == 200
     assert response.json()['state'] == 'finished'
-    assert scheduled == []
+    assert len(scheduled) == 1
+    assert store.read_manifest('eval-20260428-120000').status == EvalRunStatus.FINISHED
     case = store.read_manifest('eval-20260428-120000').cases[0]
     assert case.state == CaseRunState.FINISHED
     assert case.finished_at == finished_at
     assert case.waiting_reply_id is None
     assert case.callback_events[-1].event_type == CallbackEventType.SCENARIO_FINISHED
+
+
+def test_duplicate_ask_user_callback_after_accepted_reply_is_idempotent(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    callback = _callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'})
+    assert client.post('/callbacks/buyer', json=callback).status_code == 200
+    scheduled: list[Any] = []
+
+    async def capture_resume(coro: Any) -> None:
+        scheduled.append(coro)
+        coro.close()
+
+    client.app.state.orchestrator_resume_scheduler = capture_resume
+
+    reply_response = client.post(
+        '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+    duplicate_event_response = client.post(
+        '/callbacks/buyer',
+        json={**callback, 'idempotency_key': 'idem-ask_user-retry'},
+    )
+    duplicate_key_response = client.post(
+        '/callbacks/buyer',
+        json={**callback, 'event_id': 'event-ask_user-retry'},
+    )
+
+    assert reply_response.status_code == 200
+    assert duplicate_event_response.status_code == 200
+    assert duplicate_event_response.json()['state'] == 'running'
+    assert duplicate_key_response.status_code == 200
+    assert duplicate_key_response.json()['state'] == 'running'
+    assert len(scheduled) == 1
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.RUNNING
+    assert case.waiting_reply_id is None
+    assert len(case.callback_events) == 1
+
+
+def test_concurrent_operator_replies_claim_waiting_reply_once(tmp_path: Path) -> None:
+    async def run() -> None:
+        client, store, buyer = _client_with_store(tmp_path)
+        _create_run(store)
+        assert client.post(
+            '/callbacks/buyer',
+            json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+        ).status_code == 200
+        first_reply_started = asyncio.Event()
+        release_first_reply = asyncio.Event()
+
+        async def delayed_send_reply(*, session_id: str, reply_id: str, message: str) -> dict[str, Any]:
+            buyer.replies.append({'session_id': session_id, 'reply_id': reply_id, 'message': message})
+            first_reply_started.set()
+            await release_first_reply.wait()
+            return {'session_id': session_id, 'accepted': True, 'status': 'running'}
+
+        async def capture_resume(coro: Any) -> None:
+            coro.close()
+
+        buyer.send_reply = delayed_send_reply
+        client.app.state.orchestrator_resume_scheduler = capture_resume
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app),
+            base_url='http://testserver',
+        ) as async_client:
+            first_request = asyncio.create_task(
+                async_client.post(
+                    '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+                    json={'message': 'Первый ответ.'},
+                )
+            )
+            await first_reply_started.wait()
+            second_request = asyncio.create_task(
+                async_client.post(
+                    '/runs/eval-20260428-120000/cases/litres_book_odyssey_001/reply',
+                    json={'message': 'Второй ответ.'},
+                )
+            )
+            for _ in range(50):
+                if len(buyer.replies) > 1 or second_request.done():
+                    break
+                await asyncio.sleep(0.001)
+            release_first_reply.set()
+            first_response, second_response = await asyncio.gather(first_request, second_request)
+
+        assert [first_response.status_code, second_response.status_code].count(200) == 1
+        assert [first_response.status_code, second_response.status_code].count(409) == 1
+        assert len(buyer.replies) == 1
+        case = store.read_manifest('eval-20260428-120000').cases[0]
+        assert case.state == CaseRunState.RUNNING
+        assert case.waiting_reply_id is None
+
+    asyncio.run(run())
 
 
 def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_host(

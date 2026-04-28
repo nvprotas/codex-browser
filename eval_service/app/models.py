@@ -48,8 +48,6 @@ class CallbackEventType(StrEnum):
     ASK_USER = 'ask_user'
     PAYMENT_READY = 'payment_ready'
     SCENARIO_FINISHED = 'scenario_finished'
-    STATUS_UPDATE = 'status_update'
-    ERROR = 'error'
     SESSION_STARTED = 'session_started'
     AGENT_STEP_STARTED = 'agent_step_started'
     AGENT_STEP_FINISHED = 'agent_step_finished'

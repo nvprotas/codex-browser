@@ -88,6 +88,21 @@ def test_run_and_callback_contracts_validate_known_states() -> None:
     assert manifest.cases[0].state == CaseRunState.PAYMENT_READY
 
 
+@pytest.mark.parametrize('event_type', ['status_update', 'error'])
+def test_callback_contract_rejects_non_buyer_event_types(event_type: str) -> None:
+    with pytest.raises(ValidationError):
+        BuyerCallbackEnvelope.model_validate(
+            {
+                'event_id': 'event-unsupported',
+                'session_id': 'session-123',
+                'event_type': event_type,
+                'occurred_at': '2026-04-28T12:00:00Z',
+                'idempotency_key': 'idem-unsupported',
+                'payload': {},
+            }
+        )
+
+
 def test_evaluation_result_is_strict_and_serializable() -> None:
     result = EvaluationResult(
         eval_run_id='eval-20260428-120000',
