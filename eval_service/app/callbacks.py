@@ -132,7 +132,13 @@ async def send_operator_reply(
             message=reply.message,
         )
     except Exception:
-        _restore_operator_waiting_if_still_claimed(store, eval_run_id, eval_case_id, reply_id)
+        manifest = _restore_operator_waiting_if_still_claimed(store, eval_run_id, eval_case_id, reply_id)
+        case = _find_case(manifest.cases, eval_case_id)
+        if case.state != CaseRunState.WAITING_USER:
+            try:
+                await _schedule_orchestrator_resume(request, eval_run_id, eval_case_id)
+            except Exception as resume_exc:
+                _mark_resume_failure(store, eval_run_id, resume_exc)
         raise
 
     accepted = bool(_response_field(buyer_response, 'accepted'))
@@ -156,6 +162,8 @@ async def send_operator_reply(
     else:
         manifest = _restore_operator_waiting_if_still_claimed(store, eval_run_id, eval_case_id, reply_id)
         case = _find_case(manifest.cases, eval_case_id)
+        if case.state != CaseRunState.WAITING_USER:
+            await _schedule_orchestrator_resume(request, eval_run_id, eval_case_id)
 
     return OperatorReplyResponse(
         eval_run_id=eval_run_id,

@@ -534,6 +534,127 @@ def test_operator_reply_resumes_next_case_when_current_case_finishes_during_repl
     assert second_case.state == CaseRunState.FINISHED
 
 
+def test_operator_reply_resumes_next_case_when_current_case_finishes_during_rejected_reply(
+    tmp_path: Path,
+) -> None:
+    def on_create(call: dict[str, Any]) -> None:
+        eval_case_id = call['metadata']['eval_case_id']
+        if eval_case_id == 'case-needs-user':
+            _append_ask_user(store, call)
+            return
+
+        assert eval_case_id == 'case-after-rejected-terminal-race'
+        _append_payment_ready(store, call)
+
+    async def rejected_reply_after_terminal_callback(
+        *,
+        session_id: str,
+        reply_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        reply = {'session_id': session_id, 'reply_id': reply_id, 'message': message}
+        buyer.replies.append(reply)
+        _append_finished(store, buyer.calls[0], session_id=session_id)
+        return {'session_id': session_id, 'accepted': False, 'status': 'finished'}
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-needs-user'),
+            _case('case-after-rejected-terminal-race'),
+        ],
+        on_create=on_create,
+    )
+    buyer.send_reply = rejected_reply_after_terminal_callback
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    create_response = client.post('/runs', json={})
+    assert create_response.status_code == 200
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.WAITING_USER
+
+    reply_response = client.post(
+        '/runs/eval-run-001/cases/case-needs-user/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert reply_response.status_code == 200
+    assert reply_response.json()['accepted'] is False
+    assert reply_response.json()['state'] == 'finished'
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == [
+        'case-needs-user',
+        'case-after-rejected-terminal-race',
+    ]
+    first_case, second_case = manifest.cases
+    assert first_case.state == CaseRunState.FINISHED
+    assert first_case.waiting_reply_id is None
+    assert second_case.state == CaseRunState.FINISHED
+
+
+def test_operator_reply_resumes_next_case_when_current_case_finishes_during_failed_reply(
+    tmp_path: Path,
+) -> None:
+    def on_create(call: dict[str, Any]) -> None:
+        eval_case_id = call['metadata']['eval_case_id']
+        if eval_case_id == 'case-needs-user':
+            _append_ask_user(store, call)
+            return
+
+        assert eval_case_id == 'case-after-failed-terminal-race'
+        _append_payment_ready(store, call)
+
+    async def failed_reply_after_terminal_callback(
+        *,
+        session_id: str,
+        reply_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        reply = {'session_id': session_id, 'reply_id': reply_id, 'message': message}
+        buyer.replies.append(reply)
+        _append_finished(store, buyer.calls[0], session_id=session_id)
+        raise RuntimeError('buyer reply failed after terminal callback')
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-needs-user'),
+            _case('case-after-failed-terminal-race'),
+        ],
+        on_create=on_create,
+        raise_server_exceptions=False,
+    )
+    buyer.send_reply = failed_reply_after_terminal_callback
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    create_response = client.post('/runs', json={})
+    assert create_response.status_code == 200
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.WAITING_USER
+
+    reply_response = client.post(
+        '/runs/eval-run-001/cases/case-needs-user/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert reply_response.status_code == 500
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == [
+        'case-needs-user',
+        'case-after-failed-terminal-race',
+    ]
+    first_case, second_case = manifest.cases
+    assert first_case.state == CaseRunState.FINISHED
+    assert first_case.waiting_reply_id is None
+    assert second_case.state == CaseRunState.FINISHED
+
+
 def test_operator_reply_resume_uses_configured_callback_url_for_next_case(tmp_path: Path) -> None:
     payment_ready_sent = False
     timer = FakeTimer()
@@ -658,6 +779,30 @@ def _append_payment_ready(store: RunStore, call: dict[str, Any]) -> None:
         metadata['eval_case_id'],
         envelope,
         state=CaseRunState.PAYMENT_READY,
+        waiting_reply_id=None,
+    )
+
+
+def _append_finished(store: RunStore, call: dict[str, Any], *, session_id: str | None = None) -> None:
+    metadata = call['metadata']
+    actual_session_id = session_id or call['session_id']
+    finished_at = datetime(2026, 4, 28, 12, 0, 45, tzinfo=UTC)
+    envelope = BuyerCallbackEnvelope(
+        event_id=f'event-finished-{actual_session_id}',
+        session_id=actual_session_id,
+        event_type=CallbackEventType.SCENARIO_FINISHED,
+        occurred_at=finished_at,
+        idempotency_key=f'idem-finished-{actual_session_id}',
+        payload={'result': 'ok'},
+        eval_run_id=metadata['eval_run_id'],
+        eval_case_id=metadata['eval_case_id'],
+    )
+    store.append_callback_event(
+        metadata['eval_run_id'],
+        metadata['eval_case_id'],
+        envelope,
+        state=CaseRunState.FINISHED,
+        finished_at=finished_at,
         waiting_reply_id=None,
     )
 
