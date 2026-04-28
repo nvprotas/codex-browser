@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Coroutine
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -13,6 +15,7 @@ from eval_service.app.models import (
     EvalRunCase,
     StrictBaseModel,
 )
+from eval_service.app.orchestrator import get_run_orchestrator
 from eval_service.app.run_store import RunStore
 
 
@@ -114,6 +117,7 @@ async def send_operator_reply(
             waiting_reply_id=None,
         )
         case = _find_case(manifest.cases, eval_case_id)
+        await _schedule_orchestrator_resume(request, eval_run_id, eval_case_id)
 
     return OperatorReplyResponse(
         eval_run_id=eval_run_id,
@@ -124,6 +128,26 @@ async def send_operator_reply(
         buyer_status=buyer_status,
         state=case.state,
     )
+
+
+async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval_case_id: str) -> None:
+    resume_coro: Coroutine[Any, Any, Any] = get_run_orchestrator(request).resume_after_operator_reply(
+        eval_run_id=eval_run_id,
+        eval_case_id=eval_case_id,
+        callback_url=str(request.url_for('receive_buyer_callback')),
+    )
+    scheduler = getattr(request.app.state, 'orchestrator_resume_scheduler', None)
+    if scheduler is not None:
+        await scheduler(resume_coro)
+        return
+
+    tasks = getattr(request.app.state, 'orchestrator_resume_tasks', None)
+    if tasks is None:
+        tasks = set()
+        request.app.state.orchestrator_resume_tasks = tasks
+    task = asyncio.create_task(resume_coro)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
 
 
 def _state_updates_for_callback(envelope: BuyerCallbackEnvelope) -> dict[str, Any]:

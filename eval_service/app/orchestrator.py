@@ -73,7 +73,49 @@ class RunOrchestrator:
         )
         self._write_run_status(eval_run_id, EvalRunStatus.RUNNING)
 
+        await self._run_cases_until_waiting(eval_run_id=eval_run_id, cases=cases, callback_url=callback_url)
+
+        return self._refresh_run_status(eval_run_id)
+
+    async def resume_after_operator_reply(
+        self,
+        *,
+        eval_run_id: str,
+        eval_case_id: str,
+        callback_url: str,
+    ) -> EvalRunManifest:
+        self._write_run_status(eval_run_id, EvalRunStatus.RUNNING)
+        state = await self._wait_for_case(eval_run_id, eval_case_id)
+        if state == CaseRunState.WAITING_USER:
+            return self._refresh_run_status(eval_run_id)
+
+        remaining_cases = self._remaining_manifest_cases(eval_run_id, after_eval_case_id=eval_case_id)
+        await self._run_cases_until_waiting(
+            eval_run_id=eval_run_id,
+            cases=remaining_cases,
+            callback_url=callback_url,
+        )
+        return self._refresh_run_status(eval_run_id)
+
+    async def _run_cases_until_waiting(
+        self,
+        *,
+        eval_run_id: str,
+        cases: Sequence[EvalCase],
+        callback_url: str,
+    ) -> None:
         for case in cases:
+            run_case = _find_case(self.run_store.read_manifest(eval_run_id).cases, case.eval_case_id)
+            if run_case.state == CaseRunState.WAITING_USER:
+                break
+            if _is_terminal_case_state(run_case.state):
+                continue
+            if run_case.state != CaseRunState.PENDING:
+                state = await self._wait_for_case(eval_run_id, case.eval_case_id)
+                if state == CaseRunState.WAITING_USER:
+                    break
+                continue
+
             auth_result = self.auth_profile_loader.load(case.auth_profile)
             if auth_result.skip_reason is not None:
                 self.run_store.update_case(
@@ -93,8 +135,6 @@ class RunOrchestrator:
             )
             if state == CaseRunState.WAITING_USER:
                 break
-
-        return self._refresh_run_status(eval_run_id)
 
     async def _run_case(
         self,
@@ -178,10 +218,33 @@ class RunOrchestrator:
         self.run_store.write_manifest(updated)
         return updated
 
+    def _remaining_manifest_cases(self, eval_run_id: str, *, after_eval_case_id: str) -> list[EvalCase]:
+        manifest = self.run_store.read_manifest(eval_run_id)
+        remaining_case_ids: list[str] = []
+        current_case_seen = False
+        for run_case in manifest.cases:
+            if run_case.eval_case_id == after_eval_case_id:
+                current_case_seen = True
+                continue
+            if current_case_seen:
+                remaining_case_ids.append(run_case.eval_case_id)
+
+        if not current_case_seen:
+            raise KeyError(after_eval_case_id)
+
+        cases_by_id = {case.eval_case_id: case for case in self.case_registry.load_cases()}
+        remaining_cases: list[EvalCase] = []
+        for eval_case_id in remaining_case_ids:
+            case = cases_by_id.get(eval_case_id)
+            if case is None:
+                raise ValueError(f'eval case из manifest не найден в registry: {eval_case_id}')
+            remaining_cases.append(case)
+        return remaining_cases
+
 
 @router.post('/runs', response_model=EvalRunManifest)
 async def create_eval_run(request: Request, payload: RunCreateRequest | None = None) -> EvalRunManifest:
-    orchestrator = _get_orchestrator(request)
+    orchestrator = get_run_orchestrator(request)
     try:
         return await orchestrator.create_run(
             selected_case_ids=payload.case_ids if payload is not None else None,
@@ -196,7 +259,7 @@ def generate_eval_run_id() -> str:
     return f'eval-{timestamp}-{uuid.uuid4().hex[:8]}'
 
 
-def _get_orchestrator(request: Request) -> RunOrchestrator:
+def get_run_orchestrator(request: Request) -> RunOrchestrator:
     settings = request.app.state.settings
     return RunOrchestrator(
         case_registry=getattr(request.app.state, 'case_registry', CaseRegistry(settings.eval_cases_dir)),

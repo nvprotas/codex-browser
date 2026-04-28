@@ -42,10 +42,17 @@ class FakeAuthProfileLoader:
 
 
 class FakeBuyerClient:
-    def __init__(self, store: RunStore, on_create: Callable[[dict[str, Any]], None] | None = None) -> None:
+    def __init__(
+        self,
+        store: RunStore,
+        on_create: Callable[[dict[str, Any]], None] | None = None,
+        on_reply: Callable[[dict[str, str]], None] | None = None,
+    ) -> None:
         self.store = store
         self.on_create = on_create
+        self.on_reply = on_reply
         self.calls: list[dict[str, Any]] = []
+        self.replies: list[dict[str, str]] = []
 
     async def create_task(
         self,
@@ -69,6 +76,17 @@ class FakeBuyerClient:
         if self.on_create is not None:
             self.on_create(call)
         return {'session_id': call['session_id'], 'status': 'running', 'novnc_url': 'http://novnc.test'}
+
+    async def send_reply(self, *, session_id: str, reply_id: str, message: str) -> dict[str, Any]:
+        reply = {
+            'session_id': session_id,
+            'reply_id': reply_id,
+            'message': message,
+        }
+        self.replies.append(reply)
+        if self.on_reply is not None:
+            self.on_reply(reply)
+        return {'session_id': session_id, 'accepted': True, 'status': 'running'}
 
 
 class FakeTimer:
@@ -322,12 +340,87 @@ def test_waiting_user_state_is_preserved_and_run_stays_running(tmp_path: Path) -
     assert pending_case.state == CaseRunState.PENDING
 
 
+def test_operator_reply_resumes_waiting_case_finishes_payment_ready_and_continues_until_next_wait(
+    tmp_path: Path,
+) -> None:
+    payment_ready_sent = False
+    timer = FakeTimer()
+
+    def on_create(call: dict[str, Any]) -> None:
+        eval_case_id = call['metadata']['eval_case_id']
+        if eval_case_id == 'case-needs-user':
+            _append_ask_user(store, call)
+            return
+
+        assert eval_case_id == 'case-after-reply'
+        first_case = store.read_manifest('eval-run-001').cases[0]
+        assert first_case.state == CaseRunState.FINISHED
+        _append_ask_user(store, call)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal payment_ready_sent
+        manifest = store.read_manifest('eval-run-001')
+        first_case = manifest.cases[0]
+        if not payment_ready_sent and first_case.state == CaseRunState.RUNNING:
+            payment_ready_sent = True
+            _append_payment_ready(store, buyer.calls[0])
+        if seconds == 5.0:
+            assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.PAYMENT_READY
+        await timer.sleep(seconds)
+
+    async def run_resume_inline(coro: Awaitable[Any]) -> None:
+        await coro
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-needs-user'),
+            _case('case-after-reply'),
+            _case('case-not-started-yet'),
+        ],
+        on_create=on_create,
+        sleep=sleep,
+        timer=timer,
+    )
+    client.app.state.orchestrator_resume_scheduler = run_resume_inline
+
+    create_response = client.post('/runs', json={})
+    assert create_response.status_code == 200
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.WAITING_USER
+
+    reply_response = client.post(
+        '/runs/eval-run-001/cases/case-needs-user/reply',
+        json={'message': 'Да, продолжай.'},
+    )
+
+    assert reply_response.status_code == 200
+    assert reply_response.json()['state'] == 'running'
+    assert buyer.replies == [
+        {
+            'session_id': 'session-1',
+            'reply_id': 'reply-session-1',
+            'message': 'Да, продолжай.',
+        }
+    ]
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.RUNNING
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-needs-user', 'case-after-reply']
+    first_case, second_case, third_case = manifest.cases
+    assert first_case.state == CaseRunState.FINISHED
+    assert first_case.waiting_reply_id is None
+    assert second_case.state == CaseRunState.WAITING_USER
+    assert second_case.waiting_reply_id == 'reply-session-2'
+    assert third_case.state == CaseRunState.PENDING
+    assert timer.sleeps == [0.1, 5.0]
+
+
 def _client_with_orchestrator(
     tmp_path: Path,
     *,
     cases: list[EvalCase],
     auth_results: dict[str | None, AuthProfileLoadResult] | None = None,
     on_create: Callable[[dict[str, Any]], None] | None = None,
+    on_reply: Callable[[dict[str, str]], None] | None = None,
     timeout_seconds: float | None = None,
     poll_interval_seconds: float = 0.1,
     sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -337,7 +430,7 @@ def _client_with_orchestrator(
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))
     fake_timer = timer or FakeTimer(store)
-    buyer = FakeBuyerClient(store, on_create=on_create)
+    buyer = FakeBuyerClient(store, on_create=on_create, on_reply=on_reply)
     app.state.run_store = store
     app.state.case_registry = FakeCaseRegistry(cases)
     app.state.auth_profile_loader = FakeAuthProfileLoader(auth_results or {})
