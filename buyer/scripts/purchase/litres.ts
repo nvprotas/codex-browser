@@ -258,27 +258,41 @@ async function paymentFrameSrc(page: Page): Promise<string | null> {
   return src && parseOrderId(src) ? src : null;
 }
 
-async function collectBookCandidates(page: Page, query: string, limit = 60): Promise<BookCandidate[]> {
+async function collectPaymentMethods(page: Page): Promise<string[]> {
+  const labels = await page
+    .locator('[data-testid^="payment__method--"], [role="radiogroup"] label')
+    .allTextContents()
+    .catch(() => []);
+  return [...new Set(labels.map((item) => item.replace(/\s+/g, ' ').trim()).filter(Boolean))];
+}
+
+function paymentMethodsLookSbpOnly(methods: string[]): boolean {
+  return methods.length > 0 && methods.every((method) => hasSbpOrFpsMarker(method));
+}
+
+export async function collectBookCandidates(page: Pick<Page, 'locator'>, query: string, limit = 60): Promise<BookCandidate[]> {
   const rawCandidates = await page.locator('a[href*="/book/"]').evaluateAll(
-    `(nodes, limit) => {
-      const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-      const result = [];
+    (nodes, rawLimit) => {
+      const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const result: Array<{ href: string; text: string; title: string }> = [];
       const seen = new Set();
+      const limit = typeof rawLimit === 'number' ? rawLimit : 60;
       for (const node of nodes) {
         if (result.length >= limit) break;
-        const href = node.href || node.getAttribute('href') || '';
+        const element = node as HTMLAnchorElement;
+        const href = element.href || element.getAttribute('href') || '';
         if (!href || seen.has(href)) continue;
         seen.add(href);
         result.push({
           href,
-          text: compact(node.innerText || node.textContent || '').slice(0, 500),
-          title: compact(node.getAttribute('title') || '').slice(0, 300),
+          text: compact(element.innerText || element.textContent || '').slice(0, 500),
+          title: compact(element.getAttribute('title') || '').slice(0, 300),
         });
       }
       return result;
-    }`,
+    },
     limit,
-  ) as Array<{ href: string; text: string; title: string }>;
+  ).catch(() => []) as Array<{ href: string; text: string; title: string }>;
 
   return rawCandidates
     .map((candidate) => ({
@@ -337,6 +351,12 @@ async function main(): Promise<void> {
     });
 
     const candidates = await collectBookCandidates(page, query);
+    appendTrace(tracePath, {
+      ts: new Date().toISOString(),
+      event: 'candidates_collected',
+      url: page.url(),
+      details: { query, candidate_count: candidates.length },
+    });
     const selected = candidates[0];
     if (!selected) {
       fail(outputPath, 'purchase_script_no_candidates', 'Не удалось найти релевантную книгу на Litres.', {
@@ -436,12 +456,26 @@ async function main(): Promise<void> {
     }
 
     await page.waitForURL(/\/purchase\/ppd\//, { timeout: 15000 }).catch(() => undefined);
+    const observedPaymentMethods = await collectPaymentMethods(page);
+    if (paymentMethodsLookSbpOnly(observedPaymentMethods)) {
+      fail(outputPath, 'purchase_script_sberpay_unavailable', 'На странице оплаты Litres доступен только СБП/SBP/FPS, SberPay не найден.', {
+        script: 'litres',
+        query,
+        product_url: productUrl,
+        final_url: page.url(),
+        observed_payment_methods: observedPaymentMethods,
+        trace_path: tracePath,
+      });
+      return;
+    }
+
     if (!(await selectRussianCard(page))) {
       fail(outputPath, 'purchase_script_russian_card_missing', 'Страница оплаты открыта, но способ "Российская карта" не выбран.', {
         script: 'litres',
         query,
         product_url: productUrl,
         final_url: page.url(),
+        observed_payment_methods: observedPaymentMethods,
         trace_path: tracePath,
       });
       return;
@@ -469,12 +503,19 @@ async function main(): Promise<void> {
       details: { order_id: orderId, sberpay: true, payment_frame_src: frameSrc },
     });
     if (!orderId) {
-      fail(outputPath, 'purchase_script_order_missing', 'Платежный iframe SberPay открыт, но orderId не найден.', {
+      const reasonCode = paymentMethodsLookSbpOnly(observedPaymentMethods)
+        ? 'purchase_script_sberpay_unavailable'
+        : 'purchase_script_order_missing';
+      const message = reasonCode === 'purchase_script_sberpay_unavailable'
+        ? 'На странице оплаты Litres доступен только СБП/SBP/FPS, SberPay iframe не найден.'
+        : 'Платежный iframe SberPay открыт, но orderId не найден.';
+      fail(outputPath, reasonCode, message, {
         script: 'litres',
         query,
         product_url: productUrl,
         final_url: finalUrl,
         payment_frame_src: frameSrc,
+        observed_payment_methods: observedPaymentMethods,
         trace_path: tracePath,
       });
       return;

@@ -144,6 +144,8 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('FPS', prompt)
         self.assertIn('order_id', prompt)
         self.assertIn('странице SberPay', prompt)
+        self.assertIn('payment_evidence', prompt)
+        self.assertIn('litres_payecom_iframe', prompt)
 
 
 class BrowserActionMetricsTests(unittest.TestCase):
@@ -375,11 +377,12 @@ class LitresPurchaseScriptSmokeTests(unittest.TestCase):
                 "import { cartRowsMatchQuery, extractLitresQuery, isSberPaymentUrl, parseOrderId } from './purchase/litres.ts';"
                 "const query = extractLitresQuery('Открой litres и дойди до шага оплаты. Ищи книгу одиссея гомера');"
                 "const order = parseOrderId('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay');"
+                "const iframeOrder = parseOrderId('https://payecom.ru/pay_ru?orderId=PAY-1585051118');"
                 "const sberpay = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay&system=sberpay');"
                 "const sbp = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sbp&system=sbersbp');"
                 "const fps = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=fps');"
                 "const cart = cartRowsMatchQuery('одиссея гомера', ['Одиссея Гомер']);"
-                "console.log(JSON.stringify({ query, order, sberpay, sbp, fps, cart }));"
+                "console.log(JSON.stringify({ query, order, iframeOrder, sberpay, sbp, fps, cart }));"
             ),
         ]
         completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
@@ -390,10 +393,49 @@ class LitresPurchaseScriptSmokeTests(unittest.TestCase):
             {
                 'query': 'одиссея гомера',
                 'order': '1585051118',
+                'iframeOrder': 'PAY-1585051118',
                 'sberpay': True,
                 'sbp': False,
                 'fps': False,
                 'cart': True,
+            },
+        )
+
+    def test_collect_book_candidates_uses_function_evaluate_callback_when_tsx_is_installed(self) -> None:
+        buyer_root = Path(__file__).resolve().parents[1]
+        tsx = buyer_root / 'scripts' / 'node_modules' / '.bin' / 'tsx'
+        if not tsx.is_file():
+            self.skipTest('buyer/scripts/node_modules не установлен')
+
+        scripts_dir = buyer_root / 'scripts'
+        command = [
+            str(tsx),
+            '-e',
+            (
+                "import { collectBookCandidates } from './purchase/litres.ts';"
+                "const nodes = [{"
+                "href: 'https://www.litres.ru/book/gomer/iliada-73024797/',"
+                "innerText: 'Илиада Гомер',"
+                "textContent: 'Илиада Гомер',"
+                "getAttribute: (name) => name === 'title' ? 'Илиада' : null"
+                "}];"
+                "const page = { locator: () => ({ evaluateAll: async (callback, limit) => {"
+                "if (typeof callback !== 'function') throw new Error('evaluateAll callback must be function');"
+                "return callback(nodes, limit);"
+                "} }) };"
+                "collectBookCandidates(page, 'илиада гомера').then((candidates) => {"
+                "console.log(JSON.stringify({ count: candidates.length, href: candidates[0]?.href ?? null }));"
+                "});"
+            ),
+        ]
+        completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
+
+        payload = json.loads(completed.stdout)
+        self.assertEqual(
+            payload,
+            {
+                'count': 1,
+                'href': 'https://www.litres.ru/book/gomer/iliada-73024797/',
             },
         )
 
@@ -410,13 +452,19 @@ class LitresAuthScriptSmokeTests(unittest.TestCase):
             str(tsx),
             '-e',
             (
-                "import { authEntryUrl, hostFromUrl, isSameOrSubdomain, sberIdTargetLabels } from './sberid/litres.ts';"
+                "import { authEntryUrl, hostFromUrl, isSameOrSubdomain, sberIdTargetLabels, verifyLitresAuthSnapshot } from './sberid/litres.ts';"
                 "const labels = sberIdTargetLabels();"
+                "const callback = verifyLitresAuthSnapshot('https://www.litres.ru/callbacks/social-auth/?state=x', '');"
+                "const profile = verifyLitresAuthSnapshot('https://www.litres.ru/me/profile/', 'Мои книги Профиль Бонусы');"
                 "console.log(JSON.stringify({"
                 "entry: authEntryUrl('https://www.litres.ru/'),"
                 "host: hostFromUrl('https://www.litres.ru/auth/login/'),"
                 "same: isSameOrSubdomain('login.litres.ru', 'litres.ru'),"
-                "firstLabels: labels.slice(0, 2)"
+                "firstLabels: labels.slice(0, 2),"
+                "callbackVerified: callback.verified,"
+                "callbackSeen: callback.callback_seen,"
+                "profileVerified: profile.verified,"
+                "profileMarkers: profile.markers"
                 "}));"
             ),
         ]
@@ -430,6 +478,10 @@ class LitresAuthScriptSmokeTests(unittest.TestCase):
                 'host': 'litres.ru',
                 'same': True,
                 'firstLabels': ['litres-sb-icon', 'litres-sb-img'],
+                'callbackVerified': False,
+                'callbackSeen': True,
+                'profileVerified': True,
+                'profileMarkers': ['Мои книги', 'Профиль'],
             },
         )
 

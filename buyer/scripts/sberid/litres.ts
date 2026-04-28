@@ -18,6 +18,13 @@ type TraceEvent = {
   details?: Record<string, unknown>;
 };
 
+type AuthVerification = {
+  verified: boolean;
+  callback_seen: boolean;
+  markers: string[];
+  login_form_seen: boolean;
+};
+
 function arg(name: string): string {
   const index = process.argv.indexOf(name);
   if (index < 0 || index + 1 >= process.argv.length) {
@@ -50,6 +57,15 @@ function isSberIdHost(host: string): boolean {
   return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
 }
 
+function isLitresAuthCallbackUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return isSameOrSubdomain(normalizeHost(url.hostname), 'litres.ru') && url.pathname.startsWith('/callbacks/social-auth/');
+  } catch {
+    return false;
+  }
+}
+
 export function authEntryUrl(startUrl: string): string {
   const url = new URL(startUrl);
   const host = normalizeHost(url.hostname);
@@ -60,6 +76,33 @@ export function authEntryUrl(startUrl: string): string {
   url.search = '';
   url.hash = '';
   return url.toString();
+}
+
+function authVerificationUrl(startUrl: string): string {
+  const url = new URL(startUrl);
+  url.pathname = '/me/profile/';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+export function verifyLitresAuthSnapshot(rawUrl: string, bodyText: string | null | undefined): AuthVerification {
+  const callbackSeen = isLitresAuthCallbackUrl(rawUrl);
+  const text = String(bodyText || '').replace(/\s+/g, ' ').trim();
+  const markers: string[] = [];
+  if (/(^|\s)Мои книги(\s|$)/u.test(text)) {
+    markers.push('Мои книги');
+  }
+  if (/(^|\s)Профиль(\s|$)/u.test(text)) {
+    markers.push('Профиль');
+  }
+  const loginFormSeen = /Вход или регистрация|Почта или логин|auth\/login|Продолжить с почтой/iu.test(text);
+  return {
+    verified: !callbackSeen && markers.includes('Мои книги') && markers.includes('Профиль') && !loginFormSeen,
+    callback_seen: callbackSeen,
+    markers,
+    login_form_seen: loginFormSeen,
+  };
 }
 
 function cookieCount(storageState: unknown): number {
@@ -140,6 +183,48 @@ async function tracePage(
       body_text_head: bodyText,
     },
   });
+}
+
+async function pageBodyText(page: Page): Promise<string> {
+  return page
+    .locator('body')
+    .innerText({ timeout: 1500 })
+    .then((text) => text.slice(0, 3000))
+    .catch(() => '');
+}
+
+async function verifyAuthPage(page: Page, tracePath: string, event: string): Promise<AuthVerification> {
+  const bodyText = await pageBodyText(page);
+  const verification = verifyLitresAuthSnapshot(page.url(), bodyText);
+  appendTrace(tracePath, {
+    ts: new Date().toISOString(),
+    event,
+    url: page.url(),
+    host: hostFromUrl(page.url()),
+    details: {
+      ...verification,
+      body_text_head: bodyText.slice(0, 500),
+    },
+  });
+  return verification;
+}
+
+async function verifyCurrentOrProfilePage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
+  let verification = await verifyAuthPage(page, tracePath, 'auth_verify_current');
+  if (verification.verified) {
+    return verification;
+  }
+
+  await page.goto(authVerificationUrl(startUrl), { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
+  verification = await verifyAuthPage(page, tracePath, 'auth_verify_profile');
+  if (verification.verified) {
+    return verification;
+  }
+
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
+  return verifyAuthPage(page, tracePath, 'auth_verify_start_url');
 }
 
 type ClickTarget = {
@@ -607,12 +692,47 @@ async function main(): Promise<void> {
     const deadline = Date.now() + 45000;
     let finalUrl = authPage.url();
     let finalHost = hostFromUrl(finalUrl);
+    let callbackSeen = false;
     while (Date.now() < deadline) {
       await authPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => undefined);
       finalUrl = authPage.url();
       finalHost = hostFromUrl(finalUrl);
+      if (isLitresAuthCallbackUrl(finalUrl)) {
+        callbackSeen = true;
+        await authPage.waitForTimeout(800);
+        continue;
+      }
 
       if (isSameOrSubdomain(finalHost, targetHost) && (sberLoops > 0 || finalUrl !== startUrl)) {
+        const verification = await verifyCurrentOrProfilePage(authPage, startUrl, tracePath);
+        finalUrl = authPage.url();
+        finalHost = hostFromUrl(finalUrl);
+        if (!verification.verified) {
+          save(outputPath, {
+            status: 'failed',
+            reason_code: 'auth_failed_invalid_session',
+            message: 'SberId callback вернулся на Litres, но залогиненное состояние не подтвердилось.',
+            artifacts: {
+              script: 'litres',
+              final_url: finalUrl,
+              final_host: finalHost,
+              auth_entry_url: entryUrl,
+              cookies_loaded: cookiesLoaded,
+              login_click: loginClickLabel,
+              other_ways_click: otherWaysClick?.label ?? null,
+              sber_id_click: sberClick.label,
+              trace_path: tracePath,
+              sber_loops: sberLoops,
+              callback_seen: callbackSeen || verification.callback_seen,
+              auth_verified: false,
+              auth_verified_url: finalUrl,
+              auth_markers: verification.markers,
+              login_form_seen: verification.login_form_seen,
+              context_prepared_for_reuse: false,
+            },
+          });
+          return;
+        }
         save(outputPath, {
           status: 'completed',
           reason_code: 'auth_ok',
@@ -628,6 +748,10 @@ async function main(): Promise<void> {
             sber_id_click: sberClick.label,
             trace_path: tracePath,
             sber_loops: sberLoops,
+            callback_seen: callbackSeen || verification.callback_seen,
+            auth_verified: true,
+            auth_verified_url: finalUrl,
+            auth_markers: verification.markers,
             context_prepared_for_reuse: true,
           },
         });
@@ -676,6 +800,10 @@ async function main(): Promise<void> {
         sber_id_click: sberClick.label,
         trace_path: tracePath,
         sber_loops: sberLoops,
+        callback_seen: callbackSeen,
+        auth_verified: false,
+        auth_verified_url: finalUrl,
+        auth_markers: [],
         context_prepared_for_reuse: false,
       },
     });
