@@ -257,6 +257,44 @@ def test_get_run_detail_merges_registry_metadata_and_runtime_callbacks(tmp_path:
     assert missing_case['error'] == 'timeout after 600s'
 
 
+def test_get_run_detail_uses_ask_user_message_as_waiting_question(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(
+                eval_case_id='case-a',
+                case_version='1',
+                state=CaseRunState.WAITING_USER,
+                session_id='session-a',
+                waiting_reply_id='reply-a',
+            )
+        ],
+        status=EvalRunStatus.RUNNING,
+    )
+    store.append_callback_event(
+        'eval-run-001',
+        'case-a',
+        BuyerCallbackEnvelope(
+            event_id='event-ask-a',
+            session_id='session-a',
+            event_type=CallbackEventType.ASK_USER,
+            occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
+            idempotency_key='idem-ask-a',
+            payload={'reply_id': 'reply-a', 'message': 'Продолжить оформление?'},
+            eval_run_id='eval-run-001',
+            eval_case_id='case-a',
+        ),
+        state=CaseRunState.WAITING_USER,
+        waiting_reply_id='reply-a',
+    )
+
+    response = client.get('/runs/eval-run-001')
+
+    assert response.status_code == 200
+    assert response.json()['run']['cases'][0]['waiting_question'] == 'Продолжить оформление?'
+
+
 def test_get_run_detail_returns_422_for_corrupt_manifest(tmp_path: Path) -> None:
     client, _store = _client(tmp_path, cases=[], raise_server_exceptions=False)
     manifest_path = tmp_path / 'eval-run-corrupt' / 'manifest.json'

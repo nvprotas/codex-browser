@@ -10,6 +10,8 @@ class Settings(BaseSettings):
 
     app_name: str = 'micro-ui-mvp'
     buyer_base_url: str = 'http://buyer:8000'
+    eval_service_base_url: str = 'http://eval_service:8090'
+    ui_poll_interval_sec: int = 3
 
 
 @lru_cache

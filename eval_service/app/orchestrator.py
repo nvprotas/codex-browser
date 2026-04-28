@@ -349,6 +349,7 @@ def _is_terminal_case_state(state: CaseRunState) -> bool:
     return state in {
         CaseRunState.SKIPPED_AUTH_MISSING,
         CaseRunState.FINISHED,
+        CaseRunState.FAILED,
         CaseRunState.TIMEOUT,
         CaseRunState.JUDGED,
         CaseRunState.JUDGE_FAILED,

@@ -373,6 +373,9 @@
     </main>
 
     <script src="/static/app.js" defer></script>
+    <script>
+      window.EVAL_SERVICE_BASE_URL = {{ eval_service_public_base_url | default('/api/eval') | tojson }};
+    </script>
     <script src="/static/eval.js" defer></script>
   </body>
 </html>

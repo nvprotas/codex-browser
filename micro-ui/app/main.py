@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -41,7 +41,10 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name='index.html',
-        context={},
+        context={
+            'poll_interval_ms': settings.ui_poll_interval_sec * 1000,
+            'eval_service_public_base_url': '/api/eval',
+        },
     )
 
 
@@ -90,6 +93,34 @@ async def api_events_stream(request: Request, session_id: str | None = None) -> 
 @app.get('/api/sessions', response_model=list[SessionSummary])
 async def api_sessions() -> list[SessionSummary]:
     return await store.list_sessions()
+
+
+@app.api_route('/api/eval/{path:path}', methods=['GET', 'POST'])
+async def api_eval_proxy(path: str, request: Request) -> Response:
+    target = f"{settings.eval_service_base_url.rstrip('/')}/{path}"
+    body = await request.body()
+    headers = {'Content-Type': request.headers.get('content-type', 'application/json')}
+
+    try:
+        timeout = httpx.Timeout(60.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                request.method,
+                target,
+                params=request.query_params,
+                content=body if body else None,
+                headers=headers,
+            )
+            response.raise_for_status()
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                media_type=response.headers.get('content-type', 'application/json'),
+            )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+    except Exception as exc:  # noqa: BLE001 - UI должен показать причину eval_service
+        raise HTTPException(status_code=502, detail=f'Не удалось обратиться к eval_service: {exc}') from exc
 
 
 @app.post('/api/tasks', response_model=TaskCreateResponse, status_code=201)

@@ -237,6 +237,66 @@ def test_buyer_callback_payment_ready_and_scenario_finished_update_case_state(tm
     assert finished_case.finished_at == datetime(2026, 4, 28, 12, 0, 45, tzinfo=UTC)
 
 
+def test_buyer_callback_failed_scenario_finished_marks_case_failed(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+
+    response = client.post(
+        '/callbacks/buyer',
+        json=_callback_payload(
+            'scenario_finished',
+            {'status': 'failed', 'message': 'Покупка завершилась ошибкой.'},
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()['state'] == 'failed'
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.FAILED
+    assert case.finished_at is not None
+    assert case.waiting_reply_id is None
+    assert 'Покупка завершилась ошибкой.' in (case.error or '')
+
+
+def test_callback_with_eval_ids_rejects_mismatched_session_id(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    store.update_case(
+        'eval-20260428-120000',
+        'litres_book_odyssey_001',
+        session_id='session-real',
+        state=CaseRunState.RUNNING,
+    )
+
+    payload = {
+        **_callback_payload('payment_ready', {'order_id': 'order-1'}),
+        'session_id': 'session-other',
+    }
+
+    response = client.post('/callbacks/buyer', json=payload)
+
+    assert response.status_code == 409
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.RUNNING
+    assert case.session_id == 'session-real'
+    assert case.callback_events == []
+
+
+def test_callback_with_eval_ids_can_initialize_missing_session_id(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.session_id is None
+
+    payload = _callback_payload('session_started', {'message': 'started'})
+    response = client.post('/callbacks/buyer', json=payload)
+
+    assert response.status_code == 200
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.session_id == 'session-123'
+    assert case.callback_events[0].event_type == CallbackEventType.SESSION_STARTED
+
+
 def test_buyer_callback_appends_late_terminal_events_without_mutating_terminal_case(tmp_path: Path) -> None:
     client, store, _buyer = _client_with_store(tmp_path)
     terminal_finished_at = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)

@@ -193,16 +193,37 @@
     return [];
   }
 
+  function normalizeRunCase(item) {
+    const callbacks = extractList(item, ['callbacks', 'callback_events']);
+    return {
+      ...item,
+      runtime_status: item.runtime_status || item.state || 'pending',
+      callbacks,
+      title: item.title || item.eval_case_id || '-',
+      host: item.host || '-',
+      waiting_question: item.waiting_question || null,
+      waiting_reply_id: item.waiting_reply_id || null,
+      session_id: item.session_id || null,
+    };
+  }
+
   function normalizeRun(data) {
     const source = data?.run || data || {};
     return {
       ...source,
-      cases: extractList(source, ['cases', 'case_results', 'items']),
+      cases: extractList(source, ['cases', 'case_results', 'items']).map(normalizeRunCase),
     };
   }
 
   function extractEvaluations(data) {
     return extractList(data, ['evaluations', 'results', 'items']);
+  }
+
+  async function loadRunDetail(evalRunId) {
+    const data = await evalRequest(CONTRACT_PATHS.runDetail, { evalRunId });
+    state.activeRun = normalizeRun(data);
+    state.evaluations = extractEvaluations(data);
+    return data;
   }
 
   function statusLabel(status) {
@@ -635,6 +656,9 @@
       });
       state.activeRun = normalizeRun(data);
       state.evaluations = [];
+      if (state.activeRun.eval_run_id && window.EVAL_SERVICE_BASE_URL) {
+        await loadRunDetail(state.activeRun.eval_run_id);
+      }
       nodes.startResult.textContent = JSON.stringify(
         {
           eval_run_id: state.activeRun.eval_run_id,
@@ -668,18 +692,22 @@
           message,
         },
       });
-      waiting.runtime_status = 'running';
-      waiting.callbacks.push({
-        event_id: `${state.activeRun.eval_run_id}-operator-reply`,
-        event_type: 'operator_reply',
-        occurred_at: nowIso(),
-        session_id: waiting.session_id,
-        reply_id: waiting.waiting_reply_id,
-      });
-      waiting.waiting_reply_id = null;
-      waiting.waiting_question = null;
       nodes.replyResult.textContent = JSON.stringify(data, null, 2);
       nodes.replyMessage.value = '';
+      if (state.activeRun?.eval_run_id && window.EVAL_SERVICE_BASE_URL) {
+        await loadRunDetail(state.activeRun.eval_run_id);
+      } else {
+        waiting.runtime_status = 'running';
+        waiting.callbacks.push({
+          event_id: `${state.activeRun.eval_run_id}-operator-reply`,
+          event_type: 'operator_reply',
+          occurred_at: nowIso(),
+          session_id: waiting.session_id,
+          reply_id: waiting.waiting_reply_id,
+        });
+        waiting.waiting_reply_id = null;
+        waiting.waiting_question = null;
+      }
       renderAll();
     } catch (error) {
       nodes.replyResult.textContent = String(error.message || error);

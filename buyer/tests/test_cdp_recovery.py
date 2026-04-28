@@ -78,7 +78,16 @@ class _RecordingCallbackClient:
     def __init__(self) -> None:
         self.delivered: list[EventEnvelope] = []
 
-    def build_envelope(self, session_id: str, event_type: str, payload: dict, idempotency_suffix: str | None = None) -> EventEnvelope:
+    def build_envelope(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict,
+        idempotency_suffix: str | None = None,
+        *,
+        eval_run_id: str | None = None,
+        eval_case_id: str | None = None,
+    ) -> EventEnvelope:
         seq = len(self.delivered) + 1
         suffix = idempotency_suffix or str(seq)
         return EventEnvelope(
@@ -88,6 +97,8 @@ class _RecordingCallbackClient:
             occurred_at=datetime.now(timezone.utc),
             idempotency_key=f'{session_id}:{event_type}:{suffix}',
             payload=payload,
+            eval_run_id=eval_run_id,
+            eval_case_id=eval_case_id,
         )
 
     async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
@@ -487,6 +498,44 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         refreshed = await store.get(state.session_id)
         self.assertEqual([event.event_type for event in refreshed.events], ['agent_stream_event'])
         self.assertEqual(refreshed.events[0].payload['source'], 'codex')
+
+    async def test_callbacks_include_eval_ids_from_task_metadata(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Шаг оплаты найден',
+                order_id=None,
+                artifacts={},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=0,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='Купить книгу',
+            start_url='https://example.test',
+            callback_url='http://callback',
+            metadata={'eval_run_id': 'eval-run-001', 'eval_case_id': 'case-a'},
+            auth=None,
+        )
+        await state.task_ref
+
+        event = callback_client.delivered[0]
+        self.assertEqual(event.event_type, 'session_started')
+        self.assertEqual(event.eval_run_id, 'eval-run-001')
+        self.assertEqual(event.eval_case_id, 'case-a')
 
     async def test_transient_failure_does_not_finish_session_immediately(self) -> None:
         callback_client = _RecordingCallbackClient()

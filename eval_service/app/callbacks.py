@@ -57,6 +57,7 @@ async def receive_buyer_callback(
     try:
         manifest = store.read_manifest(eval_run_id)
         case = _find_case(manifest.cases, eval_case_id)
+        _validate_callback_session(case, envelope)
         envelope = envelope.model_copy(update={'eval_run_id': eval_run_id, 'eval_case_id': eval_case_id})
         manifest = store.append_callback_event(
             eval_run_id,
@@ -233,10 +234,18 @@ def _state_updates_for_callback(envelope: BuyerCallbackEnvelope, case: EvalRunCa
             'waiting_reply_id': None,
         }
     if envelope.event_type == CallbackEventType.SCENARIO_FINISHED:
+        if _payload_status(envelope) == 'failed':
+            return {
+                'state': CaseRunState.FAILED,
+                'finished_at': envelope.occurred_at,
+                'waiting_reply_id': None,
+                'error': _scenario_failure_error(envelope),
+            }
         return {
             'state': CaseRunState.FINISHED,
             'finished_at': envelope.occurred_at,
             'waiting_reply_id': None,
+            'error': None,
         }
     return {}
 
@@ -302,6 +311,28 @@ def _payload_string(envelope: BuyerCallbackEnvelope, key: str) -> str:
     return value
 
 
+def _payload_status(envelope: BuyerCallbackEnvelope) -> str | None:
+    status_value = envelope.payload.get('status')
+    if isinstance(status_value, str) and status_value:
+        return status_value.strip().lower()
+    return None
+
+
+def _scenario_failure_error(envelope: BuyerCallbackEnvelope) -> str:
+    message = envelope.payload.get('message')
+    if isinstance(message, str) and message:
+        return message
+    return f'buyer scenario failed: {envelope.payload}'
+
+
+def _validate_callback_session(case: EvalRunCase, envelope: BuyerCallbackEnvelope) -> None:
+    if case.session_id is not None and case.session_id != envelope.session_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='callback session_id не совпадает с eval case session_id',
+        )
+
+
 def _require_case_value(value: str | None, name: str) -> str:
     if not value:
         raise HTTPException(
@@ -315,6 +346,7 @@ def _is_terminal_case_state(state: CaseRunState) -> bool:
     return state in {
         CaseRunState.SKIPPED_AUTH_MISSING,
         CaseRunState.FINISHED,
+        CaseRunState.FAILED,
         CaseRunState.TIMEOUT,
         CaseRunState.JUDGED,
         CaseRunState.JUDGE_FAILED,

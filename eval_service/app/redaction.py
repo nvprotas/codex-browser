@@ -205,15 +205,27 @@ def _redact_url(raw_url: str) -> str:
 
     lower_url = raw_url.lower()
     query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+    fragment_pairs = parse_qsl(parts.fragment, keep_blank_values=True) if '=' in parts.fragment else []
     has_sensitive_query = any(key.lower() in SENSITIVE_QUERY_KEYS for key, _ in query_pairs)
+    has_sensitive_fragment = any(key.lower() in SENSITIVE_QUERY_KEYS for key, _ in fragment_pairs)
     is_payment_url = any(marker in lower_url for marker in PAYMENT_URL_MARKERS)
-    if is_payment_url or has_sensitive_query:
+    if is_payment_url or has_sensitive_query or has_sensitive_fragment:
         if is_payment_url:
             return REDACTED_PAYMENT_URL
         safe_query = [
             (key, REDACTED if key.lower() in SENSITIVE_QUERY_KEYS else value)
             for key, value in query_pairs
         ]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(safe_query), parts.fragment))
+        safe_fragment = (
+            urlencode(
+                [
+                    (key, REDACTED if key.lower() in SENSITIVE_QUERY_KEYS else value)
+                    for key, value in fragment_pairs
+                ]
+            )
+            if fragment_pairs
+            else parts.fragment
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(safe_query), safe_fragment))
 
     return raw_url

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qsl, urlsplit
 
 from eval_service.app.redaction import sanitize_for_judge_input
 
@@ -76,3 +77,28 @@ def test_sanitize_for_judge_input_redacts_sensitive_text_without_dropping_safe_c
     assert 'order_777' not in serialized
     assert 'payment-secret' not in serialized
     assert 'contains-user-token' not in serialized
+
+
+def test_redacts_sensitive_url_fragment_params() -> None:
+    payload = {
+        'url': 'https://login.example/callback#access_token=secret-token&state=secret-state&screen=checkout'
+    }
+
+    sanitized = sanitize_for_judge_input(payload)
+    fragment_params = dict(parse_qsl(urlsplit(sanitized['url']).fragment, keep_blank_values=True))
+
+    assert fragment_params == {
+        'access_token': '[redacted]',
+        'state': '[redacted]',
+        'screen': 'checkout',
+    }
+    assert 'secret-token' not in str(sanitized)
+    assert 'secret-state' not in str(sanitized)
+
+
+def test_keeps_plain_non_sensitive_url_fragment() -> None:
+    payload = {'url': 'https://shop.example/product#details'}
+
+    sanitized = sanitize_for_judge_input(payload)
+
+    assert sanitized['url'] == 'https://shop.example/product#details'

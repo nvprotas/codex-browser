@@ -38,6 +38,7 @@ class CaseRunState(StrEnum):
     WAITING_USER = 'waiting_user'
     PAYMENT_READY = 'payment_ready'
     FINISHED = 'finished'
+    FAILED = 'failed'
     TIMEOUT = 'timeout'
     JUDGE_PENDING = 'judge_pending'
     JUDGED = 'judged'

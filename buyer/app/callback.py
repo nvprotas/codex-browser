@@ -20,7 +20,16 @@ class CallbackClient:
         self._settings = settings
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.callback_timeout_sec))
 
-    def build_envelope(self, session_id: str, event_type: str, payload: dict, idempotency_suffix: str | None = None) -> EventEnvelope:
+    def build_envelope(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict,
+        idempotency_suffix: str | None = None,
+        *,
+        eval_run_id: str | None = None,
+        eval_case_id: str | None = None,
+    ) -> EventEnvelope:
         event_id = str(uuid4())
         idempotency = f'{session_id}:{event_type}:{idempotency_suffix or event_id}'
         return EventEnvelope(
@@ -30,6 +39,8 @@ class CallbackClient:
             occurred_at=self._utc_now(),
             idempotency_key=idempotency,
             payload=payload,
+            eval_run_id=eval_run_id,
+            eval_case_id=eval_case_id,
         )
 
     async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:

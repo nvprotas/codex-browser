@@ -255,9 +255,10 @@ def _placeholder_case(run_case: EvalRunCase) -> EvalCase:
 def _latest_waiting_question(run_case: EvalRunCase) -> str | None:
     for event in reversed(run_case.callback_events):
         if event.event_type == CallbackEventType.ASK_USER:
-            question = event.payload.get('question')
-            if isinstance(question, str) and question:
-                return question
+            for key in ('message', 'question'):
+                value = event.payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
     return None
 
 
