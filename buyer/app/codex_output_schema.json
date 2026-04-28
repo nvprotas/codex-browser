@@ -16,6 +16,22 @@
     "order_id": {
       "type": ["string", "null"]
     },
+    "payment_evidence": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["source", "url"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "const": "litres_payecom_iframe"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "default": null
+    },
     "profile_updates": {
       "type": "array",
       "items": {

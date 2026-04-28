@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -81,10 +81,18 @@ class SessionDetail(SessionView):
     events: list[EventEnvelope] = Field(default_factory=list)
 
 
+class PaymentEvidence(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    source: Literal['litres_payecom_iframe']
+    url: str = Field(min_length=1)
+
+
 class AgentOutput(BaseModel):
     status: str = Field(description='needs_user_input|completed|failed')
     message: str
     order_id: str | None = None
+    payment_evidence: PaymentEvidence | None = None
     profile_updates: list[str] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
 

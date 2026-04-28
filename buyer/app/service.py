@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from ._utils import head_text as _head_text, tail_text as _tail_text
@@ -19,7 +20,7 @@ from .auth_scripts import (
 )
 from .callback import CallbackClient, CallbackDeliveryError
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
-from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
+from .models import AgentOutput, EventEnvelope, PaymentEvidence, SessionStatus, TaskAuthPayload
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
 from .state import (
@@ -209,6 +210,15 @@ class BuyerService:
                     recovery_started_at = None
                     recovery_attempts = 0
                     last_recovery_error_tail = 'none'
+                    contract_failure = _completed_result_contract_failure(state.start_url, result)
+                    if contract_failure:
+                        await self._handle_failed(
+                            state,
+                            contract_failure,
+                            _artifacts_with_payment_evidence(result),
+                            auth_summary=auth_summary,
+                        )
+                        return
                     await self._handle_completed(state, result, auth_summary=auth_summary)
                     return
 
@@ -290,6 +300,8 @@ class BuyerService:
         auth_summary: dict[str, Any] | None,
     ) -> None:
         artifacts = dict(result.artifacts)
+        if result.payment_evidence is not None:
+            artifacts['payment_evidence'] = result.payment_evidence.model_dump(mode='json')
         if auth_summary:
             artifacts['auth'] = auth_summary
         if result.order_id:
@@ -568,6 +580,27 @@ class BuyerService:
             return None
 
         if script_result.status == 'completed' and script_result.order_id:
+            payment_evidence = _payment_evidence_from_purchase_script(script_result)
+            if _is_litres_url(state.start_url) and payment_evidence is None:
+                await self._store.add_agent_memory(
+                    state.session_id,
+                    'system',
+                    (
+                        '[PURCHASE_SCRIPT_FALLBACK] '
+                        f'Быстрый purchase-скрипт для {domain} вернул completed/order_id, '
+                        'но не подтвердил Litres SberPay iframe payecom.ru/pay_ru. '
+                        'Продолжай через generic browser-flow.'
+                    ),
+                )
+                logger.warning(
+                    'purchase_script_invalid_payment_evidence_fallback session_id=%s domain=%s order_id=%s artifacts=%s',
+                    state.session_id,
+                    domain,
+                    script_result.order_id,
+                    _tail_text(json.dumps(script_result.artifacts, ensure_ascii=False, default=str), limit=700),
+                )
+                return None
+
             logger.info(
                 'purchase_script_completed session_id=%s domain=%s order_id=%s',
                 state.session_id,
@@ -578,6 +611,7 @@ class BuyerService:
                 status='completed',
                 message=script_result.message,
                 order_id=script_result.order_id,
+                payment_evidence=payment_evidence,
                 artifacts={'purchase_script': script_result.artifacts},
             )
 
@@ -817,6 +851,95 @@ def _is_valid_storage_state(payload: dict[str, Any] | None) -> bool:
     cookies = payload.get('cookies')
     origins = payload.get('origins')
     return isinstance(cookies, list) and isinstance(origins, list)
+
+
+def _is_litres_url(raw_url: str) -> bool:
+    return is_domain_in_allowlist(domain_from_url(raw_url), {'litres.ru'})
+
+
+def _payecom_order_id_from_url(raw_url: str) -> str | None:
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+    host = (parsed.hostname or '').lower()
+    if host != 'payecom.ru' and not host.endswith('.payecom.ru'):
+        return None
+    if not parsed.path.startswith('/pay_ru'):
+        return None
+    order_values = parse_qs(parsed.query).get('orderId') or []
+    if not order_values:
+        return None
+    order_id = str(order_values[0]).strip()
+    return order_id or None
+
+
+def _payment_evidence_from_purchase_script(script_result: Any) -> PaymentEvidence | None:
+    artifacts = script_result.artifacts if isinstance(getattr(script_result, 'artifacts', None), dict) else {}
+    frame_src = artifacts.get('payment_frame_src')
+    order_id = str(getattr(script_result, 'order_id', '') or '').strip()
+    if isinstance(frame_src, str) and order_id and _payecom_order_id_from_url(frame_src) == order_id:
+        return PaymentEvidence(source='litres_payecom_iframe', url=frame_src)
+    return None
+
+
+def _payment_evidence_to_dict(value: PaymentEvidence | dict[str, Any] | None) -> dict[str, Any] | None:
+    if isinstance(value, PaymentEvidence):
+        return value.model_dump(mode='json')
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _iter_litres_payment_evidence_urls(result: AgentOutput) -> list[str]:
+    urls: list[str] = []
+    direct_evidence = _payment_evidence_to_dict(result.payment_evidence)
+    if direct_evidence and direct_evidence.get('source') == 'litres_payecom_iframe':
+        url = direct_evidence.get('url')
+        if isinstance(url, str):
+            urls.append(url)
+
+    artifact_sources: list[dict[str, Any]] = [result.artifacts]
+    purchase_script = result.artifacts.get('purchase_script')
+    if isinstance(purchase_script, dict):
+        artifact_sources.append(purchase_script)
+
+    for source in artifact_sources:
+        frame_src = source.get('payment_frame_src')
+        if isinstance(frame_src, str):
+            urls.append(frame_src)
+        evidence = _payment_evidence_to_dict(source.get('payment_evidence'))  # type: ignore[arg-type]
+        if evidence and evidence.get('source') == 'litres_payecom_iframe':
+            url = evidence.get('url')
+            if isinstance(url, str):
+                urls.append(url)
+    return urls
+
+
+def _has_valid_litres_payment_evidence(result: AgentOutput) -> bool:
+    if not result.order_id:
+        return False
+    return any(_payecom_order_id_from_url(url) == result.order_id for url in _iter_litres_payment_evidence_urls(result))
+
+
+def _completed_result_contract_failure(start_url: str, result: AgentOutput) -> str | None:
+    if not _is_litres_url(start_url):
+        return None
+    if result.order_id is None or not str(result.order_id).strip():
+        return 'Litres completed result rejected: order_id обязателен для подтвержденного шага SberPay.'
+    if not _has_valid_litres_payment_evidence(result):
+        return (
+            'Litres completed result rejected: order_id должен быть подтвержден '
+            'payment_evidence из iframe https://payecom.ru/pay_ru?...orderId=...'
+        )
+    return None
+
+
+def _artifacts_with_payment_evidence(result: AgentOutput) -> dict[str, Any]:
+    artifacts = dict(result.artifacts)
+    if result.payment_evidence is not None:
+        artifacts['payment_evidence'] = result.payment_evidence.model_dump(mode='json')
+    return artifacts
 
 
 def _build_auth_retry_context(*, attempt: int, max_attempts: int, script_result: Any) -> dict[str, Any]:
