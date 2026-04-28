@@ -269,10 +269,9 @@
   font-size: 0.72rem;
 }
 
-.eval-sparkline {
-  display: flex;
-  align-items: end;
-  gap: 5px;
+.eval-line-chart {
+  display: block;
+  width: 100%;
   height: 64px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -280,14 +279,20 @@
     linear-gradient(rgba(18, 35, 56, 0.05) 1px, transparent 1px),
     rgba(255, 255, 255, 0.48);
   background-size: 100% 16px;
-  padding: 8px;
 }
 
-.eval-sparkline span {
-  flex: 1 1 0;
-  min-width: 6px;
-  border-radius: var(--radius-pill) var(--radius-pill) 3px 3px;
-  background: linear-gradient(180deg, rgba(22, 103, 168, 0.78), rgba(28, 141, 88, 0.7));
+.eval-line-grid line {
+  stroke: rgba(18, 35, 56, 0.11);
+  stroke-width: 1;
+}
+
+.eval-line-path {
+  fill: none;
+  stroke: var(--info);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.6;
+  vector-effect: non-scaling-stroke;
 }
 
 @media (max-width: 1180px) {

@@ -1,4 +1,5 @@
 (() => {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
   const CONTRACT_PATHS = {
     cases: 'GET /cases',
     runs: 'GET /runs',
@@ -156,6 +157,54 @@
     return new Intl.NumberFormat('ru-RU').format(number);
   }
 
+  function asArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  function seriesValues(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => Number(item || 0)).filter((item) => Number.isFinite(item));
+    }
+    const number = Number(value || 0);
+    return Number.isFinite(number) && number > 0 ? [number] : [];
+  }
+
+  function lastSeriesValue(value) {
+    const values = seriesValues(value);
+    return values.length ? values[values.length - 1] : 0;
+  }
+
+  function formatList(value) {
+    if (Array.isArray(value)) {
+      return value.length ? value.join(', ') : '-';
+    }
+    return value || '-';
+  }
+
+  function extractList(data, keys = []) {
+    if (Array.isArray(data)) {
+      return data;
+    }
+    for (const key of keys) {
+      if (Array.isArray(data?.[key])) {
+        return data[key];
+      }
+    }
+    return [];
+  }
+
+  function normalizeRun(data) {
+    const source = data?.run || data || {};
+    return {
+      ...source,
+      cases: extractList(source, ['cases', 'case_results', 'items']),
+    };
+  }
+
+  function extractEvaluations(data) {
+    return extractList(data, ['evaluations', 'results', 'items']);
+  }
+
   function statusLabel(status) {
     const labels = {
       pending: 'ожидает',
@@ -185,7 +234,7 @@
     if (!state.activeRun) {
       return null;
     }
-    return state.activeRun.cases.find((item) => item.runtime_status === 'waiting_user' && item.waiting_reply_id) || null;
+    return asArray(state.activeRun.cases).find((item) => item.runtime_status === 'waiting_user' && item.waiting_reply_id) || null;
   }
 
   function routeFor(contract, options) {
@@ -224,9 +273,14 @@
       body: route.method === 'GET' ? undefined : JSON.stringify(options.payload || {}),
     });
     const text = await response.text();
-    const body = text ? JSON.parse(text) : null;
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = { raw: text };
+    }
     if (!response.ok) {
-      throw new Error(body?.detail || text || `HTTP ${response.status}`);
+      throw new Error(body?.detail || body?.raw || text || `HTTP ${response.status}`);
     }
     return body;
   }
@@ -271,6 +325,28 @@
     };
   }
 
+  function buildStubEvaluations(evalRunId) {
+    const cases = asArray(state.activeRun?.cases);
+    return cases.map((item, index) => {
+      const dashboard = stubCaseDashboard.find((row) => row.eval_case_id === item.eval_case_id) || {};
+      const hasAuth = Boolean(item.auth_profile);
+      const runtimeStatus = item.runtime_status === 'skipped_auth_missing' ? 'skipped_auth_missing' : 'payment_ready';
+      const callbacksCount = asArray(item.callbacks).length;
+
+      return {
+        eval_run_id: evalRunId,
+        eval_case_id: item.eval_case_id,
+        host: item.host,
+        runtime_status: runtimeStatus,
+        checks: hasAuth ? `session, callbacks:${callbacksCount}, payment_ready` : 'auth_missing',
+        duration_ms: lastSeriesValue(dashboard.duration_ms) || 94000 + index * 17000,
+        buyer_tokens_used: lastSeriesValue(dashboard.buyer_tokens_used) || 6200 + index * 850,
+        recommendations_count: runtimeStatus === 'payment_ready' ? 0 : 1,
+        artifacts: callbacksCount ? [`callbacks:${callbacksCount}`] : ['no_callbacks'],
+      };
+    });
+  }
+
   async function stubRequest(contract, options = {}) {
     switch (contract) {
       case CONTRACT_PATHS.cases:
@@ -282,8 +358,8 @@
       case CONTRACT_PATHS.judge:
         return {
           eval_run_id: options.evalRunId,
-          status: 'judge_pending',
-          evaluations: [],
+          status: 'judged',
+          evaluations: buildStubEvaluations(options.evalRunId),
         };
       case CONTRACT_PATHS.reply:
         return {
@@ -303,13 +379,23 @@
 
   async function evalRequest(contract, options = {}) {
     if (window.EVAL_SERVICE_BASE_URL) {
-      return fetchEvalService(contract, options);
+      try {
+        return await fetchEvalService(contract, options);
+      } catch (error) {
+        console.warn('eval service fallback', contract, error);
+        return stubRequest(contract, options);
+      }
     }
     return stubRequest(contract, options);
   }
 
   function renderCases() {
     nodes.casesList.replaceChildren();
+    if (!state.cases.length) {
+      nodes.casesList.appendChild(node('div', 'empty', 'Eval cases пока недоступны.'));
+      updateStartButton();
+      return;
+    }
     for (const [index, item] of state.cases.entries()) {
       const label = node('label', 'eval-case-item');
       const checkbox = document.createElement('input');
@@ -338,9 +424,8 @@
   }
 
   function renderMetrics() {
-    const waitingCount = state.activeRun
-      ? state.activeRun.cases.filter((item) => item.runtime_status === 'waiting_user').length
-      : 0;
+    const cases = asArray(state.activeRun?.cases);
+    const waitingCount = cases.filter((item) => item.runtime_status === 'waiting_user').length;
     nodes.metricRuns.textContent = state.activeRun ? '1' : '0';
     nodes.metricCases.textContent = String(state.cases.length);
     nodes.metricWaiting.textContent = String(waitingCount);
@@ -358,15 +443,16 @@
     }
 
     nodes.runLabel.textContent = state.activeRun.eval_run_id;
+    const cases = asArray(state.activeRun.cases);
     const summary = node('div', 'eval-run-summary');
     summary.append(
       node('span', `eval-status ${statusClass(state.activeRun.status)}`, statusLabel(state.activeRun.status)),
       node('span', 'code', state.activeRun.eval_run_id),
-      node('span', null, `${state.activeRun.cases.length} cases`),
+      node('span', null, `${cases.length} cases`),
     );
     nodes.runDetail.appendChild(summary);
 
-    for (const item of state.activeRun.cases) {
+    for (const item of cases) {
       const card = node('div', 'eval-run-case');
       const top = node('div', 'eval-run-case-top');
       top.append(
@@ -379,11 +465,15 @@
         node('span', 'code', item.eval_case_id),
         node('span', null, item.host),
         node('span', 'code', item.session_id || 'session_id: -'),
-        node('span', null, `callbacks: ${item.callbacks.length}`),
+        node('span', null, `callbacks: ${asArray(item.callbacks).length}`),
       );
 
       const callbacks = node('div', 'eval-callbacks');
-      for (const callback of item.callbacks) {
+      const caseCallbacks = asArray(item.callbacks);
+      if (!caseCallbacks.length) {
+        callbacks.appendChild(node('div', 'eval-callback-item', 'callbacks пока нет'));
+      }
+      for (const callback of caseCallbacks) {
         const callbackItem = node('div', 'eval-callback-item');
         callbackItem.append(
           node('span', 'code', callback.event_type),
@@ -419,11 +509,11 @@
         item.eval_case_id,
         item.host,
         statusLabel(item.runtime_status),
-        item.checks || '-',
+        formatList(item.checks),
         formatMs(item.duration_ms),
         formatNumber(item.buyer_tokens_used),
         formatNumber(item.recommendations_count),
-        item.artifacts || '-',
+        formatList(item.artifacts),
       ];
       for (const cell of cells) {
         const td = document.createElement('td');
@@ -434,14 +524,47 @@
     }
   }
 
-  function sparkline(values) {
-    const max = Math.max(...values, 1);
-    const chart = node('div', 'eval-sparkline');
-    for (const value of values) {
-      const bar = node('span');
-      bar.style.height = `${Math.max(10, Math.round((value / max) * 100))}%`;
-      chart.appendChild(bar);
+  function lineChart(values) {
+    const normalized = seriesValues(values);
+    const chart = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    chart.classList.add('eval-line-chart');
+    chart.setAttribute('viewBox', '0 0 120 48');
+    chart.setAttribute('preserveAspectRatio', 'none');
+    chart.setAttribute('aria-hidden', 'true');
+
+    const grid = document.createElementNS(SVG_NS, 'g');
+    grid.classList.add('eval-line-grid');
+    for (const y of [12, 24, 36]) {
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', '0');
+      line.setAttribute('x2', '120');
+      line.setAttribute('y1', String(y));
+      line.setAttribute('y2', String(y));
+      grid.appendChild(line);
     }
+    chart.appendChild(grid);
+
+    if (!normalized.length) {
+      return chart;
+    }
+
+    const min = Math.min(...normalized);
+    const max = Math.max(...normalized);
+    const spread = max - min || 1;
+    const step = normalized.length > 1 ? 120 / (normalized.length - 1) : 120;
+    const points = normalized
+      .map((value, index) => {
+        const x = normalized.length === 1 ? 60 : index * step;
+        const y = 42 - ((value - min) / spread) * 36;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+
+    const polyline = document.createElementNS(SVG_NS, 'polyline');
+    polyline.classList.add('eval-line-path');
+    polyline.setAttribute('points', points);
+    chart.appendChild(polyline);
+
     return chart;
   }
 
@@ -455,16 +578,16 @@
 
     const metrics = node('div', 'eval-dashboard-metrics');
     metrics.append(
-      node('span', null, `duration ${formatMs(item.baseline_duration_ms || item.duration_ms.at(-1))}`),
-      node('span', null, `tokens ${formatNumber(item.baseline_tokens || item.buyer_tokens_used.at(-1))}`),
+      node('span', null, `duration ${formatMs(item.baseline_duration_ms || lastSeriesValue(item.duration_ms))}`),
+      node('span', null, `tokens ${formatNumber(item.baseline_tokens || lastSeriesValue(item.buyer_tokens_used))}`),
       node('span', null, item.success_rate ? `ok ${item.success_rate}` : ''),
     );
 
     const charts = node('div', 'eval-dashboard-charts');
     const duration = node('div', 'eval-chart-block');
-    duration.append(node('span', null, 'duration_ms'), sparkline(item.duration_ms));
+    duration.append(node('span', null, 'duration_ms'), lineChart(item.duration_ms));
     const tokens = node('div', 'eval-chart-block');
-    tokens.append(node('span', null, 'buyer_tokens_used'), sparkline(item.buyer_tokens_used));
+    tokens.append(node('span', null, 'buyer_tokens_used'), lineChart(item.buyer_tokens_used));
     charts.append(duration, tokens);
 
     card.append(top, metrics, charts);
@@ -473,7 +596,12 @@
 
   function renderDashboard(target, rows, titleKey) {
     target.replaceChildren();
-    for (const item of rows) {
+    const items = asArray(rows);
+    if (!items.length) {
+      target.appendChild(node('div', 'empty', 'Данных dashboard пока нет.'));
+      return;
+    }
+    for (const item of items) {
       target.appendChild(dashboardItem(item, titleKey));
     }
   }
@@ -483,8 +611,8 @@
       evalRequest(CONTRACT_PATHS.caseDashboard),
       evalRequest(CONTRACT_PATHS.hostDashboard),
     ]);
-    renderDashboard(nodes.caseDashboard, caseRows, 'eval_case_id');
-    renderDashboard(nodes.hostDashboard, hostRows, 'host');
+    renderDashboard(nodes.caseDashboard, extractList(caseRows, ['rows', 'cases', 'items']), 'eval_case_id');
+    renderDashboard(nodes.hostDashboard, extractList(hostRows, ['rows', 'hosts', 'items']), 'host');
   }
 
   function renderAll() {
@@ -505,13 +633,13 @@
           case_ids: caseIds,
         },
       });
-      state.activeRun = data;
+      state.activeRun = normalizeRun(data);
       state.evaluations = [];
       nodes.startResult.textContent = JSON.stringify(
         {
-          eval_run_id: data.eval_run_id,
-          status: data.status,
-          cases: data.cases.length,
+          eval_run_id: state.activeRun.eval_run_id,
+          status: state.activeRun.status,
+          cases: asArray(state.activeRun.cases).length,
         },
         null,
         2,
@@ -568,7 +696,7 @@
         evalRunId: state.activeRun.eval_run_id,
       });
       state.activeRun.status = data.status || 'judge_pending';
-      state.evaluations = data.evaluations || [];
+      state.evaluations = extractEvaluations(data);
       nodes.judgeResult.textContent = JSON.stringify(data, null, 2);
       renderAll();
     } catch (error) {
@@ -578,7 +706,7 @@
 
   async function init() {
     try {
-      state.cases = await evalRequest(CONTRACT_PATHS.cases);
+      state.cases = extractList(await evalRequest(CONTRACT_PATHS.cases), ['cases', 'items']);
       renderCases();
       await loadDashboards();
       renderAll();

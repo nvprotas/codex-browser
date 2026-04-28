@@ -47,3 +47,40 @@ class EvalShellStaticTests(unittest.TestCase):
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, js)
+
+    def test_eval_js_has_judge_stub_and_service_fallback(self) -> None:
+        js = (BASE_DIR / 'app/static/eval.js').read_text(encoding='utf-8')
+
+        expected_fragments = [
+            'function buildStubEvaluations',
+            'evaluations: buildStubEvaluations',
+            'eval service fallback',
+            'stubRequest(contract, options)',
+        ]
+
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, js)
+
+    def test_eval_dashboard_uses_svg_line_charts(self) -> None:
+        js = (BASE_DIR / 'app/static/eval.js').read_text(encoding='utf-8')
+        css = (BASE_DIR / 'app/static/eval.css').read_text(encoding='utf-8')
+
+        expected_js_fragments = [
+            "createElementNS('http://www.w3.org/2000/svg'",
+            'eval-line-chart',
+            'eval-line-path',
+            'polyline',
+        ]
+        expected_css_fragments = [
+            '.eval-line-chart',
+            '.eval-line-grid',
+            '.eval-line-path',
+        ]
+
+        for fragment in expected_js_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, js)
+        for fragment in expected_css_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, css)
