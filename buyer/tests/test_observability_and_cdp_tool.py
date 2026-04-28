@@ -28,6 +28,59 @@ from buyer.tools.cdp_tool import (
 )
 
 
+class CodexOutputSchemaTests(unittest.TestCase):
+    def test_all_object_properties_are_required_for_structured_outputs(self) -> None:
+        schema_path = Path(__file__).parents[1] / 'app' / 'codex_output_schema.json'
+        schema = json.loads(schema_path.read_text(encoding='utf-8'))
+        violations: list[str] = []
+
+        def visit(node: object, path: str) -> None:
+            if not isinstance(node, dict):
+                return
+            properties = node.get('properties')
+            if isinstance(properties, dict):
+                required = node.get('required')
+                if not isinstance(required, list):
+                    violations.append(f'{path}: missing required')
+                else:
+                    missing = sorted(set(properties) - set(required))
+                    extra = sorted(set(required) - set(properties))
+                    if missing or extra:
+                        violations.append(f'{path}: missing={missing} extra={extra}')
+                for key, value in properties.items():
+                    visit(value, f'{path}.properties.{key}')
+            for key in ('items', 'anyOf', 'oneOf', 'allOf', '$defs'):
+                value = node.get(key)
+                if isinstance(value, list):
+                    for index, item in enumerate(value):
+                        visit(item, f'{path}.{key}[{index}]')
+                elif isinstance(value, dict):
+                    visit(value, f'{path}.{key}')
+
+        visit(schema, '$')
+
+        self.assertEqual(violations, [])
+
+    def test_schema_avoids_default_keyword_for_structured_outputs(self) -> None:
+        schema_path = Path(__file__).parents[1] / 'app' / 'codex_output_schema.json'
+        schema = json.loads(schema_path.read_text(encoding='utf-8'))
+        default_paths: list[str] = []
+
+        def visit(node: object, path: str) -> None:
+            if isinstance(node, dict):
+                if 'default' in node:
+                    default_paths.append(path)
+                for key, value in node.items():
+                    visit(value, f'{path}.{key}')
+            elif isinstance(node, list):
+                for index, item in enumerate(node):
+                    visit(item, f'{path}[{index}]')
+
+        visit(schema, '$')
+
+        self.assertEqual(default_paths, [])
+
+
 class CdpToolOutputTests(unittest.TestCase):
     def test_html_stdout_is_truncated(self) -> None:
         content = 'x' * (HTML_STDOUT_LIMIT + 7)

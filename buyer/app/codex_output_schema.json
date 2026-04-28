@@ -3,7 +3,7 @@
   "title": "BuyerAgentStepOutput",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "message", "order_id", "profile_updates"],
+  "required": ["status", "message", "order_id", "payment_evidence", "profile_updates"],
   "properties": {
     "status": {
       "type": "string",
@@ -29,16 +29,14 @@
           "type": "string",
           "minLength": 1
         }
-      },
-      "default": null
+      }
     },
     "profile_updates": {
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1
-      },
-      "default": []
+      }
     }
   }
 }
