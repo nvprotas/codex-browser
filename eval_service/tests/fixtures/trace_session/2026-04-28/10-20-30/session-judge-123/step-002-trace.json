@@ -1,0 +1,26 @@
+{
+  "session_id": "session-judge-123",
+  "step": 2,
+  "trace_date": "2026-04-28",
+  "trace_time": "10-20-30",
+  "preflight_summary": "ok: checkout",
+  "prompt_preview": "Проверь платежную границу.",
+  "codex_returncode": 0,
+  "codex_model": "gpt-5.5",
+  "codex_tokens_used": 111,
+  "model_strategy": "primary",
+  "duration_ms": 900,
+  "stdout_tail": "payment boundary ready",
+  "stderr_tail": "",
+  "browser_actions_log_path": "step-002-browser-actions.jsonl",
+  "browser_actions_total": 1,
+  "command_errors": 0,
+  "command_duration_ms": 30,
+  "inter_command_idle_ms": 0,
+  "browser_busy_union_ms": 30,
+  "html_commands": 0,
+  "html_bytes": 0,
+  "command_breakdown": {
+    "url": {"count": 1, "duration_ms": 30, "errors": 0}
+  }
+}
