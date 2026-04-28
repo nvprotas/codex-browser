@@ -5,18 +5,20 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 
 from eval_service.app.aggregation import CHECK_NAMES, aggregate_evaluations
 from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.dashboard import build_cases_payload, build_hosts_payload
 from eval_service.app.judge_input import write_judge_input
-from eval_service.app.judge_runner import JudgeRunner
+from eval_service.app.judge_runner import JudgeRunner, write_fallback_evaluation
 from eval_service.app.models import CallbackEventType, EvalCase, EvaluationResult, EvalRunCase, EvalRunManifest
 from eval_service.app.run_store import RunStore
 from eval_service.app.trace_collector import collect_trace_session
 
 
 router = APIRouter()
+_ARTIFACT_READ_ERRORS = (OSError, ValueError, TypeError)
 
 
 @router.get('/cases')
@@ -26,51 +28,46 @@ async def list_cases(request: Request) -> dict[str, list[dict[str, Any]]]:
 
 
 @router.get('/runs')
-async def list_runs(request: Request) -> dict[str, list[dict[str, Any]]]:
+async def list_runs(request: Request) -> dict[str, Any]:
     runs_dir = _get_run_store(request).runs_dir
     if not runs_dir.is_dir():
         return {'runs': []}
 
     runs: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
     for manifest_path in sorted(runs_dir.glob('*/manifest.json')):
-        manifest = EvalRunManifest.model_validate_json(manifest_path.read_text(encoding='utf-8'))
-        runs.append(_run_summary(manifest, run_dir=manifest_path.parent))
-    return {'runs': runs}
+        manifest = _safe_read_manifest(manifest_path, warnings=warnings)
+        if manifest is None:
+            continue
+        evaluations = _load_raw_run_evaluations(manifest_path.parent, warnings=warnings)
+        runs.append(_run_summary(manifest, run_dir=manifest_path.parent, evaluations=evaluations))
+    return _response_with_warnings({'runs': runs}, warnings)
 
 
 @router.get('/runs/{eval_run_id}')
 async def get_run(eval_run_id: str, request: Request) -> dict[str, Any]:
     store = _get_run_store(request)
-    try:
-        manifest = store.read_manifest(eval_run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f'eval run не найден: {eval_run_id}',
-        ) from exc
+    manifest = _read_manifest_or_raise(store, eval_run_id)
 
     cases_by_id = {case.eval_case_id: case for case in _get_case_registry(request).load_cases()}
+    warnings: list[dict[str, str]] = []
+    run_dir = store.run_dir(eval_run_id)
+    evaluations = _load_raw_run_evaluations(run_dir, warnings=warnings)
     run = {
-        **_run_summary(manifest, run_dir=store.run_dir(eval_run_id)),
+        **_run_summary(manifest, run_dir=run_dir, evaluations=evaluations),
         'summary_path': manifest.summary_path,
         'cases': [_run_case_item(run_case, cases_by_id.get(run_case.eval_case_id)) for run_case in manifest.cases],
     }
-    return {
+    return _response_with_warnings({
         'run': run,
-        'evaluations': _load_run_evaluations(store.run_dir(eval_run_id), manifest=manifest),
-    }
+        'evaluations': _load_run_evaluations(run_dir, manifest=manifest, raw_evaluations=evaluations),
+    }, warnings)
 
 
 @router.post('/runs/{eval_run_id}/judge')
 async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
     store = _get_run_store(request)
-    try:
-        manifest = store.read_manifest(eval_run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f'eval run не найден: {eval_run_id}',
-        ) from exc
+    manifest = _read_manifest_or_raise(store, eval_run_id)
 
     settings = request.app.state.settings
     cases_by_id = {case.eval_case_id: case for case in _get_case_registry(request).load_cases()}
@@ -93,7 +90,17 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
             case_state=run_case.state.value,
             case_run=run_case.model_dump(mode='json'),
         )
-        result = judge_runner.run(judge_input_path)
+        try:
+            result = await run_in_threadpool(judge_runner.run, judge_input_path)
+        except Exception as exc:
+            judge_input = _read_json_object(judge_input_path)
+            result = write_fallback_evaluation(
+                _evaluation_path_for_judge_input(judge_input_path, judge_input),
+                judge_input,
+                status='judge_failed',
+                reason=_judge_exception_reason(exc),
+                model=settings.eval_judge_model,
+            )
         evaluations.append(_evaluation_item(result.evaluation, run_case=run_case))
 
     response_status = 'judge_failed' if any(item.get('status') == 'judge_failed' for item in evaluations) else 'judged'
@@ -105,21 +112,29 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get('/dashboard/cases')
-async def dashboard_cases(request: Request) -> dict[str, list[dict[str, Any]]]:
+async def dashboard_cases(request: Request) -> dict[str, Any]:
+    warnings: list[dict[str, str]] = []
     summary = aggregate_evaluations(
-        _load_all_evaluations(_get_run_store(request).runs_dir),
+        _load_all_evaluations(_get_run_store(request).runs_dir, warnings=warnings),
         baseline_window=request.app.state.settings.eval_baseline_window,
     )
-    return {'rows': [_case_dashboard_row(row) for row in build_cases_payload(summary)]}
+    return _response_with_warnings(
+        {'rows': [_case_dashboard_row(row) for row in build_cases_payload(summary)]},
+        warnings,
+    )
 
 
 @router.get('/dashboard/hosts')
-async def dashboard_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
+async def dashboard_hosts(request: Request) -> dict[str, Any]:
+    warnings: list[dict[str, str]] = []
     summary = aggregate_evaluations(
-        _load_all_evaluations(_get_run_store(request).runs_dir),
+        _load_all_evaluations(_get_run_store(request).runs_dir, warnings=warnings),
         baseline_window=request.app.state.settings.eval_baseline_window,
     )
-    return {'rows': [_host_dashboard_row(row) for row in build_hosts_payload(summary)]}
+    return _response_with_warnings(
+        {'rows': [_host_dashboard_row(row) for row in build_hosts_payload(summary)]},
+        warnings,
+    )
 
 
 def _get_case_registry(request: Request) -> CaseRegistry:
@@ -132,6 +147,29 @@ def _get_run_store(request: Request) -> RunStore:
         store = RunStore(request.app.state.settings.eval_runs_dir)
         request.app.state.run_store = store
     return store
+
+
+def _read_manifest_or_raise(store: RunStore, eval_run_id: str) -> EvalRunManifest:
+    try:
+        return store.read_manifest(eval_run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'eval run не найден: {eval_run_id}',
+        ) from exc
+    except _ARTIFACT_READ_ERRORS as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_artifact_warning(store.manifest_path(eval_run_id), exc),
+        ) from exc
+
+
+def _safe_read_manifest(path: Path, *, warnings: list[dict[str, str]]) -> EvalRunManifest | None:
+    try:
+        return EvalRunManifest.model_validate_json(path.read_text(encoding='utf-8'))
+    except _ARTIFACT_READ_ERRORS as exc:
+        warnings.append(_artifact_warning(path, exc))
+        return None
 
 
 def _case_item(case: EvalCase) -> dict[str, Any]:
@@ -150,8 +188,13 @@ def _case_item(case: EvalCase) -> dict[str, Any]:
     }
 
 
-def _run_summary(manifest: EvalRunManifest, *, run_dir: Path) -> dict[str, Any]:
-    evaluations = _load_raw_run_evaluations(run_dir)
+def _run_summary(
+    manifest: EvalRunManifest,
+    *,
+    run_dir: Path,
+    evaluations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    evaluations = evaluations if evaluations is not None else _load_raw_run_evaluations(run_dir)
     return {
         'eval_run_id': manifest.eval_run_id,
         'status': manifest.status.value,
@@ -237,22 +280,41 @@ def _case_metrics(run_case: EvalRunCase) -> dict[str, Any]:
     }
 
 
-def _load_run_evaluations(run_dir: Path, *, manifest: EvalRunManifest | None = None) -> list[dict[str, Any]]:
+def _load_run_evaluations(
+    run_dir: Path,
+    *,
+    manifest: EvalRunManifest | None = None,
+    raw_evaluations: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     run_cases = {
         run_case.eval_case_id: run_case
         for run_case in manifest.cases
     } if manifest is not None else {}
+    raw_evaluations = (
+        raw_evaluations
+        if raw_evaluations is not None
+        else _load_raw_run_evaluations(run_dir)
+    )
     return [
         _evaluation_item(evaluation, run_case=run_cases.get(evaluation.get('eval_case_id')))
-        for evaluation in _load_raw_run_evaluations(run_dir)
+        for evaluation in raw_evaluations
     ]
 
 
-def _load_raw_run_evaluations(run_dir: Path) -> list[dict[str, Any]]:
+def _load_raw_run_evaluations(
+    run_dir: Path,
+    *,
+    warnings: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     evaluations_dir = run_dir / 'evaluations'
     if not evaluations_dir.is_dir():
         return []
-    return [_read_json(path) for path in sorted(evaluations_dir.glob('*.evaluation.json'))]
+    evaluations: list[dict[str, Any]] = []
+    for path in sorted(evaluations_dir.glob('*.evaluation.json')):
+        evaluation = _safe_read_evaluation_object(path, warnings=warnings)
+        if evaluation is not None:
+            evaluations.append(evaluation)
+    return evaluations
 
 
 def _evaluation_item(evaluation: dict[str, Any], *, run_case: EvalRunCase | None = None) -> dict[str, Any]:
@@ -453,17 +515,81 @@ def _renderable_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _load_all_evaluations(runs_dir: Path) -> list[EvaluationResult]:
+def _load_all_evaluations(
+    runs_dir: Path,
+    *,
+    warnings: list[dict[str, str]] | None = None,
+) -> list[EvaluationResult]:
     if not runs_dir.is_dir():
         return []
-    return [
-        EvaluationResult.model_validate_json(path.read_text(encoding='utf-8'))
-        for path in sorted(runs_dir.glob('*/evaluations/*.evaluation.json'))
-    ]
+    evaluations: list[EvaluationResult] = []
+    for path in sorted(runs_dir.glob('*/evaluations/*.evaluation.json')):
+        try:
+            evaluations.append(EvaluationResult.model_validate_json(path.read_text(encoding='utf-8')))
+        except _ARTIFACT_READ_ERRORS as exc:
+            if warnings is not None:
+                warnings.append(_artifact_warning(path, exc))
+    return evaluations
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding='utf-8'))
+def _safe_read_json_object(
+    path: Path,
+    *,
+    warnings: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    try:
+        return _read_json_object(path)
+    except _ARTIFACT_READ_ERRORS as exc:
+        if warnings is not None:
+            warnings.append(_artifact_warning(path, exc))
+        return None
+
+
+def _safe_read_evaluation_object(
+    path: Path,
+    *,
+    warnings: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    try:
+        payload = _read_json_object(path)
+        EvaluationResult.model_validate(payload)
+        return payload
+    except _ARTIFACT_READ_ERRORS as exc:
+        if warnings is not None:
+            warnings.append(_artifact_warning(path, exc))
+        return None
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(payload, dict):
+        raise ValueError('JSON root must be an object')
+    return payload
+
+
+def _response_with_warnings(
+    response: dict[str, Any],
+    warnings: list[dict[str, str]],
+) -> dict[str, Any]:
+    if warnings:
+        response['warnings'] = warnings
+    return response
+
+
+def _artifact_warning(path: Path, exc: BaseException) -> dict[str, str]:
+    return {
+        'path': str(path),
+        'error': f'{exc.__class__.__name__}: {exc}',
+    }
+
+
+def _evaluation_path_for_judge_input(judge_input_path: Path, judge_input: dict[str, Any]) -> Path:
+    eval_case_id = _string_value(judge_input.get('eval_case_id')) or judge_input_path.stem.removesuffix('.judge-input')
+    return judge_input_path.with_name(f'{eval_case_id}.evaluation.json')
+
+
+def _judge_exception_reason(exc: Exception) -> str:
+    return f'judge runner failed: {exc.__class__.__name__}: {exc}'
 
 
 def _json_value(value: Any) -> Any:

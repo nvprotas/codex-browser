@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from eval_service.app import api as api_module
 from eval_service.app.judge_runner import JudgeRunResult, JudgeRunner
 from eval_service.app.main import create_app
 from eval_service.app.models import (
@@ -160,6 +161,36 @@ def test_get_runs_returns_manifest_summaries(tmp_path: Path) -> None:
     }
 
 
+def test_get_runs_skips_corrupt_manifests_and_evaluations_with_warnings(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[], raise_server_exceptions=False)
+    store.create_run(
+        'eval-run-001',
+        cases=[EvalRunCase(eval_case_id='case-a', case_version='1', state=CaseRunState.FINISHED)],
+        status=EvalRunStatus.FINISHED,
+    )
+    _write_evaluation(tmp_path, 'eval-run-001', _evaluation('eval-run-001', 'case-a'))
+    bad_evaluation_path = tmp_path / 'eval-run-001' / 'evaluations' / 'bad.evaluation.json'
+    bad_evaluation_path.write_text('{not json', encoding='utf-8')
+    invalid_evaluation_path = tmp_path / 'eval-run-001' / 'evaluations' / 'invalid.evaluation.json'
+    invalid_evaluation_path.write_text(
+        json.dumps({'eval_case_id': 'case-invalid'}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+    bad_manifest_path = tmp_path / 'eval-run-corrupt' / 'manifest.json'
+    bad_manifest_path.parent.mkdir(parents=True)
+    bad_manifest_path.write_text('[]', encoding='utf-8')
+
+    response = client.get('/runs')
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [run['eval_run_id'] for run in body['runs']] == ['eval-run-001']
+    assert body['runs'][0]['evaluations_count'] == 1
+    warning_paths = {Path(warning['path']).name for warning in body['warnings']}
+    assert warning_paths == {'manifest.json', 'bad.evaluation.json', 'invalid.evaluation.json'}
+    assert all(warning['error'] for warning in body['warnings'])
+
+
 def test_get_run_detail_merges_registry_metadata_and_runtime_callbacks(tmp_path: Path) -> None:
     client, store = _client(tmp_path, cases=[_case('case-a')])
     store.create_run(
@@ -226,6 +257,20 @@ def test_get_run_detail_merges_registry_metadata_and_runtime_callbacks(tmp_path:
     assert missing_case['error'] == 'timeout after 600s'
 
 
+def test_get_run_detail_returns_422_for_corrupt_manifest(tmp_path: Path) -> None:
+    client, _store = _client(tmp_path, cases=[], raise_server_exceptions=False)
+    manifest_path = tmp_path / 'eval-run-corrupt' / 'manifest.json'
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{not json', encoding='utf-8')
+
+    response = client.get('/runs/eval-run-corrupt')
+
+    assert response.status_code == 422
+    detail = response.json()['detail']
+    assert detail['path'].endswith('eval-run-corrupt/manifest.json')
+    assert 'JSON' in detail['error'] or 'json' in detail['error']
+
+
 def test_get_run_detail_returns_micro_ui_friendly_evaluations(tmp_path: Path) -> None:
     client, store = _client(tmp_path, cases=[_case('case-a')])
     store.create_run(
@@ -276,6 +321,34 @@ def test_get_run_detail_returns_micro_ui_friendly_evaluations(tmp_path: Path) ->
     assert evaluation['metrics']['duration_ms'] == 2400
 
 
+def test_get_run_detail_skips_corrupt_evaluations_with_warnings(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')], raise_server_exceptions=False)
+    store.create_run(
+        'eval-run-001',
+        cases=[EvalRunCase(eval_case_id='case-a', case_version='1', state=CaseRunState.FINISHED)],
+        status=EvalRunStatus.FINISHED,
+    )
+    _write_evaluation(tmp_path, 'eval-run-001', _evaluation('eval-run-001', 'case-a'))
+    bad_evaluation_path = tmp_path / 'eval-run-001' / 'evaluations' / 'bad.evaluation.json'
+    bad_evaluation_path.write_text('[1, 2, 3]', encoding='utf-8')
+    invalid_evaluation_path = tmp_path / 'eval-run-001' / 'evaluations' / 'invalid.evaluation.json'
+    invalid_evaluation_path.write_text(
+        json.dumps({'eval_case_id': 'case-invalid'}, ensure_ascii=False),
+        encoding='utf-8',
+    )
+
+    response = client.get('/runs/eval-run-001')
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [evaluation['eval_case_id'] for evaluation in body['evaluations']] == ['case-a']
+    assert body['run']['evaluations_count'] == 1
+    warnings_by_name = {Path(warning['path']).name: warning for warning in body['warnings']}
+    assert set(warnings_by_name) == {'bad.evaluation.json', 'invalid.evaluation.json'}
+    assert 'object' in warnings_by_name['bad.evaluation.json']['error']
+    assert 'ValidationError' in warnings_by_name['invalid.evaluation.json']['error']
+
+
 def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_path: Path) -> None:
     client, store = _client(tmp_path, cases=[_case('case-a')])
     judge_runner = FakeJudgeRunner()
@@ -322,6 +395,31 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     assert judge_runner.inputs[0]['case_state'] == 'finished'
     assert judge_runner.inputs[0]['artifacts'] == {'receipt': 'artifacts/receipt.json'}
     assert judge_runner.inputs[0]['trace'] == {'session_id': 'session-a', 'trace_dir': None, 'steps': []}
+
+
+def test_post_run_judge_runs_sync_runner_through_threadpool(tmp_path: Path, monkeypatch: Any) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    judge_runner = FakeJudgeRunner()
+    client.app.state.judge_runner = judge_runner
+    store.create_run(
+        'eval-run-001',
+        cases=[EvalRunCase(eval_case_id='case-a', case_version='1', state=CaseRunState.FINISHED)],
+        status=EvalRunStatus.FINISHED,
+    )
+    calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+
+    async def fake_run_in_threadpool(func: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, 'run_in_threadpool', fake_run_in_threadpool, raising=False)
+
+    response = client.post('/runs/eval-run-001/judge')
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][0].__self__ is judge_runner
+    assert calls[0][0].__func__ is judge_runner.run.__func__
 
 
 def test_post_run_judge_skips_auth_missing_without_real_codex_or_state_mutation(tmp_path: Path) -> None:
@@ -393,6 +491,49 @@ def test_post_run_judge_returns_judge_failed_when_one_case_fails(tmp_path: Path)
     assert [evaluation['status'] for evaluation in response.json()['evaluations']] == ['judged', 'judge_failed']
 
 
+def test_post_run_judge_continues_after_runner_exception_and_writes_judge_failed(
+    tmp_path: Path,
+) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a'), _case('case-b')], raise_server_exceptions=False)
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(eval_case_id='case-a', case_version='1', state=CaseRunState.FINISHED, session_id='session-a'),
+            EvalRunCase(eval_case_id='case-b', case_version='1', state=CaseRunState.FINISHED, session_id='session-b'),
+        ],
+        status=EvalRunStatus.FINISHED,
+    )
+
+    class FailingThenPassingJudgeRunner:
+        def run(self, judge_input_path: Path | str) -> JudgeRunResult:
+            judge_input = json.loads(Path(judge_input_path).read_text(encoding='utf-8'))
+            if judge_input['eval_case_id'] == 'case-a':
+                raise OSError('codex executable not found')
+            evaluation = _evaluation(
+                judge_input['eval_run_id'],
+                judge_input['eval_case_id'],
+                host=judge_input['host'],
+                session_id=judge_input['session_id'],
+            )
+            evaluation_path = Path(judge_input_path).with_name(f'{judge_input["eval_case_id"]}.evaluation.json')
+            evaluation_path.write_text(json.dumps(evaluation, ensure_ascii=False), encoding='utf-8')
+            return JudgeRunResult(evaluation_path=evaluation_path, evaluation=evaluation)
+
+    client.app.state.judge_runner = FailingThenPassingJudgeRunner()
+
+    response = client.post('/runs/eval-run-001/judge')
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['status'] == 'judge_failed'
+    assert [evaluation['status'] for evaluation in body['evaluations']] == ['judge_failed', 'judged']
+    failed_evaluation = body['evaluations'][0]
+    assert failed_evaluation['eval_case_id'] == 'case-a'
+    assert 'OSError' in failed_evaluation['checks_detail']['outcome_ok']['reason']
+    assert 'codex executable not found' in failed_evaluation['checks_detail']['outcome_ok']['reason']
+    assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.evaluation.json').is_file()
+
+
 def test_dashboard_cases_and_hosts_load_all_evaluation_files(tmp_path: Path) -> None:
     client, _store = _client(tmp_path, cases=[])
     _write_evaluation(
@@ -441,6 +582,36 @@ def test_dashboard_cases_and_hosts_load_all_evaluation_files(tmp_path: Path) -> 
     assert host_rows[0]['success_rate'] == '1/2'
 
 
+def test_dashboard_cases_and_hosts_skip_corrupt_evaluation_files_with_warnings(tmp_path: Path) -> None:
+    client, _store = _client(tmp_path, cases=[], raise_server_exceptions=False)
+    _write_evaluation(
+        tmp_path,
+        'eval-run-001',
+        _evaluation('eval-run-001', 'case-a', host='shop.example', duration_ms=1000, buyer_tokens_used=100),
+    )
+    bad_json_path = tmp_path / 'eval-run-001' / 'evaluations' / 'bad-json.evaluation.json'
+    bad_json_path.write_text('{not json', encoding='utf-8')
+    non_object_path = tmp_path / 'eval-run-002' / 'evaluations' / 'non-object.evaluation.json'
+    non_object_path.parent.mkdir(parents=True)
+    non_object_path.write_text('[]', encoding='utf-8')
+
+    cases_response = client.get('/dashboard/cases')
+    hosts_response = client.get('/dashboard/hosts')
+
+    assert cases_response.status_code == 200
+    assert hosts_response.status_code == 200
+    assert cases_response.json()['rows'][0]['total'] == 1
+    assert hosts_response.json()['rows'][0]['total'] == 1
+    assert {Path(warning['path']).name for warning in cases_response.json()['warnings']} == {
+        'bad-json.evaluation.json',
+        'non-object.evaluation.json',
+    }
+    assert {Path(warning['path']).name for warning in hosts_response.json()['warnings']} == {
+        'bad-json.evaluation.json',
+        'non-object.evaluation.json',
+    }
+
+
 def test_existing_post_runs_route_still_works_after_api_router_include(tmp_path: Path) -> None:
     settings = Settings(_env_file=None, eval_runs_dir=tmp_path, buyer_api_base_url='http://buyer.test')
     app = create_app(settings)
@@ -463,7 +634,12 @@ async def _no_sleep(_seconds: float) -> None:
     return None
 
 
-def _client(tmp_path: Path, *, cases: list[EvalCase]) -> tuple[TestClient, RunStore]:
+def _client(
+    tmp_path: Path,
+    *,
+    cases: list[EvalCase],
+    raise_server_exceptions: bool = True,
+) -> tuple[TestClient, RunStore]:
     settings = Settings(
         _env_file=None,
         eval_runs_dir=tmp_path,
@@ -475,7 +651,7 @@ def _client(tmp_path: Path, *, cases: list[EvalCase]) -> tuple[TestClient, RunSt
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))
     app.state.run_store = store
     app.state.case_registry = FakeCaseRegistry(cases)
-    return TestClient(app), store
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions), store
 
 
 def _case(

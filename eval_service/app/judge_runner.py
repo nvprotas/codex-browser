@@ -33,6 +33,28 @@ class JudgeRunResult:
     evaluation: dict[str, Any]
 
 
+def write_fallback_evaluation(
+    evaluation_path: Path | str,
+    judge_input: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+    model: str,
+    schema_validator: Draft202012Validator | None = None,
+) -> JudgeRunResult:
+    output_path = Path(evaluation_path)
+    evaluation = _fallback_evaluation(
+        judge_input,
+        status=status,
+        reason=reason,
+        model=model,
+    )
+    validator = schema_validator or Draft202012Validator(_read_schema(DEFAULT_EVALUATION_SCHEMA_PATH))
+    validator.validate(evaluation)
+    _write_json_atomic(output_path, evaluation)
+    return JudgeRunResult(evaluation_path=output_path, evaluation=evaluation)
+
+
 class JudgeRunner:
     def __init__(
         self,
@@ -143,15 +165,14 @@ class JudgeRunner:
         status: str,
         reason: str,
     ) -> JudgeRunResult:
-        evaluation = _fallback_evaluation(
+        return write_fallback_evaluation(
+            evaluation_path,
             judge_input,
             status=status,
             reason=reason,
             model=self._settings.eval_judge_model,
+            schema_validator=self._schema_validator,
         )
-        self._schema_validator.validate(evaluation)
-        _write_json_atomic(evaluation_path, evaluation)
-        return JudgeRunResult(evaluation_path=evaluation_path, evaluation=evaluation)
 
 
 def _evaluation_path(judge_input_path: Path, judge_input: dict[str, Any]) -> Path:
