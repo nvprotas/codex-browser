@@ -257,10 +257,10 @@ class BrowserActionMetricsTests(unittest.TestCase):
 
         self.assertEqual(attempts[-1].model, 'gpt-5.4')
 
-    def test_codex_command_disables_image_generation_with_minimal_effort(self) -> None:
+    def test_codex_command_disables_image_generation_with_no_reasoning(self) -> None:
         cmd = _build_codex_command(
             settings=Settings(
-                codex_reasoning_effort='minimal',
+                codex_reasoning_effort='none',
                 codex_reasoning_summary='none',
                 codex_web_search='disabled',
                 codex_image_generation_enabled=False,
@@ -273,7 +273,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
 
         self.assertEqual(cmd[:2], ['codex', 'exec'])
         self.assertIn('--json', cmd)
-        self.assertIn('model_reasoning_effort="minimal"', cmd)
+        self.assertIn('model_reasoning_effort="none"', cmd)
         self.assertIn('model_reasoning_summary="none"', cmd)
         self.assertIn('web_search="disabled"', cmd)
         self.assertIn('features.image_generation=false', cmd)
@@ -282,7 +282,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
     def test_codex_command_keeps_image_generation_when_explicitly_enabled(self) -> None:
         cmd = _build_codex_command(
             settings=Settings(
-                codex_reasoning_effort='minimal',
+                codex_reasoning_effort='none',
                 codex_reasoning_summary='none',
                 codex_web_search='disabled',
                 codex_image_generation_enabled=True,
@@ -296,7 +296,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
         self.assertEqual(cmd[:2], ['codex', 'exec'])
         self.assertIn('--json', cmd)
         self.assertIn('-c', cmd)
-        self.assertIn('model_reasoning_effort="minimal"', cmd)
+        self.assertIn('model_reasoning_effort="none"', cmd)
         self.assertIn('model_reasoning_summary="none"', cmd)
         self.assertIn('web_search="disabled"', cmd)
         self.assertNotIn('features.image_generation=false', cmd)
