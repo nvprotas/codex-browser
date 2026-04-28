@@ -62,7 +62,7 @@ export function extractLitresQuery(task: string): string | null {
 export function parseOrderId(rawUrl: string): string | null {
   try {
     const url = new URL(rawUrl);
-    const order = url.searchParams.get('order');
+    const order = url.searchParams.get('orderId') || url.searchParams.get('order');
     return order && order.trim() ? order.trim() : null;
   } catch {
     return null;
@@ -200,6 +200,64 @@ async function clickFirstVisible(targets: Locator[], timeoutMs: number): Promise
   return false;
 }
 
+async function hasSelectedRussianCard(page: Page): Promise<boolean> {
+  const selected = await page
+    .locator(
+      [
+        'input#payment-method-input-russian_card:checked',
+        'input[name="selectedPaymentMethodId"][value="russian_card"]:checked',
+      ].join(', '),
+    )
+    .count()
+    .catch(() => 0);
+  return selected > 0;
+}
+
+async function selectRussianCard(page: Page): Promise<boolean> {
+  if (await hasSelectedRussianCard(page)) {
+    return true;
+  }
+
+  await clickFirstVisible(
+    [
+      page.getByRole('radio', { name: /российская\s+карта/i }),
+      page.locator('label[for="payment-method-input-russian_card"]'),
+      page.locator('[data-testid="payment__method--russian_card"] label'),
+      page.locator('#payment__method--russian_card label'),
+      page.locator('input[name="selectedPaymentMethodId"][value="russian_card"]'),
+    ],
+    5000,
+  );
+  await page.waitForTimeout(500).catch(() => undefined);
+  return hasSelectedRussianCard(page);
+}
+
+async function clickContinueToPayment(page: Page): Promise<boolean> {
+  return clickFirstVisible(
+    [
+      page.getByRole('button', { name: /продолжить/i }),
+      page.getByRole('link', { name: /продолжить/i }),
+      page.locator('button:has-text("Продолжить"), a:has-text("Продолжить")'),
+    ],
+    5000,
+  );
+}
+
+async function paymentFrameSrc(page: Page): Promise<string | null> {
+  const frame = page
+    .locator(
+      [
+        'iframe[src*="payecom.ru/pay_ru"][src*="orderId="]',
+        'iframe[title="payment"][src*="payecom.ru/pay_ru"]',
+        'iframe[title="payment"][src*="orderId="]',
+      ].join(', '),
+    )
+    .first();
+  await frame.waitFor({ state: 'attached', timeout: 15000 }).catch(() => undefined);
+  const src = await frame.getAttribute('src').catch(() => null);
+  return src && parseOrderId(src) ? src : null;
+}
+
 async function collectBookCandidates(page: Page, query: string, limit = 60): Promise<BookCandidate[]> {
   const rawCandidates = await page.locator('a[href*="/book/"]').evaluateAll(
     `(nodes, limit) => {
@@ -235,54 +293,6 @@ async function collectCartRows(page: Page): Promise<string[]> {
   const titles = await page.locator('[data-testid="art__title"]').allTextContents().catch(() => []);
   const authors = await page.locator('[data-testid="art__authorName"]').allTextContents().catch(() => []);
   return titles.map((title, index) => `${title} ${authors[index] || ''}`.replace(/\s+/g, ' ').trim()).filter(Boolean);
-}
-
-async function hasSelectedSberPay(page: Page): Promise<boolean> {
-  if (isSberPaymentUrl(page.url())) {
-    return true;
-  }
-  const checkedMarkers = await page
-    .locator('input:checked')
-    .evaluateAll((nodes) =>
-      nodes.map((node) => {
-        const input = node as HTMLInputElement;
-        const labels = Array.from(input.labels || []).map((label) => label.textContent || '').join(' ');
-        return [
-          input.id,
-          input.name,
-          input.value,
-          input.getAttribute('aria-label') || '',
-          input.getAttribute('data-testid') || '',
-          labels,
-        ].join(' ');
-      }),
-    )
-    .catch(() => []);
-  return checkedMarkers.some((marker) => hasSberPayMarker(marker) && !hasSbpOrFpsMarker(marker));
-}
-
-async function selectSberPay(page: Page): Promise<boolean> {
-  if (await hasSelectedSberPay(page)) {
-    return true;
-  }
-
-  await clickFirstVisible(
-    [
-      page.getByRole('radio', { name: /sber\s*pay|сбер\s*(?:pay|пэй|пей)/i }),
-      page.locator('label:has-text("SberPay")'),
-      page.locator('label:has-text("Sber Pay")'),
-      page.locator('label:has-text("СберPay")'),
-      page.locator('label:has-text("СберПэй")'),
-      page.locator('label:has-text("Сбер Пэй")'),
-      page.locator('label[for*="sberpay" i]'),
-      page.locator('[data-testid*="sberpay" i] label'),
-      page.locator('input[id*="sberpay" i]'),
-      page.locator('input[value*="sberpay" i]'),
-    ],
-    3000,
-  );
-  await page.waitForTimeout(500).catch(() => undefined);
-  return hasSelectedSberPay(page);
 }
 
 async function main(): Promise<void> {
@@ -426,8 +436,8 @@ async function main(): Promise<void> {
     }
 
     await page.waitForURL(/\/purchase\/ppd\//, { timeout: 15000 }).catch(() => undefined);
-    if (!(await selectSberPay(page))) {
-      fail(outputPath, 'purchase_script_sberpay_missing', 'Страница оплаты открыта, но способ SberPay не выбран.', {
+    if (!(await selectRussianCard(page))) {
+      fail(outputPath, 'purchase_script_russian_card_missing', 'Страница оплаты открыта, но способ "Российская карта" не выбран.', {
         script: 'litres',
         query,
         product_url: productUrl,
@@ -436,20 +446,35 @@ async function main(): Promise<void> {
       });
       return;
     }
+
+    const continueClicked = await clickContinueToPayment(page);
+    if (!continueClicked) {
+      fail(outputPath, 'purchase_script_continue_missing', 'Способ "Российская карта" выбран, но кнопка "Продолжить" не найдена.', {
+        script: 'litres',
+        query,
+        product_url: productUrl,
+        final_url: page.url(),
+        trace_path: tracePath,
+      });
+      return;
+    }
+
+    const frameSrc = await paymentFrameSrc(page);
     const finalUrl = page.url();
-    const orderId = parseOrderId(finalUrl);
+    const orderId = frameSrc ? parseOrderId(frameSrc) : null;
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'payment_ready',
       url: finalUrl,
-      details: { order_id: orderId, sberpay: true },
+      details: { order_id: orderId, sberpay: true, payment_frame_src: frameSrc },
     });
     if (!orderId) {
-      fail(outputPath, 'purchase_script_order_missing', 'Страница SberPay открыта, но orderId не найден.', {
+      fail(outputPath, 'purchase_script_order_missing', 'Платежный iframe SberPay открыт, но orderId не найден.', {
         script: 'litres',
         query,
         product_url: productUrl,
         final_url: finalUrl,
+        payment_frame_src: frameSrc,
         trace_path: tracePath,
       });
       return;
@@ -464,6 +489,7 @@ async function main(): Promise<void> {
         script: 'litres',
         query,
         final_url: finalUrl,
+        payment_frame_src: frameSrc,
         product_url: productUrl,
         selected_title: selected.text || selected.title,
         trace_path: tracePath,
