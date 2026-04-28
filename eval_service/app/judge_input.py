@@ -19,6 +19,8 @@ def write_judge_input(
     metrics: dict[str, Any],
     trace_summary: dict[str, Any],
     artifacts: dict[str, Any] | None = None,
+    case_state: str | None = None,
+    case_run: dict[str, Any] | None = None,
 ) -> Path:
     evaluations_dir = Path(run_dir) / 'evaluations'
     evaluations_dir.mkdir(parents=True, exist_ok=True)
@@ -37,6 +39,10 @@ def write_judge_input(
         'artifacts': artifacts or {},
         'metrics': metrics,
     }
+    if case_state is not None:
+        payload['case_state'] = case_state
+    if case_run is not None:
+        payload['case_run'] = case_run
     _write_json_atomic(output_path, sanitize_for_judge_input(payload))
     return output_path
 
