@@ -31,6 +31,15 @@ class ReplySubmitResponse(BaseModel):
     buyer_response: dict[str, Any]
 
 
+class StopSessionRequest(BaseModel):
+    reason: str | None = Field(default=None, min_length=1)
+
+
+class StopSessionResponse(BaseModel):
+    forwarded: bool
+    buyer_response: dict[str, Any]
+
+
 class TaskCreateRequest(BaseModel):
     task: str = Field(min_length=1)
     start_url: str = Field(min_length=1)

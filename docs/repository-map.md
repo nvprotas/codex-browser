@@ -25,8 +25,9 @@
 5. Агент управляет browser-sidecar через `buyer/tools/cdp_tool.py`.
 6. `buyer` отправляет callback-события в `middle`/`micro-ui`.
 7. При `needs_user_input` сессия переходит в `waiting_user`; ответ приходит через `POST /v1/replies`.
-8. При успехе `buyer` отправляет `payment_ready` с `order_id`, затем `scenario_finished` только после domain-specific SberPay verifier; неподдерживаемые домены без verifier не могут завершиться `completed`/`payment_ready`.
-9. После финального callback асинхронно запускается post-session анализ знаний и сохраняет внутренние draft-артефакты.
+8. Оператор может остановить активную сессию через `POST /v1/sessions/{session_id}/stop` или кнопку `micro-ui`; buyer отправляет `scenario_finished(status=failed, reason_code=session_stopped_by_operator)`, отменяет runtime task и убивает активный `codex exec`.
+9. При успехе `buyer` отправляет `payment_ready` с `order_id`, затем `scenario_finished` только после domain-specific SberPay verifier; неподдерживаемые домены без verifier не могут завершиться `completed`/`payment_ready`.
+10. После финального callback асинхронно запускается post-session анализ знаний и сохраняет внутренние draft-артефакты.
 
 ## Корень репозитория
 
@@ -67,6 +68,7 @@ FastAPI-точка входа `buyer`.
 | `GET /v1/sessions` | Нет. | Список `SessionView`. | Ошибки repository пробрасываются как `500`. |
 | `GET /v1/sessions/{session_id}` | `session_id` в path. | `SessionDetail` с событиями. | `404` при `SessionNotFoundError`. |
 | `POST /v1/replies` | `SessionReplyRequest`: `session_id`, `reply_id`, `message`. | `SessionReplyResponse`: `accepted=true`, текущий статус. | `404` при неизвестной сессии; `409` при `ReplyValidationError`; `422` при пустом `message`. |
+| `POST /v1/sessions/{session_id}/stop` | `session_id` в path, optional `SessionStopRequest.reason`. | `SessionStopResponse`: `accepted=true` для активной остановленной сессии, `accepted=false` для уже терминальной. | `404` при неизвестной сессии; `422` при невалидном body. |
 
 На старте `main.py` собирает зависимости:
 
@@ -105,6 +107,7 @@ Pydantic-контракты API и внутренних результатов.
 - `TaskAuthPayload`: `provider`, `storageState`/`storage_state`; пользовательские replies не должны переносить auth-пакеты.
 - `TaskCreateRequest`: задача, стартовый URL, callback URL, ephemeral callback token, metadata, auth.
 - `SessionReplyRequest`: ответ пользователя на конкретный `reply_id`.
+- `SessionStopRequest`, `SessionStopResponse`: ручная остановка активной сессии без нового lifecycle-статуса.
 - `EventEnvelope`: callback envelope.
 - `PaymentEvidence`: сейчас только `source="litres_payecom_iframe"` и `url`.
 - `AgentOutput`: структурированный ответ `codex exec`: `status`, `message`, `order_id`, `payment_evidence`, `profile_updates`, `artifacts`.
@@ -168,6 +171,7 @@ Pydantic-контракты API и внутренних результатов.
 - события callback;
 - agent memory;
 - пользовательские replies.
+- ручная остановка активной сессии через `stop_waiting_or_running()`.
 
 Выходы:
 
@@ -180,6 +184,7 @@ Pydantic-контракты API и внутренних результатов.
 - `SessionConflictError`: достигнут `max_active_sessions` в текущем runtime.
 - `SessionNotFoundError`: неизвестный `session_id`.
 - `ReplyValidationError`: сессия не ждет ответ, неверный `reply_id`, нет активного runner после рестарта, либо ответ уже потреблен.
+- `stop_waiting_or_running()` переводит только non-terminal сессию в `failed`, очищает waiting reply и wake event, освобождает active-session slot; terminal сессии возвращаются без изменения.
 
 Важное ограничение: auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта. Пользовательский reply не должен быть auth-source.
 Передача `storageState` через чат запрещена; external cookies API является только машинным source для текущей сессии и не отменяет это ограничение.
@@ -252,6 +257,7 @@ Postgres repository и inline migrations.
 - `create_session()`: создает состояние, переводит в `running`, запускает `_run_session`.
 - `get_session()`, `list_sessions()`: чтение состояния.
 - `submit_reply()`: применяет пользовательский ответ.
+- `stop_session()`: останавливает активную сессию, отправляет финальный `scenario_finished(status=failed, reason_code=session_stopped_by_operator)`, отменяет runtime task и освобождает слот; для terminal сессии возвращает `accepted=false`.
 - `wait_for_post_session_analysis()`, `shutdown_post_session_analysis()`: lifecycle фонового analyzer.
 
 Основной `_run_session`:
@@ -261,9 +267,10 @@ Postgres repository и inline migrations.
 3. Запускает `_run_sberid_auth_flow`, где `_resolve_session_auth` выбирает inline auth или external cookies API.
 4. Запускает `_run_purchase_script_flow`.
 5. Если быстрый скрипт не завершил сценарий, циклически вызывает `AgentRunner.run_step`.
-6. Обрабатывает статусы `needs_user_input`, `completed`, `failed`.
-7. Для transient CDP-сбоев повторяет шаг в пределах `CDP_RECOVERY_WINDOW_SEC` с системным маркером `[CDP_RECOVERY_RESTART_FROM_START_URL]`.
-8. Финализирует через `_handle_completed` или `_handle_failed`.
+6. После возврата runner проверяет, не стала ли сессия terminal из-за stop; late-results отмененного runner игнорируются.
+7. Обрабатывает статусы `needs_user_input`, `completed`, `failed`.
+8. Для transient CDP-сбоев повторяет шаг в пределах `CDP_RECOVERY_WINDOW_SEC` с системным маркером `[CDP_RECOVERY_RESTART_FROM_START_URL]`.
+9. Финализирует через `_handle_completed` или `_handle_failed`.
 
 Callback-события:
 
@@ -277,6 +284,14 @@ Callback-события:
 - `payment_ready`
 - `scenario_finished`
 
+Остановка сессии:
+
+- доступна через `POST /v1/sessions/{session_id}/stop`;
+- не вводит новый `SessionStatus`: активная сессия становится `failed`;
+- callback payload содержит `reason_code='session_stopped_by_operator'` и `artifacts.stop_reason`;
+- `task_ref.cancel()` прерывает текущий runner; если отмена попала в `AgentRunner` во время `codex exec`, subprocess получает `kill()`;
+- повторная остановка `completed`/`failed` сессии идемпотентна и не создает новый callback.
+
 Доменные проверки:
 
 - Для Litres `completed` принимается только с `order_id` и `payment_evidence` из точного `https://payecom.ru/pay_ru?...orderId=...`.
@@ -287,6 +302,7 @@ Callback-события:
 
 - `CallbackDeliveryError`: сессия переводится в `failed`, в store пишется fallback `scenario_finished`.
 - `SessionNotFoundError`, `SessionConflictError`, `ReplyValidationError`: runner тихо завершает текущую задачу, потому что состояние уже недоступно/невалидно.
+- Late-result после остановки: `_run_session` видит terminal status и выходит без `agent_step_finished`, `payment_ready` или второго `scenario_finished`.
 - Любое другое исключение: `_handle_failed(..., "Непредвиденная ошибка: ...")`; если callback тоже падает, пишется fallback event и status `failed`.
 - Ошибка quick purchase script не валит сценарий: добавляется `[PURCHASE_SCRIPT_FALLBACK]`, затем generic flow.
 - Невалидный inline `auth.storageState` не вызывает `ask_user` и `handoff`: auth summary получает `reason_code='auth_inline_invalid_payload'`, `mode='guest'`, `path='guest'`.
@@ -344,6 +360,7 @@ HTTP-клиент доставки callback-событий.
 - нет Codex auth: `fallback_reason='no_api_key_or_oauth'`.
 - `FileNotFoundError` при запуске `CODEX_BIN`: `failure_reason='binary_missing'`.
 - timeout: `failure_reason='timeout'`.
+- cancellation во время `codex exec`: активный subprocess убивается через `kill()`, stream publisher закрывается, `CancelledError` пробрасывается вверх к сессионному stop.
 - non-zero return code: `failure_reason='process_failed'`, включая 401 и 429 с отдельными сообщениями.
 - невалидный JSON/output schema: `failure_reason='parse_output_failed'`.
 - неподдерживаемый `status`: `failure_reason='invalid_status'`.
@@ -710,6 +727,7 @@ FastAPI endpoints:
 | `GET /api/sessions` | Нет. | Сводки сессий. | Нет явных. |
 | `POST /api/tasks` | `TaskCreateRequest`. | Ответ `buyer /v1/tasks`. | HTTP status от buyer пробрасывается; любые другие ошибки -> `502`. |
 | `POST /api/reply` | `ReplySubmitRequest`. | `{forwarded: true, buyer_response}`. | HTTP status от buyer пробрасывается; любые другие ошибки -> `502`. |
+| `POST /api/sessions/{session_id}/stop` | optional `StopSessionRequest.reason`. | `{forwarded: true, buyer_response}` от `buyer /v1/sessions/{session_id}/stop`. | HTTP status от buyer пробрасывается; любые другие ошибки -> `502`. |
 
 ### `micro-ui/app/store.py`
 
@@ -733,14 +751,14 @@ In-memory callback store.
 
 ### `micro-ui/app/models.py` и `settings.py`
 
-Pydantic-модели callback, task proxy, reply proxy и session summary. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`.
+Pydantic-модели callback, task proxy, reply proxy, stop proxy и session summary. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`.
 
 ### Frontend assets
 
 - `micro-ui/app/templates/index.html`: HTML shell.
-- `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state.
+- `micro-ui/app/static/app.js`: запуск задач, отправка replies, остановка активных сессий, SSE stream, UI state.
 - `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
-- `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
+- `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, карточки активных сессий содержат stop-кнопку, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
 
@@ -878,17 +896,18 @@ Runtime flow:
 | `buyer/tests/test_url_policy.py` | URL policy для `start_url`/`callback_url`, включая запрет query/fragment в callback URL и trusted allowlist. |
 | `buyer/tests/test_auth_reply_removal.py` | MON-29 regression: inline invalid auth уходит в guest без `ask_user`, auth-script refresh/failure уходит в heuristic без запроса auth-пакета, parser reply-auth удален. |
 | `buyer/tests/test_external_auth.py` | MON-30 regression: external cookies payload validation, httpx `MockTransport`, timeout mapping, source priority inline over external и guest fallback с `auth_external_*` reason-code. |
+| `buyer/tests/test_session_stop.py` | Stop API/service regression: running/waiting/terminal stop semantics, active slot release, late runner result suppression и endpoint response. |
 | `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, persistence redaction legacy auth-like replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
 | `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout; purchase runner stale output, уникальный output path и non-zero diagnostics behavior. |
 | `buyer/tests/test_knowledge_analyzer.py` | Sanitization, safe paths, trace refs, analysis payload/output. |
-| `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior и payment-boundary regression для Litres/unsupported domains. |
+| `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior, cancellation kill активного `codex exec` и payment-boundary regression для Litres/unsupported domains. |
 | `buyer/tests/test_observability_and_cdp_tool.py` | Trace/browser action metrics, CDP tool output limits, observability и нейтральный выбор CDP-страницы. |
 | `eval_service/tests/test_callbacks.py` | Eval callback receiver, operator reply flow, malformed terminal callbacks, manifest redaction на диске. |
 | `eval_service/tests/test_run_store.py` | File manifest lifecycle, callback event redaction/deduplication, atomic summary writes. |
 | `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
 | `eval_service/tests/test_orchestrator.py` | Eval run orchestration, payment_ready grace, waiting/reply resume progression. |
-| `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
-| `micro-ui/tests/test_design_handoff.py` | UI/handoff design expectations и session summary для `ask_user`/waiting progression. |
+| `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior и stop proxy к buyer. |
+| `micro-ui/tests/test_design_handoff.py` | UI/handoff design expectations, stop-кнопка и session summary для `ask_user`/waiting progression. |
 | `micro-ui/tests/test_eval_shell_static.py` | Eval shell static contracts, proxy timeout и reply payload shape. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.

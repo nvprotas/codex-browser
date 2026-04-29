@@ -384,6 +384,19 @@ class AgentRunner:
                     ),
                     timeout=self._settings.codex_timeout_sec,
                 )
+            except asyncio.CancelledError:
+                process.kill()
+                await _communicate_quietly(process)
+                await stream_publisher.aclose()
+                attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
+                logger.info(
+                    'codex_step_cancelled step=%s role=%s model=%s duration_ms=%s',
+                    step_index,
+                    attempt_spec.role,
+                    attempt_spec.model or 'default',
+                    attempt.duration_ms,
+                )
+                raise
             except asyncio.TimeoutError:
                 process.kill()
                 await _communicate_quietly(process)

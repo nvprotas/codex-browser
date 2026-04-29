@@ -15,6 +15,8 @@ from .models import (
     ReplySubmitRequest,
     ReplySubmitResponse,
     SessionSummary,
+    StopSessionRequest,
+    StopSessionResponse,
     TaskCreateRequest,
     TaskCreateResponse,
 )
@@ -165,3 +167,22 @@ async def api_reply(request: ReplySubmitRequest) -> ReplySubmitResponse:
         raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
     except Exception as exc:  # noqa: BLE001 - пробрасываем причину для UI
         raise HTTPException(status_code=502, detail=f'Не удалось отправить reply в buyer: {exc}') from exc
+
+
+@app.post('/api/sessions/{session_id}/stop', response_model=StopSessionResponse)
+async def api_stop_session(session_id: str, request: StopSessionRequest | None = None) -> StopSessionResponse:
+    target = f"{settings.buyer_base_url}/v1/sessions/{session_id}/stop"
+    payload = request.model_dump() if request is not None else {}
+
+    try:
+        timeout = httpx.Timeout(10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(target, json=payload)
+            data = response.json()
+            response.raise_for_status()
+            return StopSessionResponse(forwarded=True, buyer_response=data)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except Exception as exc:  # noqa: BLE001 - пробрасываем причину для UI
+        raise HTTPException(status_code=502, detail=f'Не удалось остановить сессию в buyer: {exc}') from exc

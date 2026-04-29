@@ -44,9 +44,11 @@
 - Транспорт: HTTP callbacks с версионированным event envelope.
 - OpenAPI-спецификация HTTP endpoints хранится в `docs/openapi.yaml`.
 - OpenAPI-спецификация callback envelope и текущих payload-ов хранится в `docs/callbacks.openapi.yaml`.
+- Активную сессию можно остановить через `POST /v1/sessions/{session_id}/stop`; локальный `micro-ui` проксирует это действие через `POST /api/sessions/{session_id}/stop` и показывает кнопку остановки для активных статусов.
 - Обязательные поля envelope: `event_id`, `session_id`, `event_type`, `occurred_at`, `idempotency_key`, `payload`.
 - Семантика доставки: `at-least-once`; `middle` обязан дедуплицировать события по `event_id` и/или `idempotency_key`.
 - Профиль доставки по умолчанию: `timeout=10s`, `3 retries`, exponential backoff с jitter; после исчерпания попыток событие помечается как failed и поднимается в сессионную ошибку.
+- Остановка сессии не вводит отдельный статус или callback event: buyer отправляет `scenario_finished` с `status=failed`, `reason_code=session_stopped_by_operator`, отменяет сессионный runner и завершает активный `codex exec` subprocess, если он уже запущен.
 - Отдельные auth-события в v1 не вводятся; auth-статусы и причины передаются в `scenario_finished` и, только для пользовательских действий без auth-секретов, в `ask_user`.
 - Канонические reason-коды auth:
   - `auth_ok`

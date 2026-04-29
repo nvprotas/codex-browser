@@ -762,14 +762,54 @@ input[readonly] {
 }
 
 .session-item {
-  appearance: none;
   display: grid;
   gap: 8px;
   width: 100%;
   color: inherit;
-  cursor: pointer;
   text-align: left;
   transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.session-select {
+  appearance: none;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.session-actions {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.session-stop-button {
+  appearance: none;
+  max-width: 100%;
+  border: 1px solid rgba(180, 35, 24, 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(180, 35, 24, 0.08);
+  color: var(--error);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  padding: 7px 10px;
+  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.session-stop-button:hover {
+  border-color: rgba(180, 35, 24, 0.48);
+  background: rgba(180, 35, 24, 0.14);
+  box-shadow: 0 8px 18px rgba(180, 35, 24, 0.12);
 }
 
 .session-item:hover {

@@ -125,6 +125,49 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /v1/sessions/{session_id}/stop:
+    post:
+      tags:
+        - Buyer API
+      operationId: stopBuyerSession
+      summary: Остановить активную сессию покупки.
+      description: |
+        Останавливает активную сессию (`created`, `running`, `waiting_user`) как
+        штатную failed-финализацию. Buyer отправляет финальный callback
+        `scenario_finished` с `status=failed` и
+        `reason_code=session_stopped_by_operator`, отменяет runtime task и
+        завершает активный `codex exec` subprocess, если он уже запущен.
+
+        Для уже терминальных сессий (`completed`, `failed`) endpoint
+        идемпотентен: состояние не меняется, а `accepted=false`.
+      parameters:
+        - $ref: '#/components/parameters/SessionIdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionStopRequest'
+            examples:
+              operatorStop:
+                value:
+                  reason: Оператор остановил сценарий.
+      responses:
+        '200':
+          description: Запрос остановки обработан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStopResponse'
+        '404':
+          description: Сессия не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
   /v1/replies:
     post:
       tags:
@@ -385,6 +428,33 @@ components:
           type: string
         accepted:
           type: boolean
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+
+    SessionStopRequest:
+      type: object
+      properties:
+        reason:
+          oneOf:
+            - type: string
+              minLength: 1
+            - type: 'null'
+          default: null
+          description: Причина остановки, которая попадет в `scenario_finished.payload.message`.
+      additionalProperties: false
+
+    SessionStopResponse:
+      type: object
+      required:
+        - session_id
+        - accepted
+        - status
+      properties:
+        session_id:
+          type: string
+        accepted:
+          type: boolean
+          description: '`true`, если сессия была активной и остановка изменила состояние.'
         status:
           $ref: '#/components/schemas/SessionStatus'
 
