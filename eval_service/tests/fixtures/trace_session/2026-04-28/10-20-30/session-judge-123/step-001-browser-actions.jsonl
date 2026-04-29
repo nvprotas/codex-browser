@@ -1,0 +1,4 @@
+{"event":"browser_command_started","command":"goto","ts":"2026-04-28T10:20:30+00:00","args":{"url":"https://shop.example/catalog"}}
+{"event":"browser_command_finished","command":"goto","ts":"2026-04-28T10:20:31+00:00","ok":true,"duration_ms":120,"result":{"url":"https://shop.example/catalog"}}
+{"event":"browser_command_finished","command":"click","ts":"2026-04-28T10:20:32+00:00","ok":true,"duration_ms":65,"result":{"selector":"button.buy"}}
+{"event":"browser_command_failed","command":"fill","ts":"2026-04-28T10:20:33+00:00","ok":false,"duration_ms":15,"error":"input not found"}

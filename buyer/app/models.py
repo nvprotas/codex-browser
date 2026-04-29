@@ -63,6 +63,8 @@ class EventEnvelope(BaseModel):
     occurred_at: datetime
     idempotency_key: str
     payload: dict[str, Any]
+    eval_run_id: str | None = None
+    eval_case_id: str | None = None
 
 
 class SessionView(BaseModel):

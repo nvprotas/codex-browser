@@ -11,6 +11,8 @@ const streamCountNode = document.getElementById('stream-count');
 const noVncFrame = document.getElementById('novnc-frame');
 const noVncSessionLabel = document.getElementById('novnc-session-label');
 const noVncPlaceholderNode = document.getElementById('novnc-placeholder');
+const tabButtons = document.querySelectorAll('[data-tab-target]');
+const tabPanels = document.querySelectorAll('[data-tab-panel]');
 
 const metricSessionsNode = document.getElementById('metric-sessions');
 const metricWaitingNode = document.getElementById('metric-waiting');
@@ -47,6 +49,26 @@ const noVncBlank = `<!doctype html>
 <html lang="ru">
   <body style="margin:0;min-height:100vh;background:#0d0f12;"></body>
 </html>`;
+
+function activateTab(panelId) {
+  for (const panel of tabPanels) {
+    const active = panel.id === panelId;
+    panel.hidden = !active;
+    panel.classList.toggle('active', active);
+  }
+
+  for (const button of tabButtons) {
+    const active = button.dataset.tabTarget === panelId;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+}
+
+for (const button of tabButtons) {
+  button.addEventListener('click', () => {
+    activateTab(button.dataset.tabTarget);
+  });
+}
 
 function normalizeUrl(url) {
   if (!url) {

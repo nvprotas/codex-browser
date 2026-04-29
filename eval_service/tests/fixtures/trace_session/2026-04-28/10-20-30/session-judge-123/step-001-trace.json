@@ -1,0 +1,28 @@
+{
+  "session_id": "session-judge-123",
+  "step": 1,
+  "trace_date": "2026-04-28",
+  "trace_time": "10-20-30",
+  "preflight_summary": "ok: https://shop.example/catalog",
+  "prompt_preview": "Подготовь покупку до SberPay без оплаты.",
+  "codex_returncode": 0,
+  "codex_model": "gpt-5.5",
+  "codex_tokens_used": 321,
+  "model_strategy": "primary",
+  "duration_ms": 4321,
+  "stdout_tail": "checkout visible",
+  "stderr_tail": "",
+  "browser_actions_log_path": "step-001-browser-actions.jsonl",
+  "browser_actions_total": 4,
+  "command_errors": 1,
+  "command_duration_ms": 200,
+  "inter_command_idle_ms": 15,
+  "browser_busy_union_ms": 200,
+  "html_commands": 0,
+  "html_bytes": 0,
+  "command_breakdown": {
+    "goto": {"count": 1, "duration_ms": 120, "errors": 0},
+    "click": {"count": 1, "duration_ms": 65, "errors": 0},
+    "fill": {"count": 1, "duration_ms": 15, "errors": 1}
+  }
+}

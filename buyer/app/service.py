@@ -273,6 +273,7 @@ class BuyerService:
                     'message': str(exc),
                 },
                 idempotency_suffix='scenario-failed-callback-delivery',
+                **_eval_ids_from_state(state),
             )
             await self._store.append_event(session_id, fallback_event)
         except Exception as exc:  # noqa: BLE001 - последняя защита сессии
@@ -289,6 +290,7 @@ class BuyerService:
                         'message': str(delivery_exc),
                     },
                     idempotency_suffix='scenario-failed-unhandled',
+                    **_eval_ids_from_state(state),
                 )
                 await self._store.append_event(session_id, fallback_event)
 
@@ -752,6 +754,7 @@ class BuyerService:
             event_type=event_type,
             payload=payload,
             idempotency_suffix=idempotency_suffix,
+            **_eval_ids_from_state(state),
         )
         await self._store.append_event(state.session_id, envelope)
         try:
@@ -774,6 +777,7 @@ class BuyerService:
                 f"{safe_payload.get('stream', 'unknown')}-"
                 f"{safe_payload.get('sequence', uuid4())}"
             ),
+            **_eval_ids_from_state(state),
         )
         try:
             await self._store.append_event(state.session_id, envelope)
@@ -823,6 +827,18 @@ def _looks_like_transient_cdp_failure(message: str, artifacts: dict[str, Any]) -
         chunks.extend(_collect_artifact_string_samples(artifacts))
     haystack = ' '.join(chunks).lower()
     return any(marker in haystack for marker in TRANSIENT_CDP_MARKERS)
+
+
+def _eval_ids_from_state(state: SessionState) -> dict[str, str | None]:
+    return {
+        'eval_run_id': _string_metadata_value(state.metadata, 'eval_run_id'),
+        'eval_case_id': _string_metadata_value(state.metadata, 'eval_case_id'),
+    }
+
+
+def _string_metadata_value(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _collect_artifact_string_samples(value: Any, *, depth: int = 0) -> list[str]:

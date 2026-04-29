@@ -105,9 +105,50 @@ services:
       dockerfile: micro-ui/Dockerfile
     environment:
       BUYER_BASE_URL: http://buyer:8000
+      EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
       UI_POLL_INTERVAL_SEC: "3"
     ports:
       - "8080:8080"
 
+  eval_service:
+    build:
+      context: .
+      dockerfile: eval_service/Dockerfile
+    environment:
+      BUYER_API_BASE_URL: ${BUYER_API_BASE_URL:-http://buyer:8000}
+      BUYER_TRACE_DIR: ${BUYER_TRACE_DIR:-/workspace/.tmp/buyer-observability}
+      EVAL_RUNS_DIR: ${EVAL_RUNS_DIR:-/workspace/eval/runs}
+      EVAL_CASES_DIR: ${EVAL_CASES_DIR:-/workspace/eval/cases}
+      EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
+      EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-gpt-5.5}
+      EVAL_BASELINE_WINDOW: ${EVAL_BASELINE_WINDOW:-5}
+      EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}
+      EVAL_CALLBACK_SECRET: ${EVAL_CALLBACK_SECRET:?set EVAL_CALLBACK_SECRET}
+      EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
+    volumes:
+      - ./:/workspace
+      - type: volume
+        source: eval-auth-profiles
+        target: /run/eval/auth-profiles
+        read_only: true
+    ports:
+      - "127.0.0.1:8090:8090"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   buyer-postgres-data:
+  eval-auth-profiles:

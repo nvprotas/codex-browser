@@ -94,6 +94,23 @@
 - Анализ знаний не должен сохранять auth-пакеты, cookies, `storageState`, токены и одноразовые платежные данные.
 - Внешний callback-контракт v1 не расширяется событием `knowledge_analysis_finished`.
 
+## Eval и LLM-as-a-Judge
+
+- Статус решения: принято, дата фиксации — 2026-04-28.
+- Eval-контур является learning loop для улучшения `buyer`, а не release gate для других релизов.
+- Eval не меняет поведение `buyer`: `buyer` получает обычный task payload и нейтральную metadata без специальных `is_eval` веток.
+- Eval выполняется отдельным контейнером `eval_service`, который оркестрирует batch-run, принимает callbacks от `buyer`, обрабатывает `ask_user`, запускает judge и отдает API для eval-таба в `micro-ui`.
+- Источник ожиданий для judge — версионируемые case-файлы `eval/cases/*.yaml`, а не догадки из trace.
+- MVP запускает cases вручную из `micro-ui` и выполняет их последовательно. Автоматический judge после каждой обычной сессии не включается.
+- `payment_ready` считается терминальным успешным состоянием eval-case; после него `eval_service` ждет короткий grace period 5 секунд для дозаписи trace/events.
+- Timeout eval-case по умолчанию — 600 секунд; timeout/partial trace также оценивается judge.
+- Перед LLM Judge всегда строится redacted `judge-input.json`. Raw trace не передается в LLM.
+- Redaction удаляет auth-пакеты, cookies, `storageState`, токены, `orderId`, одноразовые payment URLs и другие платежные секреты.
+- Judge backend MVP — `codex exec --output-schema` с моделью из `EVAL_JUDGE_MODEL`.
+- Judge возвращает strict `evaluation.json` с checks `ok/not_ok/skipped`, числовыми `duration_ms` и `buyer_tokens_used`, evidence refs и draft-рекомендациями.
+- Draft-рекомендации judge могут относиться к prompt, playbook, site profile, script candidate или eval case, но не применяются автоматически.
+- Baseline времени и токенов считается детерминированно как медиана последних N успешных evaluations по `eval_case_id`; trend-judge по истории выносится в future work.
+
 ## Наблюдаемость, релиз и операционные ограничения
 
 - Observability v1: только `logs + metrics`.

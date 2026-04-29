@@ -6,6 +6,7 @@
     <title>Ratatouille buyer · Buyer Console</title>
     <link rel="icon" href="/static/assets/favicon.svg" />
     <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/eval.css" />
   </head>
   <body>
     <div class="backdrop" aria-hidden="true"></div>
@@ -21,189 +22,360 @@
         <div class="status" id="global-status">Ожидание событий…</div>
       </header>
 
-      <section class="metrics" aria-label="Сводка">
-        <article class="metric">
-          <span>Сессии</span>
-          <strong id="metric-sessions">0</strong>
-        </article>
-        <article class="metric">
-          <span>Ждут ответа</span>
-          <strong id="metric-waiting">0</strong>
-        </article>
-        <article class="metric">
-          <span>order_id</span>
-          <strong id="metric-orders">0</strong>
-        </article>
-        <article class="metric">
-          <span>Ошибки</span>
-          <strong id="metric-errors">0</strong>
-        </article>
-      </section>
+      <nav class="app-tabs" aria-label="Разделы">
+        <button
+          type="button"
+          id="tab-buyer"
+          class="tab-button active"
+          data-tab-target="buyer-tab-panel"
+          role="tab"
+          aria-controls="buyer-tab-panel"
+          aria-selected="true"
+        >
+          Buyer
+        </button>
+        <button
+          type="button"
+          id="tab-eval"
+          class="tab-button"
+          data-tab-target="eval-tab-panel"
+          role="tab"
+          aria-controls="eval-tab-panel"
+          aria-selected="false"
+        >
+          Eval
+        </button>
+      </nav>
 
-      <section class="workspace">
-        <div class="stack">
-          <section class="panel task">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">POST /api/tasks</p>
-                <h2>Новая задача</h2>
-              </div>
-            </div>
+      <section
+        id="buyer-tab-panel"
+        class="tab-panel active"
+        data-tab-panel="buyer"
+        role="tabpanel"
+        aria-labelledby="tab-buyer"
+      >
+        <section class="metrics" aria-label="Сводка">
+          <article class="metric">
+            <span>Сессии</span>
+            <strong id="metric-sessions">0</strong>
+          </article>
+          <article class="metric">
+            <span>Ждут ответа</span>
+            <strong id="metric-waiting">0</strong>
+          </article>
+          <article class="metric">
+            <span>order_id</span>
+            <strong id="metric-orders">0</strong>
+          </article>
+          <article class="metric">
+            <span>Ошибки</span>
+            <strong id="metric-errors">0</strong>
+          </article>
+        </section>
 
-            <form id="task-form" class="task-form-grid">
-              <label class="full">
-                Задача
-                <textarea
-                  id="task-text"
-                  rows="3"
-                  placeholder="Открой сайт и подготовь путь до шага оплаты без реального платежа"
-                  required
-                >Открой litres.ru, найди книгу «Война и мир» (любое издание) и подготовь путь до шага оплаты без реального платежа.</textarea>
-              </label>
-
-              <label class="full">
-                Start URL
-                <input type="url" id="task-start-url" value="https://www.litres.ru/" required />
-              </label>
-
-              <div class="full json-field">
-                <div class="json-field-label">metadata (JSON)</div>
-                <div class="json-editor" data-json-editor="task-metadata">
-                  <div class="json-editor-frame">
-                    <pre id="task-metadata-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
-                    <textarea
-                      id="task-metadata"
-                      class="json-textarea"
-                      rows="4"
-                      spellcheck="false"
-                      placeholder='{"city":"Москва","budget":2500}'
-                    >{"city":"Москва","budget":2500}</textarea>
-                  </div>
-                  <div class="json-editor-foot">
-                    <span class="json-editor-tag">application/json</span>
-                    <span id="task-metadata-json-state" class="json-editor-ok">parsed ok</span>
-                  </div>
+        <section class="workspace">
+          <div class="stack">
+            <section class="panel task">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">POST /api/tasks</p>
+                  <h2>Новая задача</h2>
                 </div>
               </div>
 
-              <details class="full auth-details">
-                <summary>auth (JSON, optional)</summary>
-                <div class="auth-json-wrap json-field">
-                  <div class="sr-only">auth JSON</div>
-                  <div class="json-editor" data-json-editor="task-auth">
+              <form id="task-form" class="task-form-grid">
+                <label class="full">
+                  Задача
+                  <textarea
+                    id="task-text"
+                    rows="3"
+                    placeholder="Открой сайт и подготовь путь до шага оплаты без реального платежа"
+                    required
+                  >Открой litres.ru, найди книгу «Война и мир» (любое издание) и подготовь путь до шага оплаты без реального платежа.</textarea>
+                </label>
+
+                <label class="full">
+                  Start URL
+                  <input type="url" id="task-start-url" value="https://www.litres.ru/" required />
+                </label>
+
+                <div class="full json-field">
+                  <div class="json-field-label">metadata (JSON)</div>
+                  <div class="json-editor" data-json-editor="task-metadata">
                     <div class="json-editor-frame">
-                      <pre id="task-auth-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
+                      <pre id="task-metadata-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
                       <textarea
-                        id="task-auth"
+                        id="task-metadata"
                         class="json-textarea"
-                        rows="5"
+                        rows="4"
                         spellcheck="false"
-                        placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
-                      ></textarea>
+                        placeholder='{"city":"Москва","budget":2500}'
+                      >{"city":"Москва","budget":2500}</textarea>
                     </div>
                     <div class="json-editor-foot">
                       <span class="json-editor-tag">application/json</span>
-                      <span id="task-auth-json-state" class="json-editor-ok">parsed ok</span>
+                      <span id="task-metadata-json-state" class="json-editor-ok">parsed ok</span>
                     </div>
                   </div>
                 </div>
-              </details>
 
-              <button type="submit" class="primary-action full">Запустить сессию</button>
-            </form>
-            <pre id="task-result" class="result" aria-live="polite"></pre>
-          </section>
+                <details class="full auth-details">
+                  <summary>auth (JSON, optional)</summary>
+                  <div class="auth-json-wrap json-field">
+                    <div class="sr-only">auth JSON</div>
+                    <div class="json-editor" data-json-editor="task-auth">
+                      <div class="json-editor-frame">
+                        <pre id="task-auth-highlight" class="json-highlight" aria-hidden="true"><code></code></pre>
+                        <textarea
+                          id="task-auth"
+                          class="json-textarea"
+                          rows="5"
+                          spellcheck="false"
+                          placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
+                        ></textarea>
+                      </div>
+                      <div class="json-editor-foot">
+                        <span class="json-editor-tag">application/json</span>
+                        <span id="task-auth-json-state" class="json-editor-ok">parsed ok</span>
+                      </div>
+                    </div>
+                  </div>
+                </details>
 
-          <section class="panel reply">
+                <button type="submit" class="primary-action full">Запустить сессию</button>
+              </form>
+              <pre id="task-result" class="result" aria-live="polite"></pre>
+            </section>
+
+            <section class="panel reply">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">POST /api/reply</p>
+                  <h2>Ответить агенту</h2>
+                </div>
+                <span id="reply-state-badge" class="badge waiting_user" hidden>waiting_user</span>
+              </div>
+
+              <div id="agent-question" class="agent-question" hidden>
+                <div class="agent-question-head">
+                  <span class="agent-bubble-tag">agent · ask_user</span>
+                  <span id="agent-question-ts" class="agent-question-ts code"></span>
+                </div>
+                <p id="agent-question-text" class="agent-question-text"></p>
+                <div id="agent-question-options" class="agent-question-options"></div>
+              </div>
+              <div id="reply-empty" class="empty">Сессия не ждёт ответа. Появится после <span class="code">ask_user</span>.</div>
+
+              <form id="reply-form">
+                <label>
+                  session_id
+                  <input type="text" id="reply-session-id" readonly />
+                </label>
+                <label>
+                  reply_id
+                  <input type="text" id="reply-id" placeholder="Появится после ask_user" />
+                </label>
+                <label>
+                  Ответ
+                  <textarea id="reply-message" rows="4" placeholder="Введите ответ агенту"></textarea>
+                </label>
+                <button type="submit" class="primary-action">Отправить в buyer</button>
+              </form>
+              <pre id="reply-result" class="result" aria-live="polite"></pre>
+            </section>
+          </div>
+
+          <section class="panel novnc">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">POST /api/reply</p>
-                <h2>Ответить агенту</h2>
+                <p class="eyebrow" id="novnc-session-label">session.novnc_url</p>
+                <h2>Наблюдение noVNC</h2>
               </div>
-              <span id="reply-state-badge" class="badge waiting_user" hidden>waiting_user</span>
             </div>
-
-            <div id="agent-question" class="agent-question" hidden>
-              <div class="agent-question-head">
-                <span class="agent-bubble-tag">agent · ask_user</span>
-                <span id="agent-question-ts" class="agent-question-ts code"></span>
-              </div>
-              <p id="agent-question-text" class="agent-question-text"></p>
-              <div id="agent-question-options" class="agent-question-options"></div>
+            <div class="viewport-shell">
+              <iframe id="novnc-frame" title="noVNC"></iframe>
+              <div id="novnc-placeholder" class="novnc-placeholder">Iframe ожидает session.novnc_url</div>
             </div>
-            <div id="reply-empty" class="empty">Сессия не ждёт ответа. Появится после <span class="code">ask_user</span>.</div>
-
-            <form id="reply-form">
-              <label>
-                session_id
-                <input type="text" id="reply-session-id" readonly />
-              </label>
-              <label>
-                reply_id
-                <input type="text" id="reply-id" placeholder="Появится после ask_user" />
-              </label>
-              <label>
-                Ответ
-                <textarea id="reply-message" rows="4" placeholder="Введите ответ агенту"></textarea>
-              </label>
-              <button type="submit" class="primary-action">Отправить в buyer</button>
-            </form>
-            <pre id="reply-result" class="result" aria-live="polite"></pre>
           </section>
-        </div>
+        </section>
 
-        <section class="panel novnc">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow" id="novnc-session-label">session.novnc_url</p>
-              <h2>Наблюдение noVNC</h2>
+        <section class="telemetry-grid two">
+          <article class="panel sessions">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="sessions-count">0 ACTIVE</p>
+                <h2>Сессии</h2>
+              </div>
             </div>
-          </div>
-          <div class="viewport-shell">
-            <iframe id="novnc-frame" title="noVNC"></iframe>
-            <div id="novnc-placeholder" class="novnc-placeholder">Iframe ожидает session.novnc_url</div>
-          </div>
+            <div id="sessions-empty" class="empty">Пока нет активных сессий.</div>
+            <div id="sessions-list" class="sessions-list"></div>
+          </article>
+
+          <article class="panel events">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="events-count">0 EVENTS</p>
+                <h2>Callback-лента</h2>
+              </div>
+            </div>
+            <div id="events-empty" class="empty">Выберите сессию.</div>
+            <div id="events-list" class="events-list"></div>
+          </article>
+        </section>
+
+        <section class="stream-row">
+          <article class="panel stream">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="stream-count">0 STREAM EVENTS</p>
+                <h2>Live stream</h2>
+              </div>
+            </div>
+            <div id="stream-empty" class="empty">Выберите сессию.</div>
+            <div id="stream-list" class="stream-list"></div>
+          </article>
         </section>
       </section>
 
-      <section class="telemetry-grid two">
-        <article class="panel sessions">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow" id="sessions-count">0 ACTIVE</p>
-              <h2>Сессии</h2>
-            </div>
-          </div>
-          <div id="sessions-empty" class="empty">Пока нет активных сессий.</div>
-          <div id="sessions-list" class="sessions-list"></div>
-        </article>
+      <section
+        id="eval-tab-panel"
+        class="tab-panel eval-shell"
+        data-tab-panel="eval"
+        role="tabpanel"
+        aria-labelledby="tab-eval"
+        hidden
+      >
+        <section class="eval-metrics" aria-label="Eval сводка">
+          <article class="metric">
+            <span>Eval runs</span>
+            <strong id="eval-metric-runs">0</strong>
+          </article>
+          <article class="metric">
+            <span>Cases</span>
+            <strong id="eval-metric-cases">0</strong>
+          </article>
+          <article class="metric">
+            <span>Ждут ответа</span>
+            <strong id="eval-metric-waiting">0</strong>
+          </article>
+          <article class="metric">
+            <span>Judged</span>
+            <strong id="eval-metric-judged">0</strong>
+          </article>
+        </section>
 
-        <article class="panel events">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow" id="events-count">0 EVENTS</p>
-              <h2>Callback-лента</h2>
+        <section class="eval-grid">
+          <article class="panel eval-cases-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Cases</p>
+                <h2>Набор проверок</h2>
+              </div>
             </div>
-          </div>
-          <div id="events-empty" class="empty">Выберите сессию.</div>
-          <div id="events-list" class="events-list"></div>
-        </article>
-      </section>
+            <form id="eval-case-form" class="eval-case-form">
+              <div id="eval-cases-list" class="eval-cases-list"></div>
+              <button type="submit" id="eval-start-run" class="primary-action">Start run</button>
+            </form>
+            <pre id="eval-start-result" class="result" aria-live="polite"></pre>
+          </article>
 
-      <section class="stream-row">
-        <article class="panel stream">
+          <article class="panel eval-run-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="eval-run-label">eval_run_id</p>
+                <h2>Run detail</h2>
+              </div>
+              <button type="button" id="eval-run-judge" class="secondary-action">Run judge</button>
+            </div>
+            <div id="eval-run-detail" class="eval-run-detail"></div>
+            <pre id="eval-judge-result" class="result" aria-live="polite"></pre>
+          </article>
+
+          <article class="panel eval-ask-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">ask_user</p>
+                <h2>Ответ оператора</h2>
+              </div>
+            </div>
+            <div id="eval-ask-user-question" class="eval-question">Нет ожидающего вопроса.</div>
+            <form id="eval-ask-user-form" class="eval-reply-form">
+              <label>
+                eval_case_id
+                <input type="text" id="eval-reply-case-id" readonly />
+              </label>
+              <label>
+                session_id
+                <input type="text" id="eval-reply-session-id" readonly />
+              </label>
+              <label>
+                reply_id
+                <input type="text" id="eval-reply-id" readonly />
+              </label>
+              <label>
+                Сообщение
+                <textarea id="eval-reply-message" rows="4" placeholder="Ответ для buyer"></textarea>
+              </label>
+              <button type="submit" class="primary-action">Отправить ответ</button>
+            </form>
+            <pre id="eval-reply-result" class="result" aria-live="polite"></pre>
+          </article>
+        </section>
+
+        <section class="panel eval-evaluations-panel">
           <div class="panel-head">
             <div>
-              <p class="eyebrow" id="stream-count">0 STREAM EVENTS</p>
-              <h2>Live stream</h2>
+              <p class="eyebrow">Evaluations</p>
+              <h2>Оценки</h2>
             </div>
           </div>
-          <div id="stream-empty" class="empty">Выберите сессию.</div>
-          <div id="stream-list" class="stream-list"></div>
-        </article>
+          <div class="eval-table-wrap">
+            <table class="eval-table">
+              <thead>
+                <tr>
+                  <th>Case</th>
+                  <th>Host</th>
+                  <th>Status</th>
+                  <th>Checks</th>
+                  <th>Duration</th>
+                  <th>Tokens</th>
+                  <th>Рекомендации</th>
+                  <th>Artifacts</th>
+                </tr>
+              </thead>
+              <tbody id="eval-evaluations-body"></tbody>
+            </table>
+            <div id="eval-evaluations-empty" class="empty">Оценок пока нет.</div>
+          </div>
+        </section>
+
+        <section class="eval-dashboard-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Dashboard</p>
+                <h2>Cases</h2>
+              </div>
+            </div>
+            <div id="eval-case-dashboard" class="eval-dashboard-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Dashboard</p>
+                <h2>Hosts</h2>
+              </div>
+            </div>
+            <div id="eval-host-dashboard" class="eval-dashboard-list"></div>
+          </article>
+        </section>
       </section>
     </main>
 
     <script src="/static/app.js" defer></script>
+    <script>
+      window.EVAL_SERVICE_BASE_URL = {{ eval_service_public_base_url | default('/api/eval') | tojson }};
+    </script>
+    <script src="/static/eval.js" defer></script>
   </body>
 </html>

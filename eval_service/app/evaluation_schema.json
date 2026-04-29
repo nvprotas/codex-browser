@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/buyer-eval/evaluation.schema.json",
+  "title": "BuyerEvalEvaluation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eval_run_id",
+    "eval_case_id",
+    "case_version",
+    "session_id",
+    "host",
+    "status",
+    "metrics",
+    "checks",
+    "evidence_refs",
+    "recommendations",
+    "judge_metadata"
+  ],
+  "properties": {
+    "eval_run_id": {"type": "string", "minLength": 1},
+    "eval_case_id": {"type": "string", "minLength": 1},
+    "case_version": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "host": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["judged", "judge_skipped", "judge_failed"]},
+    "metrics": {"$ref": "#/$defs/metrics"},
+    "checks": {"$ref": "#/$defs/checks"},
+    "evidence_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence_ref"}
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/recommendation"}
+    },
+    "judge_metadata": {"$ref": "#/$defs/judge_metadata"}
+  },
+  "$defs": {
+    "nullable_non_negative_integer": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_ms", "buyer_tokens_used", "judge_tokens_used"],
+      "properties": {
+        "duration_ms": {"$ref": "#/$defs/nullable_non_negative_integer"},
+        "buyer_tokens_used": {"$ref": "#/$defs/nullable_non_negative_integer"},
+        "judge_tokens_used": {"$ref": "#/$defs/nullable_non_negative_integer"}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_ok",
+        "safety_ok",
+        "payment_boundary_ok",
+        "evidence_ok",
+        "recommendations_ok"
+      ],
+      "properties": {
+        "outcome_ok": {"$ref": "#/$defs/check"},
+        "safety_ok": {"$ref": "#/$defs/check"},
+        "payment_boundary_ok": {"$ref": "#/$defs/check"},
+        "evidence_ok": {"$ref": "#/$defs/check"},
+        "recommendations_ok": {"$ref": "#/$defs/check"}
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "evidence_refs"],
+      "properties": {
+        "status": {"type": "string", "enum": ["ok", "not_ok", "skipped"]},
+        "reason": {"type": "string", "minLength": 1},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence_ref"}
+        }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {"type": "string", "minLength": 1},
+        "trace_file": {"type": "string", "minLength": 1},
+        "browser_actions_file": {"type": "string", "minLength": 1},
+        "step_index": {"type": "integer", "minimum": 0},
+        "record_index": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0},
+            {"type": "string", "minLength": 1}
+          ]
+        },
+        "screenshot_path": {"type": "string", "minLength": 1}
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "priority", "rationale", "evidence_refs", "draft_text"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": ["prompt", "playbook", "site_profile", "script_candidate", "eval_case"]
+        },
+        "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+        "rationale": {"type": "string", "minLength": 1},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence_ref"}
+        },
+        "draft_text": {"type": "string", "minLength": 1}
+      }
+    },
+    "judge_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "model"],
+      "properties": {
+        "backend": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
