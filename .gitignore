@@ -13,6 +13,7 @@ coverage/
 *.log
 
 .tmp/
+eval/auth-profiles.local/
 .env
 .env.local
 .DS_Store

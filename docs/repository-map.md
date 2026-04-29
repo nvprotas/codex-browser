@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы, external cookies env и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volumes `buyer-postgres-data`, `eval-auth-profiles`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
 | `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и временного `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
@@ -639,6 +639,8 @@ Security boundaries:
 
 `eval_service` запускает eval cases, принимает callbacks от `buyer`, хранит manifests и готовит данные для judge/dashboard.
 
+Runtime auth-профили берутся из host-директории `EVAL_AUTH_PROFILES_HOST_DIR`, которая bind-mounted в контейнер как `/run/eval/auth-profiles` и внутри сервиса читается через `EVAL_AUTH_PROFILES_DIR`. Для `auth_profile: litres_sberid` ожидается файл `litres_sberid.json`. Эти файлы являются секретами, не входят в image и не должны храниться в repo.
+
 ### `eval_service/app/case_registry.py`
 
 Загружает YAML templates из `eval/cases/*.yaml` и разворачивает variants в `EvalCase`.
@@ -736,7 +738,7 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `BUY
 
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state.
-- `micro-ui/app/static/eval.js`: eval shell; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
+- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
 - `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
