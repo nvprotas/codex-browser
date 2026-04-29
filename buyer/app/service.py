@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Callable
 from uuid import uuid4
 
 from ._utils import head_text as _head_text, tail_text as _tail_text
@@ -20,7 +19,9 @@ from .auth_scripts import (
 )
 from .callback import CallbackClient, CallbackDeliveryError
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
-from .models import AgentOutput, EventEnvelope, PaymentEvidence, SessionStatus, TaskAuthPayload
+from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
+from .persistence import _sanitize_persistent_metadata, summarize_sberid_auth_reply
+from .payment_verifier import payment_evidence_from_purchase_script, verify_completed_payment
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
 from .state import (
@@ -70,6 +71,9 @@ class BuyerService:
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
         self._buyer_user_info_path = buyer_user_info_path
+        self._sensitive_reply_kinds: dict[tuple[str, str], str] = {}
+        self._sensitive_reply_texts: dict[tuple[str, str], str] = {}
+        self._callback_tokens: dict[str, str] = {}
 
     async def create_session(
         self,
@@ -78,6 +82,7 @@ class BuyerService:
         callback_url: str | None,
         metadata: dict[str, Any],
         auth: TaskAuthPayload | None,
+        callback_token: str | None = None,
     ) -> SessionState:
         state = await self._store.create_session(
             task=task,
@@ -87,6 +92,8 @@ class BuyerService:
             metadata=metadata,
             auth=auth,
         )
+        if callback_token:
+            self._callback_tokens[state.session_id] = callback_token
         state = await self._store.set_status(state.session_id, SessionStatus.RUNNING)
 
         task_ref = asyncio.create_task(self._run_session(state.session_id), name=f'buyer-session-{state.session_id}')
@@ -101,7 +108,16 @@ class BuyerService:
         return await self._store.list_sessions()
 
     async def submit_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
-        return await self._store.apply_reply(session_id, reply_id, message)
+        sensitive_key = (session_id, reply_id)
+        message_for_storage = message
+        if self._sensitive_reply_kinds.get(sensitive_key) == 'sberid_auth':
+            self._sensitive_reply_texts[sensitive_key] = message
+            message_for_storage = summarize_sberid_auth_reply(message)
+        try:
+            return await self._store.apply_reply(session_id, reply_id, message_for_storage)
+        except Exception:
+            self._sensitive_reply_texts.pop(sensitive_key, None)
+            raise
 
     async def wait_for_post_session_analysis(self) -> None:
         if not self._post_session_analysis_tasks:
@@ -141,6 +157,7 @@ class BuyerService:
             await self._store.add_agent_memory(session_id, 'user', state.task)
             auth_summary = await self._run_sberid_auth_flow(state)
             if auth_summary:
+                auth_summary = _sanitize_auth_summary_for_runtime(auth_summary)
                 await self._store.set_auth_context(session_id, auth_summary)
                 await self._store.add_agent_memory(
                     session_id,
@@ -210,11 +227,11 @@ class BuyerService:
                     recovery_started_at = None
                     recovery_attempts = 0
                     last_recovery_error_tail = 'none'
-                    contract_failure = _completed_result_contract_failure(state.start_url, result)
-                    if contract_failure:
+                    payment_verification = verify_completed_payment(state.start_url, result)
+                    if not payment_verification.accepted:
                         await self._handle_failed(
                             state,
-                            contract_failure,
+                            payment_verification.failure_reason or 'Completed result rejected: payment verification failed.',
                             _artifacts_with_payment_evidence(result),
                             auth_summary=auth_summary,
                         )
@@ -293,6 +310,8 @@ class BuyerService:
                     **_eval_ids_from_state(state),
                 )
                 await self._store.append_event(session_id, fallback_event)
+        finally:
+            self._callback_tokens.pop(session_id, None)
 
     async def _handle_completed(
         self,
@@ -468,6 +487,8 @@ class BuyerService:
                             'attempt': attempt,
                             'max_attempts': max_attempts,
                         },
+                        sensitive_reply_kind='sberid_auth',
+                        reply_memory_formatter=summarize_sberid_auth_reply,
                     )
                     parsed_auth = self._parse_auth_from_user_reply(user_reply)
                     if parsed_auth is not None:
@@ -524,6 +545,8 @@ class BuyerService:
                         max_attempts=max_attempts,
                         script_result=script_result,
                     ),
+                    sensitive_reply_kind='sberid_auth',
+                    reply_memory_formatter=summarize_sberid_auth_reply,
                 )
                 parsed_auth = self._parse_auth_from_user_reply(user_reply)
                 if parsed_auth is not None:
@@ -582,15 +605,23 @@ class BuyerService:
             return None
 
         if script_result.status == 'completed' and script_result.order_id:
-            payment_evidence = _payment_evidence_from_purchase_script(script_result)
-            if _is_litres_url(state.start_url) and payment_evidence is None:
+            payment_evidence = payment_evidence_from_purchase_script(script_result)
+            candidate = AgentOutput(
+                status='completed',
+                message=script_result.message,
+                order_id=script_result.order_id,
+                payment_evidence=payment_evidence,
+                artifacts={'purchase_script': script_result.artifacts},
+            )
+            payment_verification = verify_completed_payment(state.start_url, candidate)
+            if not payment_verification.accepted:
                 await self._store.add_agent_memory(
                     state.session_id,
                     'system',
                     (
                         '[PURCHASE_SCRIPT_FALLBACK] '
                         f'Быстрый purchase-скрипт для {domain} вернул completed/order_id, '
-                        'но не подтвердил Litres SberPay iframe payecom.ru/pay_ru. '
+                        f'но не прошел verifier SberPay: {payment_verification.failure_reason}. '
                         'Продолжай через generic browser-flow.'
                     ),
                 )
@@ -609,13 +640,7 @@ class BuyerService:
                 domain,
                 script_result.order_id,
             )
-            return AgentOutput(
-                status='completed',
-                message=script_result.message,
-                order_id=script_result.order_id,
-                payment_evidence=payment_evidence,
-                artifacts={'purchase_script': script_result.artifacts},
-            )
+            return candidate
 
         await self._store.add_agent_memory(
             state.session_id,
@@ -643,30 +668,45 @@ class BuyerService:
         *,
         reason_code: str | None,
         extra_context: dict[str, Any] | None,
+        sensitive_reply_kind: str | None = None,
+        reply_memory_formatter: Callable[[str], str] | None = None,
     ) -> str:
         reply_id = str(uuid4())
-        await self._store.set_waiting_question(state.session_id, message, reply_id)
-        refreshed_state = await self._store.get(state.session_id)
-        payload: dict[str, Any] = {
-            'message': message,
-            'reply_id': reply_id,
-        }
-        if reason_code:
-            payload['reason_code'] = reason_code
-        if extra_context:
-            payload['context'] = extra_context
-        await self._emit_event(
-            refreshed_state,
-            event_type='ask_user',
-            payload=payload,
-            idempotency_suffix=reply_id,
-        )
-        logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
+        sensitive_key: tuple[str, str] | None = None
+        if sensitive_reply_kind:
+            sensitive_key = (state.session_id, reply_id)
+            self._sensitive_reply_kinds[sensitive_key] = sensitive_reply_kind
+        try:
+            await self._store.set_waiting_question(state.session_id, message, reply_id)
+            refreshed_state = await self._store.get(state.session_id)
+            payload: dict[str, Any] = {
+                'message': message,
+                'reply_id': reply_id,
+            }
+            if reason_code:
+                payload['reason_code'] = reason_code
+            if extra_context:
+                payload['context'] = extra_context
+            await self._emit_event(
+                refreshed_state,
+                event_type='ask_user',
+                payload=payload,
+                idempotency_suffix=reply_id,
+            )
+            logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
 
-        await refreshed_state.wake_event.wait()
-        reply_text = await self._store.pop_reply(state.session_id)
-        await self._store.add_agent_memory(state.session_id, 'user', reply_text)
-        return reply_text
+            await refreshed_state.wake_event.wait()
+            stored_reply_text = await self._store.pop_reply(state.session_id)
+            reply_text = stored_reply_text
+            if sensitive_key is not None:
+                reply_text = self._sensitive_reply_texts.pop(sensitive_key, stored_reply_text)
+            memory_text = reply_memory_formatter(reply_text) if reply_memory_formatter is not None else stored_reply_text
+            await self._store.add_agent_memory(state.session_id, 'user', memory_text)
+            return reply_text
+        finally:
+            if sensitive_key is not None:
+                self._sensitive_reply_kinds.pop(sensitive_key, None)
+                self._sensitive_reply_texts.pop(sensitive_key, None)
 
     async def _emit_handoff_and_wait(
         self,
@@ -758,7 +798,11 @@ class BuyerService:
         )
         await self._store.append_event(state.session_id, envelope)
         try:
-            await self._callback_client.deliver(state.callback_url, envelope)
+            headers = self._callback_headers_for_session(state.session_id)
+            if headers:
+                await self._callback_client.deliver(state.callback_url, envelope, headers=headers)
+            else:
+                await self._callback_client.deliver(state.callback_url, envelope)
         except CallbackDeliveryError as exc:
             await self._store.mark_event_delivery(envelope.event_id, 'failed', str(exc))
             raise
@@ -781,7 +825,11 @@ class BuyerService:
         )
         try:
             await self._store.append_event(state.session_id, envelope)
-            await self._callback_client.deliver(state.callback_url, envelope)
+            headers = self._callback_headers_for_session(state.session_id)
+            if headers:
+                await self._callback_client.deliver(state.callback_url, envelope, headers=headers)
+            else:
+                await self._callback_client.deliver(state.callback_url, envelope)
         except Exception as exc:  # noqa: BLE001 - stream не должен валить покупку
             try:
                 await self._store.mark_event_delivery(envelope.event_id, 'failed', str(exc))
@@ -797,6 +845,12 @@ class BuyerService:
             )
             return
         await self._store.mark_event_delivery(envelope.event_id, 'delivered')
+
+    def _callback_headers_for_session(self, session_id: str) -> dict[str, str] | None:
+        token = self._callback_tokens.get(session_id)
+        if not token:
+            return None
+        return {'X-Eval-Callback-Token': token}
 
 
 TRANSIENT_CDP_MARKERS = (
@@ -869,86 +923,9 @@ def _is_valid_storage_state(payload: dict[str, Any] | None) -> bool:
     return isinstance(cookies, list) and isinstance(origins, list)
 
 
-def _is_litres_url(raw_url: str) -> bool:
-    return is_domain_in_allowlist(domain_from_url(raw_url), {'litres.ru'})
-
-
-def _payecom_order_id_from_url(raw_url: str) -> str | None:
-    try:
-        parsed = urlparse(raw_url)
-    except Exception:
-        return None
-    host = (parsed.hostname or '').lower()
-    if host != 'payecom.ru' and not host.endswith('.payecom.ru'):
-        return None
-    if not parsed.path.startswith('/pay_ru'):
-        return None
-    order_values = parse_qs(parsed.query).get('orderId') or []
-    if not order_values:
-        return None
-    order_id = str(order_values[0]).strip()
-    return order_id or None
-
-
-def _payment_evidence_from_purchase_script(script_result: Any) -> PaymentEvidence | None:
-    artifacts = script_result.artifacts if isinstance(getattr(script_result, 'artifacts', None), dict) else {}
-    frame_src = artifacts.get('payment_frame_src')
-    order_id = str(getattr(script_result, 'order_id', '') or '').strip()
-    if isinstance(frame_src, str) and order_id and _payecom_order_id_from_url(frame_src) == order_id:
-        return PaymentEvidence(source='litres_payecom_iframe', url=frame_src)
-    return None
-
-
-def _payment_evidence_to_dict(value: PaymentEvidence | dict[str, Any] | None) -> dict[str, Any] | None:
-    if isinstance(value, PaymentEvidence):
-        return value.model_dump(mode='json')
-    if isinstance(value, dict):
-        return value
-    return None
-
-
-def _iter_litres_payment_evidence_urls(result: AgentOutput) -> list[str]:
-    urls: list[str] = []
-    direct_evidence = _payment_evidence_to_dict(result.payment_evidence)
-    if direct_evidence and direct_evidence.get('source') == 'litres_payecom_iframe':
-        url = direct_evidence.get('url')
-        if isinstance(url, str):
-            urls.append(url)
-
-    artifact_sources: list[dict[str, Any]] = [result.artifacts]
-    purchase_script = result.artifacts.get('purchase_script')
-    if isinstance(purchase_script, dict):
-        artifact_sources.append(purchase_script)
-
-    for source in artifact_sources:
-        frame_src = source.get('payment_frame_src')
-        if isinstance(frame_src, str):
-            urls.append(frame_src)
-        evidence = _payment_evidence_to_dict(source.get('payment_evidence'))  # type: ignore[arg-type]
-        if evidence and evidence.get('source') == 'litres_payecom_iframe':
-            url = evidence.get('url')
-            if isinstance(url, str):
-                urls.append(url)
-    return urls
-
-
-def _has_valid_litres_payment_evidence(result: AgentOutput) -> bool:
-    if not result.order_id:
-        return False
-    return any(_payecom_order_id_from_url(url) == result.order_id for url in _iter_litres_payment_evidence_urls(result))
-
-
-def _completed_result_contract_failure(start_url: str, result: AgentOutput) -> str | None:
-    if not _is_litres_url(start_url):
-        return None
-    if result.order_id is None or not str(result.order_id).strip():
-        return 'Litres completed result rejected: order_id обязателен для подтвержденного шага SberPay.'
-    if not _has_valid_litres_payment_evidence(result):
-        return (
-            'Litres completed result rejected: order_id должен быть подтвержден '
-            'payment_evidence из iframe https://payecom.ru/pay_ru?...orderId=...'
-        )
-    return None
+def _sanitize_auth_summary_for_runtime(summary: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _sanitize_persistent_metadata(summary)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _artifacts_with_payment_evidence(result: AgentOutput) -> dict[str, Any]:

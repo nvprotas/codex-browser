@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from .auth_scripts import domain_from_url, is_domain_in_allowlist
+from .models import AgentOutput, PaymentEvidence
+
+LITRES_PAYMENT_EVIDENCE_SOURCE = 'litres_payecom_iframe'
+LITRES_DOMAINS = {'litres.ru'}
+
+
+@dataclass(frozen=True)
+class PaymentVerificationResult:
+    accepted: bool
+    failure_reason: str | None = None
+
+
+def is_litres_url(raw_url: str) -> bool:
+    return is_domain_in_allowlist(domain_from_url(raw_url), LITRES_DOMAINS)
+
+
+def payecom_order_id_from_url(raw_url: str) -> str | None:
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+    if parsed.scheme != 'https':
+        return None
+    if (parsed.hostname or '').lower() != 'payecom.ru':
+        return None
+    if parsed.path != '/pay_ru':
+        return None
+    order_values = parse_qs(parsed.query).get('orderId') or []
+    if len(order_values) != 1:
+        return None
+    order_id = str(order_values[0]).strip()
+    return order_id or None
+
+
+def payment_evidence_from_purchase_script(script_result: Any) -> PaymentEvidence | None:
+    artifacts = script_result.artifacts if isinstance(getattr(script_result, 'artifacts', None), dict) else {}
+    frame_src = artifacts.get('payment_frame_src')
+    order_id = str(getattr(script_result, 'order_id', '') or '').strip()
+    if isinstance(frame_src, str) and order_id and payecom_order_id_from_url(frame_src) == order_id:
+        return PaymentEvidence(source=LITRES_PAYMENT_EVIDENCE_SOURCE, url=frame_src)
+    return None
+
+
+def verify_completed_payment(start_url: str, result: AgentOutput) -> PaymentVerificationResult:
+    if is_litres_url(start_url):
+        return _verify_litres_payment(result)
+
+    domain = domain_from_url(start_url) or '<unknown>'
+    return PaymentVerificationResult(
+        accepted=False,
+        failure_reason=(
+            f'Completed result rejected: для домена {domain} не поддерживается verifier SberPay; '
+            'completed success и payment_ready запрещены без domain-specific payment_evidence.'
+        ),
+    )
+
+
+def _verify_litres_payment(result: AgentOutput) -> PaymentVerificationResult:
+    order_id = str(result.order_id or '').strip()
+    if not order_id:
+        return PaymentVerificationResult(
+            accepted=False,
+            failure_reason='Litres completed result rejected: order_id обязателен для подтвержденного шага SberPay.',
+        )
+    if not _has_valid_litres_payment_evidence(result, order_id):
+        return PaymentVerificationResult(
+            accepted=False,
+            failure_reason=(
+                'Litres completed result rejected: order_id должен быть подтвержден '
+                'payment_evidence из iframe https://payecom.ru/pay_ru?...orderId=...'
+            ),
+        )
+    return PaymentVerificationResult(accepted=True)
+
+
+def _has_valid_litres_payment_evidence(result: AgentOutput, order_id: str) -> bool:
+    return any(payecom_order_id_from_url(url) == order_id for url in _iter_litres_payment_evidence_urls(result))
+
+
+def _iter_litres_payment_evidence_urls(result: AgentOutput) -> list[str]:
+    urls: list[str] = []
+    direct_evidence = _payment_evidence_to_dict(result.payment_evidence)
+    if direct_evidence and direct_evidence.get('source') == LITRES_PAYMENT_EVIDENCE_SOURCE:
+        url = direct_evidence.get('url')
+        if isinstance(url, str):
+            urls.append(url)
+
+    artifact_sources: list[dict[str, Any]] = [result.artifacts]
+    purchase_script = result.artifacts.get('purchase_script')
+    if isinstance(purchase_script, dict):
+        artifact_sources.append(purchase_script)
+
+    for source in artifact_sources:
+        frame_src = source.get('payment_frame_src')
+        if isinstance(frame_src, str):
+            urls.append(frame_src)
+        evidence = _payment_evidence_to_dict(source.get('payment_evidence'))  # type: ignore[arg-type]
+        if evidence and evidence.get('source') == LITRES_PAYMENT_EVIDENCE_SOURCE:
+            url = evidence.get('url')
+            if isinstance(url, str):
+                urls.append(url)
+    return urls
+
+
+def _payment_evidence_to_dict(value: PaymentEvidence | dict[str, Any] | None) -> dict[str, Any] | None:
+    if isinstance(value, PaymentEvidence):
+        return value.model_dump(mode='json')
+    if isinstance(value, dict):
+        return value
+    return None

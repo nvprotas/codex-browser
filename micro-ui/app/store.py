@@ -81,12 +81,17 @@ class CallbackStore:
                 for event in events:
                     if event.event_type == 'ask_user':
                         waiting_reply_id = event.payload.get('reply_id')
-                        question = event.payload.get('question')
+                        message = event.payload.get('message')
+                        question = message if isinstance(message, str) and message else event.payload.get('question')
                         options = event.payload.get('options')
                         ask_question = question if isinstance(question, str) else None
-                        ask_options = [item for item in options if isinstance(item, str)] if isinstance(options, list) else []
+                        ask_options = (
+                            [item for item in options if isinstance(item, str)]
+                            if isinstance(options, list)
+                            else []
+                        )
                         ask_asked_at = event.occurred_at
-                    if event.event_type == 'handoff_resumed':
+                    if event.event_type in {'agent_step_started', 'handoff_resumed', 'payment_ready', 'operator_reply'}:
                         waiting_reply_id = None
                         ask_question = None
                         ask_options = []

@@ -113,6 +113,22 @@ def test_rejects_template_with_missing_variant_variable(tmp_path: Path) -> None:
         CaseRegistry(cases_dir).load_cases()
 
 
+def test_skips_disabled_yaml_template(tmp_path: Path) -> None:
+    cases_dir = tmp_path / 'cases'
+    cases_dir.mkdir()
+    write_case(
+        cases_dir / 'brandshop_purchase_smoke.yaml',
+        valid_case_yaml('brandshop_disabled_001').replace(
+            'template_id: litres_purchase_book\n',
+            'template_id: brandshop_purchase_smoke\nenabled: false\ndisabled_reason: no verifier yet\n',
+        ),
+    )
+
+    cases = CaseRegistry(cases_dir).load_cases()
+
+    assert cases == []
+
+
 def test_repository_smoke_cases_are_loadable() -> None:
     repo_root = Path(__file__).parents[2]
 
@@ -120,6 +136,5 @@ def test_repository_smoke_cases_are_loadable() -> None:
 
     assert {case.eval_case_id for case in cases} == {
         'litres_purchase_book_001',
-        'brandshop_purchase_smoke_001',
     }
-    assert {case.host for case in cases} == {'litres.ru', 'brandshop.ru'}
+    assert {case.host for case in cases} == {'litres.ru'}

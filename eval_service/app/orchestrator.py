@@ -13,7 +13,7 @@ from pydantic import AliasChoices, Field
 
 from eval_service.app.auth_profiles import AuthProfileLoader
 from eval_service.app.buyer_client import BuyerClient
-from eval_service.app.callback_urls import build_buyer_callback_url
+from eval_service.app.callback_urls import build_buyer_callback_token, build_buyer_callback_url
 from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.models import CaseRunState, EvalCase, EvalRunCase, EvalRunManifest, EvalRunStatus, StrictBaseModel
 from eval_service.app.run_store import RunStore
@@ -64,6 +64,7 @@ class RunOrchestrator:
         *,
         selected_case_ids: Sequence[str] | None,
         callback_url: str,
+        callback_token: str | None = None,
     ) -> EvalRunManifest:
         cases = _select_cases(self.case_registry.load_cases(), selected_case_ids)
         eval_run_id = self.run_id_generator()
@@ -74,7 +75,12 @@ class RunOrchestrator:
         )
         self._write_run_status(eval_run_id, EvalRunStatus.RUNNING)
 
-        await self._run_cases_until_waiting(eval_run_id=eval_run_id, cases=cases, callback_url=callback_url)
+        await self._run_cases_until_waiting(
+            eval_run_id=eval_run_id,
+            cases=cases,
+            callback_url=callback_url,
+            callback_token=callback_token,
+        )
 
         return self._refresh_run_status(eval_run_id)
 
@@ -84,6 +90,7 @@ class RunOrchestrator:
         eval_run_id: str,
         eval_case_id: str,
         callback_url: str,
+        callback_token: str | None = None,
     ) -> EvalRunManifest:
         self._write_run_status(eval_run_id, EvalRunStatus.RUNNING)
         state = await self._wait_for_case(eval_run_id, eval_case_id)
@@ -95,6 +102,7 @@ class RunOrchestrator:
             eval_run_id=eval_run_id,
             cases=remaining_cases,
             callback_url=callback_url,
+            callback_token=callback_token,
         )
         return self._refresh_run_status(eval_run_id)
 
@@ -104,6 +112,7 @@ class RunOrchestrator:
         eval_run_id: str,
         cases: Sequence[EvalCase],
         callback_url: str,
+        callback_token: str | None,
     ) -> None:
         for case in cases:
             run_case = _find_case(self.run_store.read_manifest(eval_run_id).cases, case.eval_case_id)
@@ -132,6 +141,7 @@ class RunOrchestrator:
                 eval_run_id=eval_run_id,
                 case=case,
                 callback_url=callback_url,
+                callback_token=callback_token,
                 storage_state=auth_result.storage_state,
             )
             if state == CaseRunState.WAITING_USER:
@@ -143,6 +153,7 @@ class RunOrchestrator:
         eval_run_id: str,
         case: EvalCase,
         callback_url: str,
+        callback_token: str | None,
         storage_state: dict[str, Any] | None,
     ) -> CaseRunState:
         self.run_store.update_case(
@@ -158,6 +169,7 @@ class RunOrchestrator:
                 start_url=case.start_url,
                 metadata={**case.buyer_metadata(), 'eval_run_id': eval_run_id},
                 callback_url=callback_url,
+                callback_token=callback_token,
                 storage_state=storage_state,
             )
             session_id = _required_response_string(response, 'session_id')
@@ -265,6 +277,7 @@ async def create_eval_run(request: Request, payload: RunCreateRequest | None = N
         return await orchestrator.create_run(
             selected_case_ids=payload.case_ids if payload is not None else None,
             callback_url=build_buyer_callback_url(request),
+            callback_token=build_buyer_callback_token(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

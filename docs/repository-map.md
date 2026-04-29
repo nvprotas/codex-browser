@@ -25,7 +25,7 @@
 5. Агент управляет browser-sidecar через `buyer/tools/cdp_tool.py`.
 6. `buyer` отправляет callback-события в `middle`/`micro-ui`.
 7. При `needs_user_input` сессия переходит в `waiting_user`; ответ приходит через `POST /v1/replies`.
-8. При успехе `buyer` отправляет `payment_ready` с `order_id`, затем `scenario_finished`.
+8. При успехе `buyer` отправляет `payment_ready` с `order_id`, затем `scenario_finished` только после domain-specific SberPay verifier; неподдерживаемые домены без verifier не могут завершиться `completed`/`payment_ready`.
 9. После финального callback асинхронно запускается post-session анализ знаний и сохраняет внутренние draft-артефакты.
 
 ## Корень репозитория
@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui`. | `.env`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | Порты: `5432`, `6901`, `9223`, `8000`, `8080`; volume `buyer-postgres-data`. | Неверные env/mounts ломают авторизацию Codex или профиль пользователя; недоступный `browser` блокирует агентный шаг. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volumes `buyer-postgres-data`, `eval-auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя или eval callbacks; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
 
@@ -59,7 +59,7 @@ FastAPI-точка входа `buyer`.
 | Endpoint | Вход | Выход | Ошибки |
 | --- | --- | --- | --- |
 | `GET /healthz` | Нет. | `{"status": "ok"}`. | Не оборачивает внутренние зависимости. |
-| `POST /v1/tasks` | `TaskCreateRequest`: `task`, `start_url`, optional `callback_url`, `metadata`, `auth`. | `201 TaskCreateResponse`: `session_id`, `status`, `novnc_url`. | `409` при `SessionConflictError`; `422` от Pydantic при невалидном payload. |
+| `POST /v1/tasks` | `TaskCreateRequest`: `task`, `start_url`, optional `callback_url` без query/fragment, ephemeral `callback_token`, `metadata`, `auth`. | `201 TaskCreateResponse`: `session_id`, `status`, `novnc_url`. | `409` при `SessionConflictError`; `422` при невалидном payload или нарушении URL policy. |
 | `GET /v1/sessions` | Нет. | Список `SessionView`. | Ошибки repository пробрасываются как `500`. |
 | `GET /v1/sessions/{session_id}` | `session_id` в path. | `SessionDetail` с событиями. | `404` при `SessionNotFoundError`. |
 | `POST /v1/replies` | `SessionReplyRequest`: `session_id`, `reply_id`, `message`. | `SessionReplyResponse`: `accepted=true`, текущий статус. | `404` при неизвестной сессии; `409` при `ReplyValidationError`; `422` при пустом `message`. |
@@ -79,6 +79,17 @@ Lifecycle:
 - `startup`: `store.initialize()`, для Postgres создает pool и миграции.
 - `shutdown`: отменяет post-session analysis, закрывает HTTP client callbacks и repository.
 
+### `buyer/app/url_policy.py`
+
+Централизует URL policy для task input.
+
+Правила:
+
+- `start_url`: только http/https, hostname обязателен, userinfo запрещен, hostname/IP не должен быть loopback/private/link-local/metadata/internal.
+- `callback_url`: task-provided URL не должен содержать query string или fragment; публичный callback должен быть https.
+- Internal callback по http разрешен только при точном совпадении scheme/host/port/path с `MIDDLE_CALLBACK_URL` или `TRUSTED_CALLBACK_URLS`; query/fragment в default/trusted entries запрещены и не участвуют в allowlist.
+- Секрет callback receiver передается отдельно как ephemeral `callback_token`, а не в persisted `callback_url`. Legacy query-token может приниматься входящим eval receiver, но `buyer` такой callback URL не allowlist-ит.
+
 ### `buyer/app/models.py`
 
 Pydantic-контракты API и внутренних результатов.
@@ -87,7 +98,7 @@ Pydantic-контракты API и внутренних результатов.
 
 - `SessionStatus`: `created`, `running`, `waiting_user`, `completed`, `failed`.
 - `TaskAuthPayload`: `provider`, `storageState`/`storage_state`.
-- `TaskCreateRequest`: задача, стартовый URL, callback, metadata, auth.
+- `TaskCreateRequest`: задача, стартовый URL, callback URL, ephemeral callback token, metadata, auth.
 - `SessionReplyRequest`: ответ пользователя на конкретный `reply_id`.
 - `EventEnvelope`: callback envelope.
 - `PaymentEvidence`: сейчас только `source="litres_payecom_iframe"` и `url`.
@@ -95,13 +106,33 @@ Pydantic-контракты API и внутренних результатов.
 
 Ошибки валидации генерирует Pydantic и FastAPI возвращает их как `422`.
 
+### `buyer/app/payment_verifier.py`
+
+Доменные проверки платежной границы перед `payment_ready` и `completed`.
+
+Входы:
+
+- `start_url` сессии;
+- `AgentOutput` generic runner или адаптированный `PurchaseScriptResult`.
+
+Выходы:
+
+- `PaymentVerificationResult(accepted, failure_reason)`;
+- `PaymentEvidence` из purchase-script artifacts, если найден валидный Litres iframe.
+
+Правила:
+
+- Для Litres принимается только `order_id`, подтвержденный `payment_evidence`/`payment_frame_src` с точным URL `https://payecom.ru/pay_ru?orderId=<тот же order_id>`.
+- `http://payecom.ru`, subdomain вроде `evil.payecom.ru`, path prefix вроде `/pay_ru_malicious`, несколько `orderId` или mismatch `orderId` отклоняются.
+- Для доменов без domain-specific verifier любой `completed` отклоняется, поэтому `BuyerService` не отправляет `payment_ready` и завершает сценарий как failed вместо success.
+
 ### `buyer/app/settings.py`
 
 Читает `.env` и environment variables через `pydantic-settings`.
 
 Группы настроек:
 
-- callbacks: `MIDDLE_CALLBACK_URL`, retries, timeout, backoff;
+- callbacks: `MIDDLE_CALLBACK_URL`, `TRUSTED_CALLBACK_URLS`, retries, timeout, backoff;
 - browser/CDP: `BROWSER_CDP_ENDPOINT`, `CDP_RECOVERY_*`;
 - Codex: `CODEX_BIN`, `CODEX_MODEL`, sandbox, reasoning, web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
@@ -144,7 +175,7 @@ Pydantic-контракты API и внутренних результатов.
 - `SessionNotFoundError`: неизвестный `session_id`.
 - `ReplyValidationError`: сессия не ждет ответ, неверный `reply_id`, нет активного runner после рестарта, либо ответ уже потреблен.
 
-Важное ограничение: storageState/auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта.
+Важное ограничение: storageState/auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта. Raw auth-refresh reply в `BuyerService` хранится только во временном in-process буфере до потребления `_ask_user_for_reply`; в durable replies и agent memory пишется marker `[SBERID_AUTH_RECEIVED]` с безопасной сводкой.
 
 ### `buyer/app/persistence.py`
 
@@ -174,6 +205,7 @@ Postgres repository и inline migrations.
 
 - `_sanitize_auth_context` удаляет `storageState`, cookies, localStorage, auth/token/password-like ключи.
 - `_sanitize_persistent_metadata` дополнительно удаляет stdout/stderr/prompt preview.
+- `summarize_sberid_auth_reply` и `_sanitize_reply_or_memory_text` заменяют JSON auth-refresh reply со `storageState` на marker `[SBERID_AUTH_RECEIVED]` для `buyer_replies` и `buyer_agent_memory`.
 - `_iter_artifact_paths` не сохраняет path к `storageState`/cookies/localStorage.
 
 ## `buyer`: orchestration
@@ -214,7 +246,8 @@ Callback-события:
 
 Доменные проверки:
 
-- Для Litres `completed` принимается только с `order_id` и `payment_evidence` из `https://payecom.ru/pay_ru?...orderId=...`.
+- Для Litres `completed` принимается только с `order_id` и `payment_evidence` из точного `https://payecom.ru/pay_ru?...orderId=...`.
+- Для неподдерживаемых доменов `completed` без domain-specific verifier отклоняется и не приводит к `payment_ready`.
 - СБП/SBP/FPS не считается SberPay.
 
 Основные ошибки и реакция:
@@ -324,6 +357,8 @@ HTTP-клиент доставки callback-событий.
 
 - snapshot registry;
 - JSON payload из output-файла или stdout;
+- уникальный путь output-файла для script-runner попытки;
+- best-effort удаление stale script output;
 - trimmed stdio artifacts.
 
 Ошибки чтения output-файла, JSON decode и Unicode decode гасятся; при невалидном файле используется stdout fallback.
@@ -345,7 +380,8 @@ Registry:
 Выход:
 
 - `AuthScriptResult(status, reason_code, message, artifacts)`;
-- trace/output files в `BUYER_TRACE_DIR/<session_id>/`.
+- trace/output files в `BUYER_TRACE_DIR/<session_id>/`: runner удаляет legacy stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` перед запуском и передает скрипту уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
+- входной Playwright `storageState` передается TypeScript-скрипту через временный файл вне workspace с правами `0600` и удаляется в `finally`, поэтому raw auth state не остается в `BUYER_TRACE_DIR`.
 
 Reason codes:
 
@@ -363,6 +399,7 @@ Reason codes:
 - CDP endpoint не резолвится: `auth_failed_invalid_session`.
 - Node.js отсутствует: `auth_failed_invalid_session`.
 - timeout скрипта: `auth_failed_invalid_session`.
+- любой non-zero exit code: `auth_failed_invalid_session`; JSON payload из output/stdout может сохраняться только как диагностический `script_result_payload` в artifacts и не может стать успешным `auth_ok`.
 - process failed без валидного payload: `auth_failed_invalid_session`.
 - невалидный JSON payload: `auth_failed_invalid_session`.
 - `_resolve_single_http_endpoint` может поднять `RuntimeError`, если `/json/version` не содержит `webSocketDebuggerUrl`.
@@ -384,6 +421,7 @@ Registry:
 Выход:
 
 - `PurchaseScriptResult(status, reason_code, message, order_id, artifacts)`.
+- trace/output files в `BUYER_TRACE_DIR/<session_id>/`: runner удаляет legacy stale `purchase-script-result.json` перед запуском и передает скрипту уникальный `purchase-script-result-<uuid>.json` для текущей попытки.
 
 Reason codes:
 
@@ -397,7 +435,7 @@ Reason codes:
 - `purchase_script_invalid_json`
 - script-specific коды из TypeScript payload.
 
-Ошибки runner возвращает как failed-result, а `BuyerService` делает generic fallback.
+Любой non-zero exit code возвращается как `purchase_script_process_failed`: JSON payload из output/stdout может сохраняться только как диагностический `script_result_payload` в artifacts и не может стать успешным `completed`. Остальные ошибки runner возвращает как failed-result, а `BuyerService` делает generic fallback.
 
 ### `buyer/scripts/*`
 
@@ -498,7 +536,9 @@ CLI-утилита управления browser-sidecar через Playwright CD
 
 - HTTP endpoint резолвится через `/json/version` в websocket endpoint.
 - При недоступном hostname пробуются fallback: `localhost`, `127.0.0.1`, `host.docker.internal`.
-- `ensure_page()` выбирает существующую не пустую страницу с приоритетом для `litres.ru`.
+- `ensure_page()` выбирает существующую не пустую страницу нейтрально: сначала HTTP(S), затем прочие non-blank, а среди равных кандидатов последнюю по `context_index/page_index`; hardcoded доменного приоритета нет.
+- `goto --url` до подключения к Playwright валидирует URL той же public http/https policy, что `start_url`: без userinfo, loopback/private/link-local/metadata hosts, `host.docker.internal` и внутренних suffixes.
+- После подключения к странице `cdp_tool` ставит Playwright `context.route("**/*", ...)` guard на время команды: document/navigation requests, включая redirects и iframe-навигации, проходят через ту же URL policy и при нарушении abort-ятся `blockedbyclient`; ненавигационные asset/XHR requests не блокируются этим guard.
 - read-команды ретраятся при transient context errors.
 - `text` и `html` ограничивают stdout по умолчанию.
 
@@ -507,7 +547,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - `CDP_CONFIG_ERROR`: отрицательное recovery window или interval <= 0.
 - `CDP_CONNECT_ERROR`: не удалось подключиться к CDP в пределах recovery window.
 - `CDP_COMMAND_TIMEOUT`: Playwright timeout.
-- `CDP_COMMAND_ERROR`: ошибка команды/селектора/страницы.
+- `CDP_COMMAND_ERROR`: ошибка команды/селектора/страницы или нарушение URL policy в `goto`.
 - `CDP_TRANSIENT_ERROR`: transient закрытие page/context/browser или destroyed execution context.
 - `RuntimeError('CDP endpoint не вернул webSocketDebuggerUrl.')`.
 - `RuntimeError('Не удалось подключиться к browser-sidecar ни по одному CDP endpoint...')`.
@@ -559,6 +599,60 @@ Security boundaries:
 | `buyer/app/codex_output_schema.json` | Schema для structured output generic `codex exec`. | `AgentRunner`. |
 | `buyer/app/knowledge_analysis_schema.json` | Schema для post-session analysis. | `PostSessionKnowledgeAnalyzer`. |
 
+## `eval_service`
+
+`eval_service` запускает eval cases, принимает callbacks от `buyer`, хранит manifests и готовит данные для judge/dashboard.
+
+### `eval_service/app/case_registry.py`
+
+Загружает YAML templates из `eval/cases/*.yaml` и разворачивает variants в `EvalCase`.
+
+Поведение:
+
+- файл с `enabled: false` полностью пропускается registry и не попадает в selectable eval cases;
+- `brandshop_purchase_smoke.yaml` временно отключен до появления domain-specific SberPay verifier для `brandshop.ru`;
+- активный executable smoke-case сейчас только `litres_purchase_book_001`.
+
+### `eval_service/app/callback_urls.py`
+
+`build_buyer_callback_url()` строит callback URL из `EVAL_CALLBACK_BASE_URL` без секретов в query string. `build_buyer_callback_token()` возвращает `EVAL_CALLBACK_SECRET` отдельно; eval orchestrator передает его в `buyer` как `callback_token`, а `buyer` отправляет callback header `X-Eval-Callback-Token`.
+
+### `eval_service/app/callbacks.py`
+
+FastAPI endpoints:
+
+| Endpoint | Вход | Выход | Ошибки |
+| --- | --- | --- | --- |
+| `POST /callbacks/buyer` | `BuyerCallbackEnvelope`, optional `token` query или `X-Eval-Callback-Token`. | `CallbackAcceptedResponse` с eval ids и состоянием case. | `401` при неверном callback token; `404` для неизвестного run/case/session; `409` при mismatch session; `422` при malformed terminal payload. |
+| `POST /runs/{eval_run_id}/cases/{eval_case_id}/reply` | `OperatorReplyRequest`: `message`, optional `reply_id`. | `OperatorReplyResponse` и resume orchestration. | `404` для неизвестного run/case; `409` если case не ждет reply или `reply_id` не совпал; ошибки buyer/restart resume пробрасываются. |
+
+Callback state rules:
+
+- `ask_user` переводит case в `waiting_user` и сохраняет `waiting_reply_id`;
+- `agent_step_started` и `handoff_resumed` очищают stale waiting context и возвращают case в `running`;
+- `payment_ready` требует `payload.order_id` и `payload.message`, иначе возвращает `422` без изменения manifest;
+- `scenario_finished` требует `payload.status` `completed|failed` и `payload.message`, иначе возвращает `422` без изменения manifest;
+- поздние валидные callbacks для terminal case дописываются в manifest без изменения terminal state.
+
+### `eval_service/app/run_store.py`
+
+Файловое хранилище eval runs.
+
+Входы: `EvalRunManifest`, case updates, callback events.
+
+Выходы: `manifest.json`, `summary.json`, поиск case по `session_id`.
+
+Защита данных:
+
+- callback events перед записью в manifest сохраняются в redacted форме;
+- `idempotency_key` заменяется стабильным `sha256:<digest>` и продолжает участвовать в дедупликации;
+- payload очищается от raw token/query/payment/order secrets через eval redaction sanitizer;
+- raw `order_id`, payment URL и callback token не должны попадать в durable `manifest.json`.
+
+### `eval_service/app/api.py`
+
+HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Run detail дополнительно sanitizes callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
+
 ## `micro-ui`
 
 `micro-ui` временно выполняет роль `middle` для локального MVP.
@@ -595,7 +689,8 @@ In-memory callback store.
 
 - состояние не переживает рестарт `micro-ui`;
 - queue ограничена `maxsize=200`; при переполнении самый старый элемент выкидывается;
-- `ask_question` ищется по payload key `question`, но текущий `buyer` отправляет `message`, поэтому UI summary может не показать текст вопроса через `ask_question`, хотя `last_message` будет заполнен.
+- `ask_question` берется из `ask_user.payload.message`, а `question` поддерживается только как legacy fallback;
+- waiting context очищается на `agent_step_started`, `handoff_resumed`, `payment_ready`, `operator_reply` и `scenario_finished`.
 
 ### `micro-ui/app/models.py` и `settings.py`
 
@@ -605,6 +700,7 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `BUY
 
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state.
+- `micro-ui/app/static/eval.js`: eval shell; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
 - `micro-ui/app/static/app.css`: стили панели.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
@@ -617,8 +713,8 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `BUY
 
 Выходные порты:
 
-- `6901`: noVNC websockify.
-- `9223`: CDP proxy через socat.
+- `6901`: noVNC websockify; в compose публикуется на host только как `127.0.0.1:6901`.
+- `9223`: CDP proxy через socat; в compose не публикуется на host и доступен соседним контейнерам через docker-сеть как `http://browser:9223`.
 
 ### `browser/entrypoint.sh`
 
@@ -655,9 +751,9 @@ Runtime flow:
 | --- | --- | --- | --- |
 | Runtime auth payload | Память `SessionStore._runtime_auth` | `TaskAuthPayload` с `storageState`. | Нельзя переносить в Postgres. |
 | Persistent sessions | Postgres `buyer_sessions` | Статус, task, URL, callback, metadata. | Cookies/localStorage/tokens. |
-| Events | Postgres `buyer_events`, память `micro-ui` | Callback envelope и sanitized payload. | Raw stdout/stderr/auth secrets в persistent metadata. |
-| Agent memory | Postgres `buyer_agent_memory` | Последние сообщения для prompt context. | Нужно следить за утечками чувствительных данных при новых источниках. |
-| Replies | Postgres `buyer_replies` | Pending/answered/consumed ответы пользователя. | Не предназначено для auth-payload reuse. |
+| Events | Postgres `buyer_events`, память `micro-ui`, eval `manifest.json` | Callback envelope и sanitized payload; eval manifest хранит redacted callback events. | Raw stdout/stderr/auth secrets в persistent metadata; raw callback/payment/order secrets не должны попадать в eval manifest. |
+| Agent memory | Postgres `buyer_agent_memory` | Последние сообщения для prompt context; auth-refresh replies пишутся marker-ом `[SBERID_AUTH_RECEIVED]`. | Нужно следить за утечками чувствительных данных при новых источниках. |
+| Replies | Postgres `buyer_replies` | Pending/answered/consumed ответы пользователя; auth-refresh payload сохраняется только как marker/summary. | Не предназначено для auth-payload reuse. |
 | Trace artifacts | `BUYER_TRACE_DIR` | prompts, browser actions JSONL, step trace JSON, script traces, knowledge analysis. | Knowledge analysis дополнительно редактирует auth/payment/order secrets. |
 | User profile | `BUYER_USER_INFO_PATH` | Долговременные пользовательские факты. | Auth, cookies, storageState, платежные данные, одноразовые детали заказа. |
 
@@ -734,12 +830,19 @@ Runtime flow:
 | Путь | Что покрывает |
 | --- | --- |
 | `buyer/tests/test_persistent_state.py` | Store/repository lifecycle, restore, reply validation, redaction persistent state, stale runtime sessions. |
-| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout. |
+| `buyer/tests/test_url_policy.py` | URL policy для `start_url`/`callback_url`, включая запрет query/fragment в callback URL и trusted allowlist. |
+| `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, redaction auth-refresh replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
+| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout; purchase runner stale output, уникальный output path и non-zero diagnostics behavior. |
 | `buyer/tests/test_knowledge_analyzer.py` | Sanitization, safe paths, trace refs, analysis payload/output. |
-| `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior. |
-| `buyer/tests/test_observability_and_cdp_tool.py` | Trace/browser action metrics, CDP tool output limits и observability. |
+| `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior и payment-boundary regression для Litres/unsupported domains. |
+| `buyer/tests/test_observability_and_cdp_tool.py` | Trace/browser action metrics, CDP tool output limits, observability и нейтральный выбор CDP-страницы. |
+| `eval_service/tests/test_callbacks.py` | Eval callback receiver, operator reply flow, malformed terminal callbacks, manifest redaction на диске. |
+| `eval_service/tests/test_run_store.py` | File manifest lifecycle, callback event redaction/deduplication, atomic summary writes. |
+| `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
+| `eval_service/tests/test_orchestrator.py` | Eval run orchestration, payment_ready grace, waiting/reply resume progression. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
-| `micro-ui/tests/test_design_handoff.py` | UI/handoff design expectations. |
+| `micro-ui/tests/test_design_handoff.py` | UI/handoff design expectations и session summary для `ask_user`/waiting progression. |
+| `micro-ui/tests/test_eval_shell_static.py` | Eval shell static contracts, proxy timeout и reply payload shape. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.
 

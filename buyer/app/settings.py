@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     callback_timeout_sec: float = 10.0
     callback_retries: int = 3
     callback_backoff_sec: float = 0.8
+    trusted_callback_urls: str = 'http://eval_service:8090/callbacks/buyer'
 
     sberid_allowlist: str = 'litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv'
     sberid_auth_retry_budget: int = Field(default=1, ge=0)

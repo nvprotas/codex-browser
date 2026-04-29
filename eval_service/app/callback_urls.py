@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from urllib.parse import urlencode
-
 from fastapi import Request
 
 
@@ -13,8 +11,11 @@ def build_buyer_callback_url(request: Request) -> str:
     if base_url is None or not base_url.strip():
         raise ValueError('EVAL_CALLBACK_BASE_URL must be configured for buyer callbacks')
 
-    callback_url = f'{base_url.rstrip("/")}{BUYER_CALLBACK_PATH}'
+    return f'{base_url.rstrip("/")}{BUYER_CALLBACK_PATH}'
+
+
+def build_buyer_callback_token(request: Request) -> str | None:
     secret = getattr(request.app.state.settings, 'eval_callback_secret', None)
     if secret is not None and secret.strip():
-        return f'{callback_url}?{urlencode({"token": secret})}'
-    return callback_url
+        return secret
+    return None

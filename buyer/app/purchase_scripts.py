@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .auth_scripts import normalize_domain, resolve_cdp_endpoint
-from .script_runtime import ScriptSpec, read_script_result_payload, registry_snapshot, script_stdio_artifacts
+from .script_runtime import (
+    ScriptSpec,
+    read_script_result_payload,
+    registry_snapshot,
+    remove_script_output,
+    script_stdio_artifacts,
+    unique_script_output_path,
+)
 from ._utils import tail_text
 
 logger = logging.getLogger('uvicorn.error')
@@ -93,7 +100,9 @@ class PurchaseScriptRunner:
 
         session_dir = self._trace_dir.expanduser() / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        output_path = session_dir / 'purchase-script-result.json'
+        remove_script_output(session_dir / 'purchase-script-result.json')
+        output_path = unique_script_output_path(session_dir, 'purchase-script-result')
+        remove_script_output(output_path)
 
         try:
             resolved_endpoint = await resolve_cdp_endpoint(self._cdp_endpoint)
@@ -178,7 +187,17 @@ class PurchaseScriptRunner:
         parsed_payload = read_script_result_payload(output_path, stdout_text)
         stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
 
-        if process.returncode != 0 and parsed_payload is None:
+        if process.returncode != 0:
+            artifacts: dict[str, Any] = {
+                'domain': normalized_domain,
+                'script': str(script_path),
+                'cdp_endpoint': self._cdp_endpoint,
+                'resolved_cdp_endpoint': resolved_endpoint,
+                'returncode': process.returncode,
+                **stdio_artifacts,
+            }
+            if parsed_payload is not None:
+                artifacts['script_result_payload'] = parsed_payload
             return PurchaseScriptResult(
                 status=PURCHASE_SCRIPT_FAILED,
                 reason_code='purchase_script_process_failed',
@@ -187,13 +206,7 @@ class PurchaseScriptRunner:
                     f'stderr: {tail_text(stderr_text)}'
                 ),
                 order_id=None,
-                artifacts={
-                    'domain': normalized_domain,
-                    'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
-                    'resolved_cdp_endpoint': resolved_endpoint,
-                    **stdio_artifacts,
-                },
+                artifacts=artifacts,
             )
 
         if not isinstance(parsed_payload, dict):

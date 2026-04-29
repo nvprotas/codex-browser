@@ -5,6 +5,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from buyer.app.auth_scripts import SberIdScriptRunner
 from buyer.app.prompt_builder import build_agent_prompt
@@ -22,9 +23,12 @@ from buyer.tools.cdp_tool import (
     LINKS_DEFAULT_LIMIT,
     SNAPSHOT_DEFAULT_LIMIT,
     TEXT_STDOUT_LIMIT,
+    connect_page_with_retry,
+    ensure_page,
     _format_html_result,
     _format_text_result,
     parser,
+    run_command,
 )
 
 
@@ -199,6 +203,166 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('странице SberPay', prompt)
         self.assertIn('payment_evidence', prompt)
         self.assertIn('litres_payecom_iframe', prompt)
+
+
+class _FakePage:
+    def __init__(self, url: str, context: _FakeContext | None = None) -> None:
+        self.url = url
+        self.context = context
+        self.default_timeout: int | None = None
+
+    def set_default_timeout(self, timeout_ms: int) -> None:
+        self.default_timeout = timeout_ms
+
+
+class _FakeContext:
+    def __init__(self, pages: list[_FakePage]) -> None:
+        self.pages = pages
+        self.routes: list[tuple[str, object]] = []
+        for page in self.pages:
+            page.context = self
+
+    async def new_page(self) -> _FakePage:
+        page = _FakePage('about:blank', context=self)
+        self.pages.append(page)
+        return page
+
+    async def route(self, pattern: str, handler: object) -> None:
+        self.routes.append((pattern, handler))
+
+
+class _FakeBrowser:
+    def __init__(self, contexts: list[_FakeContext]) -> None:
+        self.contexts = contexts
+
+    async def new_context(self, **_: object) -> _FakeContext:
+        context = _FakeContext([])
+        self.contexts.append(context)
+        return context
+
+    async def close(self) -> None:
+        return None
+
+
+class _FakeChromium:
+    def __init__(self, browser: _FakeBrowser) -> None:
+        self.browser = browser
+        self.connected_endpoint: str | None = None
+
+    async def connect_over_cdp(self, endpoint: str) -> _FakeBrowser:
+        self.connected_endpoint = endpoint
+        return self.browser
+
+
+class _FakePlaywright:
+    def __init__(self, browser: _FakeBrowser) -> None:
+        self.chromium = _FakeChromium(browser)
+
+
+class _FakeRequest:
+    def __init__(self, *, url: str, resource_type: str, is_navigation: bool) -> None:
+        self.url = url
+        self.resource_type = resource_type
+        self._is_navigation = is_navigation
+
+    def is_navigation_request(self) -> bool:
+        return self._is_navigation
+
+
+class _FakeRoute:
+    def __init__(self, request: _FakeRequest) -> None:
+        self.request = request
+        self.continued = False
+        self.abort_error_code: str | None = None
+
+    async def continue_(self) -> None:
+        self.continued = True
+
+    async def abort(self, error_code: str | None = None) -> None:
+        self.abort_error_code = error_code
+
+
+class CdpToolPageSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ensure_page_prefers_latest_http_page_without_litres_priority(self) -> None:
+        old_litres_page = _FakePage('https://www.litres.ru/old-tab')
+        current_shop_page = _FakePage('https://brandshop.ru/catalog')
+        browser = _FakeBrowser(
+            [
+                _FakeContext([old_litres_page]),
+                _FakeContext([_FakePage('about:blank'), current_shop_page]),
+            ]
+        )
+
+        selected = await ensure_page(browser)
+
+        self.assertIs(selected, current_shop_page)
+
+    async def test_goto_rejects_private_url_before_starting_playwright(self) -> None:
+        args = parser().parse_args(['--recovery-window-sec', '0', 'goto', '--url', 'http://127.0.0.1/admin'])
+
+        with patch('buyer.tools.cdp_tool.async_playwright') as async_playwright:
+            async_playwright.side_effect = AssertionError('unsafe goto must not start Playwright')
+            try:
+                result = await run_command(args)
+            except AssertionError as exc:
+                self.fail(str(exc))
+
+        async_playwright.assert_not_called()
+        self.assertFalse(result['ok'])
+        self.assertIn('CDP_COMMAND_ERROR', result['error'])
+        self.assertIn('non-public address', result['error'])
+
+    async def test_connect_page_installs_navigation_guard_for_document_requests_only(self) -> None:
+        page = _FakePage('https://shop.example/catalog')
+        context = _FakeContext([page])
+        browser = _FakeBrowser([context])
+        args = parser().parse_args(['--timeout-ms', '3000', '--recovery-window-sec', '0', 'url'])
+
+        with patch('buyer.tools.cdp_tool.resolve_cdp_endpoint', return_value='ws://browser/devtools/page/1'):
+            connected_browser, selected_page = await connect_page_with_retry(
+                playwright=_FakePlaywright(browser),
+                args=args,
+                deadline=0,
+            )
+
+        self.assertIs(connected_browser, browser)
+        self.assertIs(selected_page, page)
+        self.assertEqual(page.default_timeout, 3000)
+        self.assertEqual(len(context.routes), 1)
+        pattern, handler = context.routes[0]
+        self.assertEqual(pattern, '**/*')
+
+        private_document = _FakeRoute(
+            _FakeRequest(url='http://169.254.169.254/latest/meta-data/', resource_type='document', is_navigation=True)
+        )
+        await handler(private_document)
+
+        self.assertFalse(private_document.continued)
+        self.assertEqual(private_document.abort_error_code, 'blockedbyclient')
+
+        internal_document = _FakeRoute(
+            _FakeRequest(url='https://checkout.internal/pay', resource_type='document', is_navigation=True)
+        )
+        await handler(internal_document)
+
+        self.assertFalse(internal_document.continued)
+        self.assertEqual(internal_document.abort_error_code, 'blockedbyclient')
+
+        docker_host_document = _FakeRoute(
+            _FakeRequest(url='https://host.docker.internal/admin', resource_type='document', is_navigation=True)
+        )
+        await handler(docker_host_document)
+
+        self.assertFalse(docker_host_document.continued)
+        self.assertEqual(docker_host_document.abort_error_code, 'blockedbyclient')
+
+        private_asset = _FakeRoute(
+            _FakeRequest(url='http://127.0.0.1/pixel.png', resource_type='image', is_navigation=False)
+        )
+        await handler(private_asset)
+
+        self.assertTrue(private_asset.continued)
+        self.assertIsNone(private_asset.abort_error_code)
 
 
 class BrowserActionMetricsTests(unittest.TestCase):

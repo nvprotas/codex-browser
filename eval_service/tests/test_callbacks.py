@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from eval_service.app.main import create_app
@@ -178,7 +180,7 @@ def test_buyer_callback_without_eval_ids_resolves_case_by_session_id_for_payment
         '/callbacks/buyer',
         json=_callback_payload_without_eval_ids(
             'payment_ready',
-            {'payment_method': 'sberpay', 'order_id': 'order-1'},
+            {'payment_method': 'sberpay', 'order_id': 'order-1', 'message': 'Открыт SberPay.'},
         ),
     )
 
@@ -220,7 +222,7 @@ def test_buyer_callback_accepts_real_progress_event_types_without_state_change(t
 
     case = store.read_manifest('eval-20260428-120000').cases[0]
     assert case.state == CaseRunState.RUNNING
-    assert case.waiting_reply_id == 'reply-active'
+    assert case.waiting_reply_id is None
     assert case.finished_at is None
     assert [event.event_type.value for event in case.callback_events] == [
         'session_started',
@@ -242,23 +244,107 @@ def test_buyer_callback_payment_ready_and_scenario_finished_update_case_state(tm
 
     payment_response = client.post(
         '/callbacks/buyer',
-        json=_callback_payload('payment_ready', {'payment_method': 'sberpay', 'order_id': 'order-1'}),
+        json=_callback_payload(
+            'payment_ready',
+            {'payment_method': 'sberpay', 'order_id': 'order-1', 'message': 'Открыт SberPay.'},
+        ),
     )
     assert payment_response.status_code == 200
     payment_case = store.read_manifest('eval-20260428-120000').cases[0]
     assert payment_case.state == CaseRunState.PAYMENT_READY
     assert payment_case.waiting_reply_id is None
-    assert payment_case.callback_events[-1].payload['order_id'] == 'order-1'
+    assert 'order_id' not in payment_case.callback_events[-1].payload
 
     finished_response = client.post(
         '/callbacks/buyer',
-        json=_callback_payload('scenario_finished', {'result': 'ok'}),
+        json=_callback_payload('scenario_finished', {'status': 'completed', 'message': 'Сценарий завершен.'}),
     )
 
     assert finished_response.status_code == 200
     finished_case = store.read_manifest('eval-20260428-120000').cases[0]
     assert finished_case.state == CaseRunState.FINISHED
     assert finished_case.finished_at == datetime(2026, 4, 28, 12, 0, 45, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        {'payment_method': 'sberpay'},
+        {'payment_method': 'sberpay', 'order_id': 'order-1'},
+        {'payment_method': 'sberpay', 'message': 'Открыт SberPay.'},
+    ],
+)
+def test_buyer_callback_rejects_malformed_payment_ready_without_state_change(
+    tmp_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    before_case = store.read_manifest('eval-20260428-120000').cases[0]
+
+    response = client.post('/callbacks/buyer', json=_callback_payload('payment_ready', payload))
+
+    assert response.status_code == 422
+    after_case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert after_case.model_dump(mode='json') == before_case.model_dump(mode='json')
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        {'message': 'Сценарий завершен.'},
+        {'status': 'success', 'message': 'Сценарий завершен.'},
+        {'status': '', 'message': 'Сценарий завершен.'},
+    ],
+)
+def test_buyer_callback_rejects_malformed_scenario_finished_without_state_change(
+    tmp_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    before_case = store.read_manifest('eval-20260428-120000').cases[0]
+
+    response = client.post('/callbacks/buyer', json=_callback_payload('scenario_finished', payload))
+
+    assert response.status_code == 422
+    after_case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert after_case.model_dump(mode='json') == before_case.model_dump(mode='json')
+
+
+def test_buyer_callback_redacts_manifest_callback_event_on_disk(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path, eval_callback_secret='callback-secret')
+    _create_run(store)
+
+    response = client.post(
+        '/callbacks/buyer',
+        headers={'X-Eval-Callback-Token': 'callback-secret'},
+        json=_callback_payload(
+            'payment_ready',
+            {
+                'payment_method': 'sberpay',
+                'order_id': 'ORDER-12345',
+                'message': (
+                    'Payment token=payment-token-secret order_id=ORDER-12345 '
+                    'url=https://pay.example/sberpay/order/ORDER-12345?token=payment-token-secret'
+                ),
+                'payment_url': 'https://pay.example/sberpay/order/ORDER-12345?token=payment-token-secret',
+                'callback_url': 'http://eval.test/callbacks/buyer?token=callback-secret',
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    manifest_text = store.manifest_path('eval-20260428-120000').read_text(encoding='utf-8')
+    manifest_payload = json.loads(manifest_text)
+    stored_event = manifest_payload['cases'][0]['callback_events'][0]
+    assert stored_event['event_type'] == 'payment_ready'
+    assert stored_event['payload']['payment_method'] == 'sberpay'
+    assert stored_event['idempotency_key'].startswith('sha256:')
+    assert 'callback-secret' not in manifest_text
+    assert 'payment-token-secret' not in manifest_text
+    assert 'ORDER-12345' not in manifest_text
+    assert 'https://pay.example/sberpay/order/ORDER-12345' not in manifest_text
 
 
 def test_buyer_callback_failed_scenario_finished_marks_case_failed(tmp_path: Path) -> None:
@@ -293,7 +379,7 @@ def test_callback_with_eval_ids_rejects_mismatched_session_id(tmp_path: Path) ->
     )
 
     payload = {
-        **_callback_payload('payment_ready', {'order_id': 'order-1'}),
+        **_callback_payload('payment_ready', {'order_id': 'order-1', 'message': 'Открыт SberPay.'}),
         'session_id': 'session-other',
     }
 
@@ -352,7 +438,10 @@ def test_buyer_callback_appends_late_terminal_events_without_mutating_terminal_c
         json=_callback_payload('ask_user', {'reply_id': 'reply-late', 'question': 'Поздний вопрос'}),
     )
     payment_payload = {
-        **_callback_payload('payment_ready', {'payment_method': 'sberpay', 'order_id': 'order-late'}),
+        **_callback_payload(
+            'payment_ready',
+            {'payment_method': 'sberpay', 'order_id': 'order-late', 'message': 'Открыт SberPay.'},
+        ),
         'event_id': 'event-payment_ready-late',
         'session_id': 'session-456',
         'idempotency_key': 'idem-payment_ready-late',
@@ -452,7 +541,7 @@ def test_operator_reply_rejects_stale_explicit_reply_after_terminal_state_withou
     )
     client.post(
         '/callbacks/buyer',
-        json=_callback_payload('scenario_finished', {'result': 'ok'}),
+        json=_callback_payload('scenario_finished', {'status': 'completed', 'message': 'Сценарий завершен.'}),
     )
     before_case = store.read_manifest('eval-20260428-120000').cases[0]
     scheduled: list[Any] = []
@@ -692,10 +781,13 @@ def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_h
             eval_run_id: str,
             eval_case_id: str,
             callback_url: str,
+            callback_token: str | None = None,
         ) -> None:
             captured['eval_run_id'] = eval_run_id
             captured['eval_case_id'] = eval_case_id
             captured['callback_url'] = callback_url
+            if callback_token is not None:
+                captured['callback_token'] = callback_token
 
     async def run_resume_inline(coro: Awaitable[Any]) -> None:
         await coro
@@ -716,7 +808,7 @@ def test_operator_reply_resume_uses_configured_callback_url_instead_of_request_h
     }
 
 
-def test_operator_reply_resume_callback_url_includes_configured_token(
+def test_operator_reply_resume_passes_configured_token_separately_from_url(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -739,8 +831,10 @@ def test_operator_reply_resume_callback_url_includes_configured_token(
             eval_run_id: str,
             eval_case_id: str,
             callback_url: str,
+            callback_token: str | None = None,
         ) -> None:
             captured['callback_url'] = callback_url
+            captured['callback_token'] = callback_token or ''
 
     async def run_resume_inline(coro: Awaitable[Any]) -> None:
         await coro
@@ -754,7 +848,10 @@ def test_operator_reply_resume_callback_url_includes_configured_token(
     )
 
     assert response.status_code == 200
-    assert captured == {'callback_url': 'http://eval_service:8090/callbacks/buyer?token=callback-secret'}
+    assert captured == {
+        'callback_url': 'http://eval_service:8090/callbacks/buyer',
+        'callback_token': 'callback-secret',
+    }
 
 
 def test_operator_reply_resume_without_callback_base_url_fails_instead_of_using_request_host(

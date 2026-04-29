@@ -289,12 +289,13 @@
 **Value:** 5  
 **Effort:** 3  
 **V/E:** 1.67  
-**Статус:** needs architecture decision  
+**Статус:** partial implementation for `litres.ru`
 **Зависимости:** задача 5.
 
 **Что сделать:**
 
-- Добавить architecture decision: входит ли formal verifier в v1 или Phase 2.
+- Зафиксирован текущий safety gate: `payment_ready` разрешен только после domain-specific verifier; реализован узкий verifier для `litres.ru`, остальные домены временно не могут завершаться success без отдельного verifier.
+- Добавить architecture decision: как расширять formal verifier за пределы `litres.ru`.
 - Начать не с общего verifier всех шагов, а с узкой проверки финальных результатов:
   - `orderId` найден;
   - текущая страница относится к checkout/payment flow;
@@ -322,7 +323,7 @@
 - Добавить отдельный контейнер `eval_service` на Python + FastAPI.
 - Хранить eval cases в `eval/cases/*.yaml`: один template и явный список variants без matrix.
 - Для каждого variant задавать стабильный `eval_case_id` и явный `case_version`.
-- Стартовый набор MVP: по одному smoke-case для `litres.ru` и `brandshop.ru`; новые сайты добавляются через тот же registry.
+- Стартовый executable MVP-case: `litres.ru`; `brandshop.ru` template хранится в registry как `enabled: false` до появления domain-specific SberPay verifier, чтобы eval не запускал заведомо непроходимый сценарий.
 - Запускать selected cases из отдельного таба `micro-ui` чекбоксами и выполнять их последовательно.
 - Создавать `eval_run_id` и передавать в task metadata `eval_run_id`, `eval_case_id`, `case_version`, `host`, `case_title`, `variant_id`.
 - Не добавлять специальные eval-ветки в `buyer`; `expected_outcome`, `forbidden_actions` и rubric остаются внутри eval-контура.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,17 @@ def read_script_result_payload(output_path: Path, stdout_text: str) -> Any | Non
             continue
         return parsed
     return None
+
+
+def unique_script_output_path(session_dir: Path, stem: str) -> Path:
+    return session_dir / f'{stem}-{uuid.uuid4().hex}.json'
+
+
+def remove_script_output(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        return
 
 
 def script_stdio_artifacts(stdout_text: str, stderr_text: str) -> dict[str, str]:

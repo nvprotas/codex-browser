@@ -32,8 +32,19 @@ class TaskAuthPayload(BaseModel):
 
 class TaskCreateRequest(BaseModel):
     task: str = Field(min_length=1, description='Текст задачи для агента buyer')
-    start_url: str = Field(min_length=1, description='URL магазина для начала сценария')
-    callback_url: str | None = Field(default=None, description='Куда buyer отправляет callback-события')
+    start_url: str = Field(
+        min_length=1,
+        description='Публичный http/https URL магазина без userinfo и private/metadata host.',
+    )
+    callback_url: str | None = Field(
+        default=None,
+        description='Публичный https callback URL или trusted internal callback из TRUSTED_CALLBACK_URLS.',
+    )
+    callback_token: str | None = Field(
+        default=None,
+        min_length=1,
+        description='Ephemeral bearer token для X-Eval-Callback-Token; не сохраняется в persistent state.',
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     auth: TaskAuthPayload | None = Field(default=None, description='Опциональный auth-пакет для SberId')
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,8 +12,15 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from .script_runtime import ScriptSpec, read_script_result_payload, registry_snapshot, script_stdio_artifacts
-from ._utils import tail_text
+from .script_runtime import (
+    ScriptSpec,
+    read_script_result_payload,
+    registry_snapshot,
+    remove_script_output,
+    script_stdio_artifacts,
+    unique_script_output_path,
+)
+from ._utils import remove_file_quietly, tail_text
 
 logger = logging.getLogger('uvicorn.error')
 
@@ -143,153 +152,177 @@ class SberIdScriptRunner:
 
         session_dir = self._trace_dir.expanduser() / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        storage_path = session_dir / f'auth-storage-attempt-{attempt:02d}.json'
-        output_path = session_dir / f'auth-script-result-attempt-{attempt:02d}.json'
-        storage_path.write_text(json.dumps(storage_state, ensure_ascii=False), encoding='utf-8')
+        remove_script_output(session_dir / 'auth-script-result.json')
+        remove_script_output(session_dir / f'auth-script-result-attempt-{attempt:02d}.json')
+        output_path = unique_script_output_path(session_dir, f'auth-script-result-attempt-{attempt:02d}')
+        remove_script_output(output_path)
+        storage_path = _write_storage_state_tempfile(storage_state, session_id=session_id, attempt=attempt)
 
         try:
-            resolved_endpoint = await resolve_cdp_endpoint(self._cdp_endpoint)
-        except Exception as exc:
-            logger.error(
-                'auth_script_endpoint_resolve_failed session_id=%s domain=%s attempt=%s endpoint=%s error=%s',
+            try:
+                resolved_endpoint = await resolve_cdp_endpoint(self._cdp_endpoint)
+            except Exception as exc:
+                logger.error(
+                    'auth_script_endpoint_resolve_failed session_id=%s domain=%s attempt=%s endpoint=%s error=%s',
+                    session_id,
+                    normalized_domain,
+                    attempt,
+                    self._cdp_endpoint,
+                    tail_text(str(exc), limit=700),
+                )
+                return AuthScriptResult(
+                    status='failed',
+                    reason_code=AUTH_FAILED_INVALID_SESSION,
+                    message='Не удалось резолвить CDP endpoint для auth-скрипта.',
+                    artifacts={
+                        'domain': normalized_domain,
+                        'script': str(script_path),
+                        'cdp_endpoint': self._cdp_endpoint,
+                        'cdp_resolve_error': tail_text(str(exc), limit=900),
+                    },
+                )
+
+            cmd = [
+                str(self._tsx_bin),
+                str(script_path),
+                '--endpoint',
+                resolved_endpoint,
+                '--start-url',
+                start_url,
+                '--storage-state-path',
+                str(storage_path),
+                '--output-path',
+                str(output_path),
+            ]
+            logger.info(
+                'auth_script_endpoint_resolved session_id=%s domain=%s attempt=%s endpoint=%s resolved=%s',
                 session_id,
                 normalized_domain,
                 attempt,
                 self._cdp_endpoint,
-                tail_text(str(exc), limit=700),
+                resolved_endpoint,
             )
-            return AuthScriptResult(
-                status='failed',
-                reason_code=AUTH_FAILED_INVALID_SESSION,
-                message='Не удалось резолвить CDP endpoint для auth-скрипта.',
-                artifacts={
-                    'domain': normalized_domain,
-                    'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
-                    'cdp_resolve_error': tail_text(str(exc), limit=900),
-                },
+            logger.info(
+                'auth_script_started session_id=%s domain=%s attempt=%s script=%s lifecycle=%s',
+                session_id,
+                normalized_domain,
+                attempt,
+                script_path,
+                spec.lifecycle,
             )
 
-        cmd = [
-            str(self._tsx_bin),
-            str(script_path),
-            '--endpoint',
-            resolved_endpoint,
-            '--start-url',
-            start_url,
-            '--storage-state-path',
-            str(storage_path),
-            '--output-path',
-            str(output_path),
-        ]
-        logger.info(
-            'auth_script_endpoint_resolved session_id=%s domain=%s attempt=%s endpoint=%s resolved=%s',
-            session_id,
-            normalized_domain,
-            attempt,
-            self._cdp_endpoint,
-            resolved_endpoint,
-        )
-        logger.info(
-            'auth_script_started session_id=%s domain=%s attempt=%s script=%s lifecycle=%s',
-            session_id,
-            normalized_domain,
-            attempt,
-            script_path,
-            spec.lifecycle,
-        )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                return AuthScriptResult(
+                    status='failed',
+                    reason_code=AUTH_FAILED_INVALID_SESSION,
+                    message='Node.js не найден в контейнере buyer, запуск auth-скрипта невозможен.',
+                    artifacts={'domain': normalized_domain, 'script': str(script_path)},
+                )
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            return AuthScriptResult(
-                status='failed',
-                reason_code=AUTH_FAILED_INVALID_SESSION,
-                message='Node.js не найден в контейнере buyer, запуск auth-скрипта невозможен.',
-                artifacts={'domain': normalized_domain, 'script': str(script_path)},
-            )
+            try:
+                stdout_raw, stderr_raw = await asyncio.wait_for(process.communicate(), timeout=self._timeout_sec)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                return AuthScriptResult(
+                    status='failed',
+                    reason_code=AUTH_FAILED_INVALID_SESSION,
+                    message=f'SberId-скрипт превысил таймаут {self._timeout_sec}с.',
+                    artifacts={
+                        'domain': normalized_domain,
+                        'script': str(script_path),
+                        'cdp_endpoint': self._cdp_endpoint,
+                        'resolved_cdp_endpoint': resolved_endpoint,
+                        'timeout_sec': self._timeout_sec,
+                    },
+                )
 
-        try:
-            stdout_raw, stderr_raw = await asyncio.wait_for(process.communicate(), timeout=self._timeout_sec)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.communicate()
-            return AuthScriptResult(
-                status='failed',
-                reason_code=AUTH_FAILED_INVALID_SESSION,
-                message=f'SberId-скрипт превысил таймаут {self._timeout_sec}с.',
-                artifacts={
+            stdout_text = stdout_raw.decode('utf-8', errors='ignore').strip()
+            stderr_text = stderr_raw.decode('utf-8', errors='ignore').strip()
+            parsed_payload = read_script_result_payload(output_path, stdout_text)
+            stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
+
+            if process.returncode != 0:
+                artifacts: dict[str, Any] = {
                     'domain': normalized_domain,
                     'script': str(script_path),
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
-                    'timeout_sec': self._timeout_sec,
-                },
-            )
+                    'returncode': process.returncode,
+                    **stdio_artifacts,
+                }
+                if parsed_payload is not None:
+                    artifacts['script_result_payload'] = parsed_payload
+                return AuthScriptResult(
+                    status='failed',
+                    reason_code=AUTH_FAILED_INVALID_SESSION,
+                    message=(
+                        f'SberId-скрипт завершился с кодом {process.returncode}. '
+                        f'stderr: {tail_text(stderr_text)}'
+                    ),
+                    artifacts=artifacts,
+                )
 
-        stdout_text = stdout_raw.decode('utf-8', errors='ignore').strip()
-        stderr_text = stderr_raw.decode('utf-8', errors='ignore').strip()
-        parsed_payload = read_script_result_payload(output_path, stdout_text)
-        stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
+            if not isinstance(parsed_payload, dict):
+                return AuthScriptResult(
+                    status='failed',
+                    reason_code=AUTH_FAILED_INVALID_SESSION,
+                    message='SberId-скрипт не вернул валидный JSON-результат.',
+                    artifacts={
+                        'domain': normalized_domain,
+                        'script': str(script_path),
+                        'cdp_endpoint': self._cdp_endpoint,
+                        'resolved_cdp_endpoint': resolved_endpoint,
+                        **stdio_artifacts,
+                    },
+                )
 
-        if process.returncode != 0 and parsed_payload is None:
-            return AuthScriptResult(
-                status='failed',
-                reason_code=AUTH_FAILED_INVALID_SESSION,
-                message=(
-                    f'SberId-скрипт завершился с кодом {process.returncode}. '
-                    f'stderr: {tail_text(stderr_text)}'
-                ),
-                artifacts={
+            status = str(parsed_payload.get('status') or '').strip().lower()
+            reason_code = str(parsed_payload.get('reason_code') or AUTH_FAILED_INVALID_SESSION).strip()
+            message = str(parsed_payload.get('message') or 'SberId-скрипт завершился без сообщения.')
+            artifacts = parsed_payload.get('artifacts')
+            if not isinstance(artifacts, dict):
+                artifacts = {}
+            artifacts.update(
+                {
                     'domain': normalized_domain,
                     'script': str(script_path),
+                    'lifecycle': spec.lifecycle,
                     'cdp_endpoint': self._cdp_endpoint,
                     'resolved_cdp_endpoint': resolved_endpoint,
                     **stdio_artifacts,
-                },
+                }
             )
-
-        if not isinstance(parsed_payload, dict):
             return AuthScriptResult(
-                status='failed',
-                reason_code=AUTH_FAILED_INVALID_SESSION,
-                message='SberId-скрипт не вернул валидный JSON-результат.',
-                artifacts={
-                    'domain': normalized_domain,
-                    'script': str(script_path),
-                    'cdp_endpoint': self._cdp_endpoint,
-                    'resolved_cdp_endpoint': resolved_endpoint,
-                    **stdio_artifacts,
-                },
+                status=status or 'failed',
+                reason_code=reason_code,
+                message=message,
+                artifacts=artifacts,
             )
+        finally:
+            remove_file_quietly(str(storage_path))
 
-        status = str(parsed_payload.get('status') or '').strip().lower()
-        reason_code = str(parsed_payload.get('reason_code') or AUTH_FAILED_INVALID_SESSION).strip()
-        message = str(parsed_payload.get('message') or 'SberId-скрипт завершился без сообщения.')
-        artifacts = parsed_payload.get('artifacts')
-        if not isinstance(artifacts, dict):
-            artifacts = {}
-        artifacts.update(
-            {
-                'domain': normalized_domain,
-                'script': str(script_path),
-                'lifecycle': spec.lifecycle,
-                'cdp_endpoint': self._cdp_endpoint,
-                'resolved_cdp_endpoint': resolved_endpoint,
-                **stdio_artifacts,
-            }
-        )
-        return AuthScriptResult(
-            status=status or 'failed',
-            reason_code=reason_code,
-            message=message,
-            artifacts=artifacts,
-        )
+
+def _write_storage_state_tempfile(storage_state: dict[str, Any], *, session_id: str, attempt: int) -> Path:
+    safe_session = ''.join(ch if ch.isalnum() or ch in {'-', '_'} else '-' for ch in session_id)[:80] or 'session'
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        encoding='utf-8',
+        prefix=f'buyer-auth-storage-{safe_session}-{attempt:02d}-',
+        suffix='.json',
+        delete=False,
+    ) as handle:
+        storage_path = Path(handle.name)
+        os.chmod(storage_path, 0o600)
+        json.dump(storage_state, handle, ensure_ascii=False)
+    return storage_path
 
 
 def _build_endpoint_candidates(endpoint: str) -> list[str]:

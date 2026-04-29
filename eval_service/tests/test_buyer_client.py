@@ -32,6 +32,7 @@ def test_create_task_posts_buyer_payload_with_inline_storage_state() -> None:
                 start_url='https://www.litres.ru/',
                 metadata={'eval_case_id': 'litres_book_odyssey_001'},
                 callback_url='http://eval.test/callbacks/buyer',
+                callback_token='callback-secret',
                 storage_state={'cookies': [{'name': 'session', 'value': 'secret-cookie'}], 'origins': []},
             )
 
@@ -48,6 +49,7 @@ def test_create_task_posts_buyer_payload_with_inline_storage_state() -> None:
         'start_url': 'https://www.litres.ru/',
         'metadata': {'eval_case_id': 'litres_book_odyssey_001'},
         'callback_url': 'http://eval.test/callbacks/buyer',
+        'callback_token': 'callback-secret',
         'auth': {
             'provider': 'sberid',
             'storageState': {

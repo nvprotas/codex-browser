@@ -43,14 +43,18 @@ class CallbackClient:
             eval_case_id=eval_case_id,
         )
 
-    async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
+    async def deliver(self, callback_url: str, envelope: EventEnvelope, *, headers: dict[str, str] | None = None) -> None:
         attempts = self._settings.callback_retries
         backoff = self._settings.callback_backoff_sec
 
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                response = await self._client.post(callback_url, json=envelope.model_dump(mode='json'))
+                response = await self._client.post(
+                    callback_url,
+                    json=envelope.model_dump(mode='json'),
+                    headers=headers,
+                )
                 response.raise_for_status()
                 return
             except Exception as exc:  # noqa: BLE001 - важно сохранить первопричину доставки

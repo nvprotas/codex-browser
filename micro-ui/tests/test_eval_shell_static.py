@@ -126,6 +126,19 @@ class EvalShellStaticTests(unittest.TestCase):
         self.assertIn('normalizeRunCase', script)
         self.assertGreaterEqual(script.count('await loadRunDetail'), 2)
 
+    def test_eval_js_reply_payload_does_not_send_session_id(self) -> None:
+        script = _static_file('eval.js')
+        handler = script[
+            script.index("nodes.askForm.addEventListener('submit'")
+            : script.index("nodes.runJudge.addEventListener('click'")
+        ]
+        payload_start = handler.index('payload: {')
+        request_payload = handler[payload_start : handler.index('},', payload_start)]
+
+        self.assertIn('reply_id: waiting.waiting_reply_id', request_payload)
+        self.assertIn('message,', request_payload)
+        self.assertNotIn('session_id:', request_payload)
+
     def test_eval_dashboard_uses_svg_line_charts(self) -> None:
         js = _static_file('eval.js')
         css = (BASE_DIR / 'app/static/eval.css').read_text(encoding='utf-8')

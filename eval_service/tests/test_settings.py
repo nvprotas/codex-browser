@@ -36,7 +36,16 @@ def test_settings_read_env_overrides(monkeypatch) -> None:
 def test_docker_compose_binds_eval_service_to_loopback_and_sets_callback_contract() -> None:
     compose = Path('docker-compose.yml').read_text(encoding='utf-8')
 
+    assert '- "127.0.0.1:5432:5432"' in compose
+    assert '- "127.0.0.1:6901:6901"' in compose
+    assert '- "127.0.0.1:8000:8000"' in compose
+    assert '- "127.0.0.1:8080:8080"' in compose
     assert '- "127.0.0.1:8090:8090"' in compose
+    assert '- "9223:9223"' not in compose
+    assert '- "6901:6901"' not in compose
+    assert '- "8000:8000"' not in compose
+    assert '- "8080:8080"' not in compose
     assert '- "8090:8090"' not in compose
+    assert 'TRUSTED_CALLBACK_URLS: ${TRUSTED_CALLBACK_URLS:-http://eval_service:8090/callbacks/buyer}' in compose
     assert 'EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}' in compose
     assert 'EVAL_CALLBACK_SECRET: ${EVAL_CALLBACK_SECRET:?set EVAL_CALLBACK_SECRET}' in compose
