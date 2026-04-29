@@ -199,7 +199,7 @@
           </section>
         </section>
 
-        <section class="telemetry-grid two">
+        <section class="sessions-row">
           <article class="panel sessions">
             <div class="panel-head">
               <div>
@@ -210,29 +210,24 @@
             <div id="sessions-empty" class="empty">Пока нет активных сессий.</div>
             <div id="sessions-list" class="sessions-list"></div>
           </article>
+        </section>
 
+        <section class="events-row">
           <article class="panel events">
             <div class="panel-head">
               <div>
                 <p class="eyebrow" id="events-count">0 EVENTS</p>
-                <h2>Callback-лента</h2>
+                <h2>События</h2>
               </div>
             </div>
+            <div
+              id="event-type-filters"
+              class="event-type-filters"
+              role="toolbar"
+              aria-label="Фильтры event_type"
+            ></div>
             <div id="events-empty" class="empty">Выберите сессию.</div>
             <div id="events-list" class="events-list"></div>
-          </article>
-        </section>
-
-        <section class="stream-row">
-          <article class="panel stream">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow" id="stream-count">0 STREAM EVENTS</p>
-                <h2>Live stream</h2>
-              </div>
-            </div>
-            <div id="stream-empty" class="empty">Выберите сессию.</div>
-            <div id="stream-list" class="stream-list"></div>
           </article>
         </section>
       </section>

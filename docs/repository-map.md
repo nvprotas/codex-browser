@@ -737,7 +737,7 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `BUY
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state.
 - `micro-ui/app/static/eval.js`: eval shell; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
-- `micro-ui/app/static/app.css`: стили панели.
+- `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
 
