@@ -39,7 +39,7 @@
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
 | `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
-| `scripts/install-openclaw-buyer-skill.sh` | Копирует repo-local skill `skills/openclaw-buyer` в целевую директорию skills у `openclaw`. | Аргумент `<openclaw-skills-dir>` или `OPENCLAW_SKILLS_DIR`; по умолчанию `/root/.openclaw/workspace/skills`; исходный `skills/openclaw-buyer`. | Создает/обновляет `<target>/openclaw-buyer`, копирует `SKILL.md` и `agents/openai.yaml`. | Не удаляет устаревшие файлы в целевой директории; неверный target может установить скилл не туда. |
+| `scripts/install-openclaw-buyer-skill.sh` | Копирует repo-local skill `skills/openclaw-buyer` в extension-директорию `openclaw`. | Аргумент `<openclaw-buyer-extension-dir>` или `OPENCLAW_BUYER_EXTENSION_DIR`; по умолчанию `~/.openclaw/extensions/openclaw-buyer`; исходный `skills/openclaw-buyer`. | Создает/обновляет `<target>/skills/openclaw-buyer/SKILL.md` и `<target>/agents/openai.yaml`, что соответствует текущему layout extension на сервере. | Не удаляет устаревшие файлы в целевой директории; неверный target может установить extension не туда. |
 
 ## Документация и контракты
 
