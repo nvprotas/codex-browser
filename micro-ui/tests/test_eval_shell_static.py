@@ -176,3 +176,58 @@ class EvalShellStaticTests(unittest.TestCase):
         for fragment in expected_css_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, css)
+
+    def test_eval_run_detail_summarizes_agent_stream_events(self) -> None:
+        js = _static_file('eval.js')
+        css = _static_file('eval.css')
+
+        expected_js_fragments = [
+            'function groupRunCallbacks',
+            "callback.event_type === 'agent_stream_event'",
+            'function renderAgentStreamGroup',
+            'eval-agent-stream-group',
+            'eval-agent-stream-events',
+            'eval-agent-stream-count',
+            'eval-callback-raw',
+            "document.createElement('details')",
+            'source/stream',
+            'последние события',
+        ]
+        expected_css_fragments = [
+            '.eval-agent-stream-group',
+            '.eval-agent-stream-summary',
+            '.eval-agent-stream-count',
+            '.eval-agent-stream-events',
+            '.eval-callback-raw',
+        ]
+
+        for fragment in expected_js_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, js)
+        for fragment in expected_css_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, css)
+
+    def test_eval_js_refreshes_active_running_run_detail(self) -> None:
+        script = _static_file('eval.js')
+        refresh_body = script[
+            script.index('function shouldRefreshRun')
+            : script.index('function stopRunRefresh')
+        ]
+
+        expected_fragments = [
+            'RUN_REFRESH_INTERVAL_MS',
+            'runRefreshTimer',
+            'function shouldRefreshRun',
+            'function scheduleRunRefresh',
+            'function stopRunRefresh',
+            'window.setTimeout',
+            'await loadRunDetail(state.activeRun.eval_run_id)',
+            'scheduleRunRefresh();',
+        ]
+
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+        self.assertIn("item.runtime_status === 'waiting_user'", refresh_body)
+        self.assertIn('return false;', refresh_body)

@@ -42,7 +42,8 @@ def test_judge_runner_invokes_codex_exec_and_writes_valid_evaluation(tmp_path: P
     assert cmd[cmd.index('--output-schema') + 1] == 'eval_service/app/evaluation_schema.json'
     assert cmd[cmd.index('-m') + 1] == 'gpt-5.4-mini'
     assert cmd[cmd.index('-o') + 1].endswith('litres_book_odyssey_001.evaluation.json')
-    assert 'Электронная книга Одиссея' in cmd[-1]
+    assert not any('Электронная книга Одиссея' in arg for arg in cmd)
+    assert 'Электронная книга Одиссея' in kwargs['input']
     assert kwargs['capture_output'] is True
     assert kwargs['text'] is True
     assert kwargs['timeout'] == 600

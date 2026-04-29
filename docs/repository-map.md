@@ -642,6 +642,24 @@ Security boundaries:
 
 Runtime auth-профили берутся из host-директории `EVAL_AUTH_PROFILES_HOST_DIR`, которая bind-mounted в контейнер как `/run/eval/auth-profiles` и внутри сервиса читается через `EVAL_AUTH_PROFILES_DIR`. Для `auth_profile: litres_sberid` ожидается файл `litres_sberid.json`. Эти файлы являются секретами, не входят в image и не должны храниться в repo.
 
+### `eval_service/app/orchestrator.py`
+
+Создает eval run и оркестрирует последовательный запуск case через `buyer`.
+
+Поведение:
+
+- `POST /runs` создает `manifest.json`, переводит run в `running`, планирует выполнение case в фоновой задаче и сразу возвращает текущий manifest; первый case на момент ответа может еще оставаться `pending`;
+- execution идет последовательно до `waiting_user` или terminal state; после `payment_ready` выдерживается grace period перед `finished`;
+- для тестов и управляемого запуска поддерживается injectable `orchestrator_run_scheduler`, который может выполнить run inline или только собрать coroutine;
+- operator reply продолжает запускать resume orchestration через отдельный scheduler из callback слоя.
+
+Ошибки:
+
+- неизвестный selected case возвращает `422`;
+- ошибка `buyer.create_task` переводит текущий case в `failed` и позволяет перейти к следующему case;
+- timeout ожидания case переводит case в `timeout`;
+- необработанная ошибка фоновой задачи переводит run в `failed`.
+
 ### `eval_service/app/case_registry.py`
 
 Загружает YAML templates из `eval/cases/*.yaml` и разворачивает variants в `EvalCase`.
@@ -692,6 +710,13 @@ Callback state rules:
 
 HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Run detail дополнительно sanitizes callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
 
+Judge flow:
+
+- `POST /runs/{eval_run_id}/judge` собирает judge input из case, callbacks и trace summary;
+- `JudgeRunner` вызывает `codex exec --output-schema ... -o <evaluation.json>` без передачи prompt в argv;
+- полный judge prompt передается в `codex exec` через stdin, чтобы длинные traces и callback histories не упирались в лимит длины аргументов ОС;
+- при timeout, non-zero exit, невалидном JSON/schema mismatch или identity mismatch пишется fallback evaluation со skipped/failed checks.
+
 ## `micro-ui`
 
 `micro-ui` временно выполняет роль `middle` для локального MVP.
@@ -739,7 +764,7 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `BUY
 
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state.
-- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`.
+- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке.
 - `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.

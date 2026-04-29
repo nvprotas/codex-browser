@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Coroutine
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import AliasChoices, Field
@@ -22,6 +22,8 @@ from eval_service.app.run_store import RunStore
 DEFAULT_CASE_TIMEOUT_SECONDS = 600.0
 DEFAULT_PAYMENT_READY_GRACE_SECONDS = 5.0
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
+
+RunScheduler = Callable[[Coroutine[Any, Any, None]], Awaitable[None]]
 
 
 router = APIRouter()
@@ -43,6 +45,7 @@ class RunOrchestrator:
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        run_scheduler: RunScheduler | None = None,
         timeout_seconds: float = DEFAULT_CASE_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         payment_ready_grace_seconds: float = DEFAULT_PAYMENT_READY_GRACE_SECONDS,
@@ -55,6 +58,8 @@ class RunOrchestrator:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
         self.sleep = sleep or asyncio.sleep
+        self.run_scheduler = run_scheduler
+        self._run_tasks: set[asyncio.Task[None]] = set()
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.payment_ready_grace_seconds = payment_ready_grace_seconds
@@ -75,13 +80,16 @@ class RunOrchestrator:
         )
         self._write_run_status(eval_run_id, EvalRunStatus.RUNNING)
 
-        await self._run_cases_until_waiting(
+        await self._schedule_run_cases(
             eval_run_id=eval_run_id,
             cases=cases,
             callback_url=callback_url,
             callback_token=callback_token,
         )
 
+        manifest = self.run_store.read_manifest(eval_run_id)
+        if manifest.status == EvalRunStatus.FAILED:
+            return manifest
         return self._refresh_run_status(eval_run_id)
 
     async def resume_after_operator_reply(
@@ -146,6 +154,57 @@ class RunOrchestrator:
             )
             if state == CaseRunState.WAITING_USER:
                 break
+
+    async def _schedule_run_cases(
+        self,
+        *,
+        eval_run_id: str,
+        cases: Sequence[EvalCase],
+        callback_url: str,
+        callback_token: str | None,
+    ) -> None:
+        run_coro = self._run_cases_and_refresh(
+            eval_run_id=eval_run_id,
+            cases=cases,
+            callback_url=callback_url,
+            callback_token=callback_token,
+        )
+        if self.run_scheduler is not None:
+            try:
+                await self.run_scheduler(run_coro)
+            except Exception:
+                run_coro.close()
+                self._write_run_status(eval_run_id, EvalRunStatus.FAILED)
+            return
+
+        task = asyncio.create_task(run_coro)
+        self._run_tasks.add(task)
+        task.add_done_callback(lambda done_task: self._finalize_run_task(done_task, eval_run_id))
+
+    async def _run_cases_and_refresh(
+        self,
+        *,
+        eval_run_id: str,
+        cases: Sequence[EvalCase],
+        callback_url: str,
+        callback_token: str | None,
+    ) -> None:
+        await self._run_cases_until_waiting(
+            eval_run_id=eval_run_id,
+            cases=cases,
+            callback_url=callback_url,
+            callback_token=callback_token,
+        )
+        self._refresh_run_status(eval_run_id)
+
+    def _finalize_run_task(self, task: asyncio.Task[None], eval_run_id: str) -> None:
+        self._run_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            self._write_run_status(eval_run_id, EvalRunStatus.FAILED)
 
     async def _run_case(
         self,
@@ -303,6 +362,7 @@ def get_run_orchestrator(request: Request) -> RunOrchestrator:
         clock=getattr(request.app.state, 'orchestrator_clock', None),
         monotonic=getattr(request.app.state, 'orchestrator_monotonic', None),
         sleep=getattr(request.app.state, 'orchestrator_sleep', None),
+        run_scheduler=getattr(request.app.state, 'orchestrator_run_scheduler', None),
         timeout_seconds=float(getattr(request.app.state, 'orchestrator_timeout_seconds', DEFAULT_CASE_TIMEOUT_SECONDS)),
         poll_interval_seconds=float(
             getattr(request.app.state, 'orchestrator_poll_interval_seconds', DEFAULT_POLL_INTERVAL_SECONDS)

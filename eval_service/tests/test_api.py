@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,7 @@ class FinishingBuyerClient:
         start_url: str,
         metadata: dict[str, Any] | None = None,
         callback_url: str | None = None,
+        callback_token: str | None = None,
         storage_state: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         call = {
@@ -71,6 +74,7 @@ class FinishingBuyerClient:
             'start_url': start_url,
             'metadata': metadata or {},
             'callback_url': callback_url,
+            'callback_token': callback_token,
             'storage_state': storage_state,
             'session_id': 'session-post-runs-1',
         }
@@ -781,6 +785,11 @@ def test_dashboard_cases_and_hosts_skip_corrupt_evaluation_files_with_warnings(t
 
 
 def test_existing_post_runs_route_still_works_after_api_router_include(tmp_path: Path) -> None:
+    scheduled: list[Awaitable[None]] = []
+
+    async def collect_background(coro: Awaitable[None]) -> None:
+        scheduled.append(coro)
+
     settings = Settings(
         _env_file=None,
         eval_runs_dir=tmp_path,
@@ -794,13 +803,20 @@ def test_existing_post_runs_route_still_works_after_api_router_include(tmp_path:
     app.state.buyer_client = FinishingBuyerClient(store)
     app.state.eval_run_id_generator = lambda: 'eval-run-001'
     app.state.orchestrator_sleep = _no_sleep
+    app.state.orchestrator_run_scheduler = collect_background
     client = TestClient(app)
 
     response = client.post('/runs', json={'case_ids': ['case-a']})
 
     assert response.status_code == 200
     assert response.json()['eval_run_id'] == 'eval-run-001'
-    assert response.json()['status'] == 'finished'
+    assert response.json()['status'] == 'running'
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.PENDING
+    assert app.state.buyer_client.calls == []
+    assert len(scheduled) == 1
+
+    asyncio.run(scheduled.pop())
+    assert store.read_manifest('eval-run-001').status == EvalRunStatus.FINISHED
 
 
 async def _no_sleep(_seconds: float) -> None:

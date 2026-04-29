@@ -10,6 +10,7 @@
     caseDashboard: 'GET /dashboard/cases',
     hostDashboard: 'GET /dashboard/hosts',
   };
+  const RUN_REFRESH_INTERVAL_MS = 2000;
 
   const stubCases = [
     {
@@ -116,6 +117,7 @@
     cases: [],
     activeRun: null,
     evaluations: [],
+    runRefreshTimer: null,
   };
 
   function clone(value) {
@@ -246,6 +248,46 @@
     state.activeRun = normalizeRun(data);
     state.evaluations = extractEvaluations(data);
     return data;
+  }
+
+  function shouldRefreshRun(run = state.activeRun) {
+    if (!window.EVAL_SERVICE_BASE_URL || !run?.eval_run_id || run.status !== 'running') {
+      return false;
+    }
+    const cases = asArray(run.cases);
+    if (cases.some((item) => item.runtime_status === 'waiting_user')) {
+      return false;
+    }
+    return cases.some((item) =>
+      ['pending', 'starting', 'running', 'payment_ready'].includes(item.runtime_status),
+    );
+  }
+
+  function stopRunRefresh() {
+    if (state.runRefreshTimer !== null) {
+      window.clearTimeout(state.runRefreshTimer);
+      state.runRefreshTimer = null;
+    }
+  }
+
+  function scheduleRunRefresh() {
+    stopRunRefresh();
+    if (!shouldRefreshRun()) {
+      return;
+    }
+    state.runRefreshTimer = window.setTimeout(async () => {
+      state.runRefreshTimer = null;
+      if (!state.activeRun?.eval_run_id) {
+        return;
+      }
+      try {
+        await loadRunDetail(state.activeRun.eval_run_id);
+        renderAll();
+      } catch (error) {
+        nodes.startResult.textContent = String(error.message || error);
+      }
+      scheduleRunRefresh();
+    }, RUN_REFRESH_INTERVAL_MS);
   }
 
   function statusLabel(status) {
@@ -470,6 +512,123 @@
     nodes.metricJudged.textContent = String(state.evaluations.length);
   }
 
+  function truncateText(value, limit = 140) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+  }
+
+  function callbackData(callback) {
+    return {
+      ...(callback || {}),
+      ...(callback?.details || {}),
+      ...(callback?.payload || {}),
+    };
+  }
+
+  function callbackTime(callback) {
+    const value = Date.parse(callback?.occurred_at || '');
+    return Number.isFinite(value) ? new Date(value).toLocaleTimeString('ru-RU') : '-';
+  }
+
+  function streamSource(callback) {
+    const data = callbackData(callback);
+    return {
+      source: data.source || callback?.source || '-',
+      stream: data.stream || callback?.stream || 'default',
+    };
+  }
+
+  function callbackMessage(callback) {
+    const data = callbackData(callback);
+    const direct = data.message || data.summary || data.text || data.action || data.command || callback?.message;
+    if (direct) {
+      return truncateText(direct);
+    }
+
+    const items = asArray(data.items);
+    const item = items[items.length - 1] || {};
+    const itemText = item.message || item.summary || item.action || item.command || item.type;
+    return truncateText(itemText || callback?.event_id || 'без сообщения');
+  }
+
+  function streamEventSummaries(callbacks) {
+    const summaries = [];
+    for (const callback of callbacks) {
+      const message = callbackMessage(callback);
+      const last = summaries[summaries.length - 1];
+      if (last?.message === message) {
+        last.count += 1;
+        last.time = callbackTime(callback);
+      } else {
+        summaries.push({ message, count: 1, time: callbackTime(callback) });
+      }
+    }
+    return summaries.slice(-3);
+  }
+
+  function groupRunCallbacks(callbacks) {
+    const groups = [];
+    const streamGroups = new Map();
+    for (const callback of callbacks) {
+      if (callback.event_type === 'agent_stream_event') {
+        const { source, stream } = streamSource(callback);
+        const key = `${source}\u0000${stream}`;
+        let group = streamGroups.get(key);
+        if (!group) {
+          group = { kind: 'agent_stream_event', source, stream, callbacks: [] };
+          streamGroups.set(key, group);
+          groups.push(group);
+        }
+        group.callbacks.push(callback);
+      } else {
+        groups.push({ kind: 'callback', callbacks: [callback] });
+      }
+    }
+    return groups;
+  }
+
+  function renderCallbackRaw(callbacks) {
+    const details = document.createElement('details');
+    details.className = 'eval-callback-raw';
+    details.appendChild(node('summary', null, 'raw payload/details'));
+    const raw = node('pre', null, JSON.stringify(callbacks.length === 1 ? callbacks[0] : callbacks, null, 2));
+    details.appendChild(raw);
+    return details;
+  }
+
+  function renderCallbackItem(callback) {
+    const callbackItem = node('div', 'eval-callback-item');
+    callbackItem.append(
+      node('span', 'code', callback.event_type || 'callback'),
+      node('span', null, callback.event_id || callbackMessage(callback)),
+      node('span', null, callbackTime(callback)),
+    );
+    if (callback.payload || callback.details) {
+      callbackItem.appendChild(renderCallbackRaw([callback]));
+    }
+    return callbackItem;
+  }
+
+  function renderAgentStreamGroup(group) {
+    const wrapper = node('div', 'eval-agent-stream-group');
+    const summary = node('div', 'eval-agent-stream-summary');
+    summary.append(
+      node('span', 'code', 'agent_stream_event'),
+      node('span', null, `source/stream: ${group.source}/${group.stream}`),
+      node('span', 'eval-agent-stream-count', `${group.callbacks.length} events`),
+    );
+
+    const events = node('div', 'eval-agent-stream-events');
+    events.appendChild(node('strong', null, 'последние события'));
+    for (const item of streamEventSummaries(group.callbacks)) {
+      const suffix = item.count > 1 ? ` ×${item.count}` : '';
+      events.appendChild(node('span', null, `${item.time} · ${item.message}${suffix}`));
+    }
+
+    wrapper.append(summary, events, renderCallbackRaw(group.callbacks));
+    return wrapper;
+  }
+
   function renderRunDetail() {
     nodes.runDetail.replaceChildren();
     nodes.runJudge.disabled = !state.activeRun;
@@ -511,14 +670,10 @@
       if (!caseCallbacks.length) {
         callbacks.appendChild(node('div', 'eval-callback-item', 'callbacks пока нет'));
       }
-      for (const callback of caseCallbacks) {
-        const callbackItem = node('div', 'eval-callback-item');
-        callbackItem.append(
-          node('span', 'code', callback.event_type),
-          node('span', null, callback.event_id),
-          node('span', null, new Date(callback.occurred_at).toLocaleTimeString('ru-RU')),
+      for (const group of groupRunCallbacks(caseCallbacks)) {
+        callbacks.appendChild(
+          group.kind === 'agent_stream_event' ? renderAgentStreamGroup(group) : renderCallbackItem(group.callbacks[0]),
         );
-        callbacks.appendChild(callbackItem);
       }
 
       card.append(top, meta, callbacks);
@@ -686,6 +841,7 @@
         2,
       );
       renderAll();
+      scheduleRunRefresh();
     } catch (error) {
       nodes.startResult.textContent = String(error.message || error);
     }
@@ -725,6 +881,7 @@
         waiting.waiting_question = null;
       }
       renderAll();
+      scheduleRunRefresh();
     } catch (error) {
       nodes.replyResult.textContent = String(error.message || error);
     }
@@ -743,6 +900,7 @@
       state.evaluations = extractEvaluations(data);
       nodes.judgeResult.textContent = JSON.stringify(data, null, 2);
       renderAll();
+      stopRunRefresh();
     } catch (error) {
       nodes.judgeResult.textContent = String(error.message || error);
     }
@@ -755,6 +913,7 @@
       await loadLatestRun();
       await loadDashboards();
       renderAll();
+      scheduleRunRefresh();
     } catch (error) {
       nodes.casesList.replaceChildren(node('div', 'empty', String(error.message || error)));
       renderAll();
