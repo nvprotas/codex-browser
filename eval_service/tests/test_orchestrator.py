@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -152,6 +153,58 @@ def test_post_runs_selected_cases_creates_manifest_and_calls_buyer_sequentially(
     assert buyer.calls[0]['start_url'] == 'https://example.test/case-a'
     assert buyer.calls[0]['callback_url'] == 'http://eval_service:8090/callbacks/buyer'
     assert buyer.calls[0]['storage_state'] == {'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}
+
+
+def test_post_runs_returns_running_manifest_before_background_cases_start(tmp_path: Path) -> None:
+    scheduled: list[Awaitable[Any]] = []
+
+    async def collect_background(coro: Awaitable[Any]) -> None:
+        scheduled.append(coro)
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-a')],
+        on_create=lambda call: _append_ask_user(store, call),
+        run_scheduler=collect_background,
+    )
+
+    response = client.post('/runs', json={'case_ids': ['case-a']})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['eval_run_id'] == 'eval-run-001'
+    assert body['status'] == 'running'
+    assert body['cases'][0]['state'] == 'pending'
+    assert store.read_manifest('eval-run-001').status == EvalRunStatus.RUNNING
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.PENDING
+    assert buyer.calls == []
+    assert len(scheduled) == 1
+
+    asyncio.run(scheduled.pop())
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.RUNNING
+    assert manifest.cases[0].state == CaseRunState.WAITING_USER
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == ['case-a']
+
+
+def test_post_runs_marks_run_failed_when_background_scheduler_rejects(tmp_path: Path) -> None:
+    async def reject_background(_coro: Awaitable[Any]) -> None:
+        raise RuntimeError('scheduler недоступен')
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-a')],
+        run_scheduler=reject_background,
+    )
+
+    response = client.post('/runs', json={'case_ids': ['case-a']})
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'failed'
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FAILED
+    assert manifest.cases[0].state == CaseRunState.PENDING
+    assert buyer.calls == []
 
 
 def test_post_runs_uses_configured_callback_url_instead_of_request_host(tmp_path: Path) -> None:
@@ -737,6 +790,7 @@ def _client_with_orchestrator(
     eval_callback_base_url: str | None = 'http://eval_service:8090',
     eval_callback_secret: str | None = None,
     client_base_url: str = 'http://testserver',
+    run_scheduler: Callable[[Awaitable[Any]], Awaitable[None]] | None = None,
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
     settings = Settings(
         _env_file=None,
@@ -756,6 +810,13 @@ def _client_with_orchestrator(
     app.state.eval_run_id_generator = lambda: 'eval-run-001'
     app.state.orchestrator_monotonic = fake_timer.monotonic
     app.state.orchestrator_sleep = sleep or fake_timer.sleep
+    if run_scheduler is None:
+        async def run_inline(coro: Awaitable[Any]) -> None:
+            await coro
+
+        app.state.orchestrator_run_scheduler = run_inline
+    else:
+        app.state.orchestrator_run_scheduler = run_scheduler
     if timeout_seconds is not None:
         app.state.orchestrator_timeout_seconds = timeout_seconds
     app.state.orchestrator_poll_interval_seconds = poll_interval_seconds

@@ -87,13 +87,14 @@ class JudgeRunner:
             )
 
         prompt = build_judge_prompt_from_payload(judge_input)
-        cmd = self._build_command(evaluation_path=evaluation_path, prompt=prompt)
+        cmd = self._build_command(evaluation_path=evaluation_path)
         try:
             completed = self._runner(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_sec,
+                input=prompt,
             )
         except subprocess.TimeoutExpired:
             return self._write_fallback(
@@ -153,7 +154,7 @@ class JudgeRunner:
 
         return JudgeRunResult(evaluation_path=evaluation_path, evaluation=evaluation)
 
-    def _build_command(self, *, evaluation_path: Path, prompt: str) -> list[str]:
+    def _build_command(self, *, evaluation_path: Path) -> list[str]:
         return [
             self._codex_bin,
             'exec',
@@ -163,7 +164,6 @@ class JudgeRunner:
             str(self._schema_path),
             '-o',
             str(evaluation_path),
-            prompt,
         ]
 
     def _write_fallback(
