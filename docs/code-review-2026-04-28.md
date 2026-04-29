@@ -23,36 +23,22 @@
 
 ## Краткий итог
 
-С учетом доверенной VPS главный риск смещается с локального недоверенного пользователя на публичный сетевой периметр, unsafe callback/start URLs, durable secrets/artifacts и корректность payment/contracts. Ветка может быть допустима только при явно зафиксированном инварианте периметра: доступ к control-plane/noVNC/CDP закрыт firewall/VPN/SSH tunnel и не публикуется в интернет. Без этого инварианта остаются критичные блокеры: открытые control-plane порты без auth, SSRF/эксфильтрация через `callback_url` и `start_url`, утечки `storageState`/payment/callback secrets в trace/Postgres/eval artifacts, недостаточная проверка SberPay evidence и сломанный eval/micro-ui reply flow.
+P0 для доверенной VPS: закрыть все торчащие наружу порты. `buyer:8000`, `micro-ui:8080`, noVNC `6901` и CDP `9223` не должны быть доступны из интернета; доступ допустим только через firewall/VPN/SSH tunnel или authenticated reverse proxy. До фиксации этого инварианта ветку нельзя считать готовой к запуску на VPS.
+
+Дальше приоритет такой: сначала остальные критичные проблемы безопасности, затем сломанная функциональность, затем надежность, тесты и документация. Иными словами: сначала закрытый периметр и эксфильтрация, потом payment/reply/runtime-поток, все остальное после.
 
 Приоритет исправлений:
 
-1. Убрать durable-хранение секретов: raw `storageState`, auth replies, callback tokens, payment URLs/order IDs, prompt/trace/eval manifest.
-2. Закрыть сетевой периметр: auth для `/v1/*`, micro-ui callbacks, noVNC/CDP; bind localhost/internal-only; запретить произвольные callback/start URLs.
-3. Ввести единый payment verifier: `payment_ready` только после доменно-валидированного SberPay evidence.
-4. Синхронизировать callback/API contracts между buyer, eval_service, micro-ui и docs.
-5. Ужесточить runner/script/test contracts: JSON Schema = Pydantic, non-zero script exit = failure, реальные behavioral tests.
+1. **P0 Периметр безопасности:** закрыть host-публикацию `8000/8080/6901/9223` наружу; зафиксировать firewall/VPN/SSH tunnel как обязательный deployment invariant; добавить auth там, где сервис все же доступен по сети.
+2. **P0 Эксфильтрация:** запретить arbitrary `callback_url`/`start_url`, убрать callback token из query string, ввести allowlist/registry/HMAC.
+3. **P0 Секреты:** убрать durable-хранение raw `storageState`, auth replies, payment URLs/order IDs, prompt/trace/eval manifest secrets.
+4. **P1 Сломанная функциональность:** починить payment boundary, eval/micro-ui reply flow, runner non-zero/stale output, CDP page selection и malformed terminal callbacks.
+5. **P2 Надежность/контракты:** outbox replay, restart reconciliation, schema drift, long-running judge, auth profile validation.
+6. **P3 Тесты/документация:** перестроить слабые тесты, добавить TS/Postgres gates, обновить repository docs.
 
-## Release Blockers
+## P0. Критичная безопасность
 
-### RB-01. Auth/storageState сохраняется в долговременные артефакты и prompt
-
-**Severity:** critical
-**Файлы:** `buyer/app/service.py:463`, `buyer/app/service.py:668`, `buyer/app/persistence.py:383`, `buyer/app/auth_scripts.py:148`, `buyer/app/runner.py:131`
-
-**Проблема:** auth-refresh reply с JSON `storageState` сохраняется как обычный пользовательский ответ: в `buyer_replies.message`, затем в `buyer_agent_memory.text`, затем попадает в prompt и prompt trace. Отдельно auth script пишет raw Playwright `storageState` в `BUYER_TRACE_DIR/<session_id>/auth-storage-attempt-XX.json` и не удаляет файл.
-
-**Доказательство:** `_ask_user_for_reply()` безусловно добавляет `reply_text` в agent memory; persistence пишет reply/message и memory raw; `build_agent_prompt()` включает последние memory items; `AgentRunner` пишет prompt file; `SberIdScriptRunner` пишет raw storage state в trace dir под `/workspace`.
-
-**План исправления:**
-
-- Разделить типы reply: обычный user reply и auth payload reply.
-- Для auth reply парсить payload до persistence; в БД хранить только статус и sanitized summary.
-- В agent memory добавлять `[SBERID_AUTH_RECEIVED]` без cookies/localStorage.
-- Писать storageState во временный файл вне `/workspace` с `0600`, удалять в `finally`, лучше передавать через stdin/fd/tmpfs.
-- Добавить regressions: auth reply не попадает в `buyer_replies`, `buyer_agent_memory`, prompt preview, trace files.
-
-### RB-02. Control-plane и browser-sidecar открыты без защиты
+### RB-01. Control-plane и browser-sidecar открыты без защиты
 
 **Severity:** critical при публичной доступности; high при закрытом firewall/VPN
 **Файлы:** `docker-compose.yml:28`, `docker-compose.yml:92`, `docker-compose.yml:110`, `browser/entrypoint.sh:43`, `browser/entrypoint.sh:55`, `browser/entrypoint.sh:69`, `browser/entrypoint.sh:79`, `buyer/app/main.py:101`
@@ -70,7 +56,7 @@
 - noVNC вынести за authenticated reverse proxy или включить auth.
 - Убрать `--remote-allow-origins=*`, если нет строгой необходимости.
 
-### RB-03. SSRF и эксфильтрация через `callback_url` и `start_url`
+### RB-02. SSRF и эксфильтрация через `callback_url` и `start_url`
 
 **Severity:** high; critical если task API доступен недоверенным клиентам
 **Файлы:** `buyer/app/models.py:33`, `buyer/app/models.py:35`, `buyer/app/callback.py:53`, `buyer/app/runner.py:452`, `buyer/app/prompt_builder.py:50`
@@ -86,7 +72,7 @@
 - Для `start_url` ввести public URL policy и domain allowlist/approval для non-public hosts.
 - Добавить негативные тесты на `127.0.0.1`, `::1`, `169.254.169.254`, private ranges и redirect-to-private.
 
-### RB-04. Callback/eval secrets и raw events сохраняются и отдаются наружу
+### RB-03. Callback/eval secrets и raw events сохраняются и отдаются наружу
 
 **Severity:** high; critical при доступе третьих лиц к artifacts/API
 **Файлы:** `eval_service/app/callback_urls.py:19`, `buyer/app/persistence.py:277`, `buyer/app/main.py:149`, `eval_service/app/run_store.py:187`
@@ -101,6 +87,25 @@
 - Хранить delivery secret отдельно от display URL; API отдавать redacted URL.
 - Redact на write в eval manifest или хранить raw events только в защищенном debug artifact с TTL.
 - Добавить тесты, читающие `manifest.json` с диска и проверяющие отсутствие tokens/order/payment URLs/idempotency secrets.
+
+### RB-04. Auth/storageState сохраняется в долговременные артефакты и prompt
+
+**Severity:** critical
+**Файлы:** `buyer/app/service.py:463`, `buyer/app/service.py:668`, `buyer/app/persistence.py:383`, `buyer/app/auth_scripts.py:148`, `buyer/app/runner.py:131`
+
+**Проблема:** auth-refresh reply с JSON `storageState` сохраняется как обычный пользовательский ответ: в `buyer_replies.message`, затем в `buyer_agent_memory.text`, затем попадает в prompt и prompt trace. Отдельно auth script пишет raw Playwright `storageState` в `BUYER_TRACE_DIR/<session_id>/auth-storage-attempt-XX.json` и не удаляет файл.
+
+**Доказательство:** `_ask_user_for_reply()` безусловно добавляет `reply_text` в agent memory; persistence пишет reply/message и memory raw; `build_agent_prompt()` включает последние memory items; `AgentRunner` пишет prompt file; `SberIdScriptRunner` пишет raw storage state в trace dir под `/workspace`.
+
+**План исправления:**
+
+- Разделить типы reply: обычный user reply и auth payload reply.
+- Для auth reply парсить payload до persistence; в БД хранить только статус и sanitized summary.
+- В agent memory добавлять `[SBERID_AUTH_RECEIVED]` без cookies/localStorage.
+- Писать storageState во временный файл вне `/workspace` с `0600`, удалять в `finally`, лучше передавать через stdin/fd/tmpfs.
+- Добавить regressions: auth reply не попадает в `buyer_replies`, `buyer_agent_memory`, prompt preview, trace files.
+
+## P1. Сломанная функциональность
 
 ### RB-05. Payment boundary не гарантирует SberPay evidence
 
@@ -135,7 +140,9 @@
 - Обновить fixtures/tests на canonical `message + reply_id`.
 - Добавить integration test: UI/proxy -> eval reply endpoint.
 
-## High Severity Findings
+Дополнительно в P1 попадают функциональные regressions из списка ниже: `H-04`, `H-05`, `H-07`, `H-09`, `H-11`, `M-06`, `M-07`, `M-08`, `M-15`.
+
+## P2. Остальные проблемы высокой серьезности
 
 ### H-01. Внешние callbacks отдают raw trace/stream telemetry до redaction
 
@@ -225,7 +232,7 @@
 
 **План:** сделать async judge job с polling; минимум дать отдельный long timeout для judge route и тест на timeout contract.
 
-## Medium Severity Findings
+## P2/P3. Остальные проблемы средней серьезности
 
 ### M-01. Non-terminal sessions после рестарта остаются stale
 
@@ -355,7 +362,7 @@
 
 **План:** добавить разделы `eval_service`, `eval/cases`, eval artifacts/env/API/tests в `docs/repository-map.md`; обновить README ports/env/eval workflow.
 
-## Проблемы тестов
+## P3. Проблемы тестов
 
 ### T-01. Codex fake outputs проверяют не реальный schema contract
 
@@ -428,10 +435,8 @@
 
 ## Рекомендуемый порядок работ
 
-1. **Security patch:** зафиксировать инвариант доверенной VPS и закрытого периметра, закрыть порты firewall/VPN/SSH tunnel, добавить auth, убрать arbitrary callback/start URL, убрать query token.
-2. **Secret redaction patch:** ephemeral auth storage, redacted auth replies, redacted Postgres/eval manifest/prompt/trace/profile updates.
-3. **Payment boundary patch:** strict evidence verifier, schema/model sync, non-Litres no-success-without-verifier.
-4. **Contract patch:** callback schema, eval ids, `ask_user.message`, eval reply body, malformed callback validation.
-5. **Runtime reliability patch:** script runner exit/stale output, CDP page selection, restart reconciliation, outbox replay.
-6. **Eval hardening patch:** trace symlink guard, stale `payment_ready`, long-running judge design, storageState profile validation.
-7. **Test rebuild:** replace static/string tests with behavioral tests, make TS/Postgres gates real, add negative security tests.
+1. **P0 Периметр безопасности:** закрыть наружные `8000/8080/6901/9223`; зафиксировать firewall/VPN/SSH tunnel; добавить auth для любых сетевых endpoints, которые остаются доступны.
+2. **P0 Эксфильтрация/секреты:** убрать arbitrary callback/start URL, query token, raw callback events, raw `storageState`, payment/order secrets из durable artifacts.
+3. **P1 Сломанная функциональность:** strict SberPay evidence verifier, eval/micro-ui reply flow, malformed terminal callbacks, script runner exit/stale output, CDP page selection.
+4. **P2 Надежность/контракты:** callback schema, eval ids, restart reconciliation, outbox replay, long-running judge, auth profile validation.
+5. **P3 Тесты/документация:** заменить static/string tests на behavioral tests, сделать TS/Postgres gates обязательными, обновить repository docs.
