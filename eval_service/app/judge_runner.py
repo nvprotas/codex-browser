@@ -10,7 +10,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
 
-from .judge_prompt import build_judge_prompt_from_payload
+from .judge_prompt import build_judge_prompt
 from .settings import Settings
 
 
@@ -86,7 +86,7 @@ class JudgeRunner:
                 reason=auth_skip_reason,
             )
 
-        prompt = build_judge_prompt_from_payload(judge_input)
+        prompt = build_judge_prompt(input_path)
         cmd = self._build_command(evaluation_path=evaluation_path)
         try:
             completed = self._runner(

@@ -30,6 +30,11 @@ def write_judge_input(
     if output_path.resolve().parent != evaluations_dir.resolve():
         raise ValueError('judge-input должен записываться внутри evaluations')
 
+    evidence_files = _evidence_files(
+        run_dir=Path(run_dir),
+        output_path=output_path,
+        trace_summary=trace_summary,
+    )
     payload = {
         'eval_run_id': eval_run_id,
         'eval_case_id': case.eval_case_id,
@@ -42,6 +47,7 @@ def write_judge_input(
         'trace': trace_summary,
         'artifacts': artifacts or {},
         'metrics': metrics,
+        'evidence_files': evidence_files,
     }
     if case_state is not None:
         payload['case_state'] = case_state
@@ -49,6 +55,42 @@ def write_judge_input(
         payload['case_run'] = case_run
     _write_json_atomic(output_path, sanitize_for_judge_input(payload))
     return output_path
+
+
+def _evidence_files(
+    *,
+    run_dir: Path,
+    output_path: Path,
+    trace_summary: dict[str, Any],
+) -> dict[str, Any]:
+    trace_dir_value = trace_summary.get('trace_dir')
+    trace_dir = Path(trace_dir_value) if isinstance(trace_dir_value, str) and trace_dir_value else None
+    trace_files: list[str] = []
+    browser_actions_files: list[str] = []
+    screenshots: list[str] = []
+    for step in trace_summary.get('steps') or []:
+        if not isinstance(step, dict) or trace_dir is None:
+            continue
+        trace_file = step.get('trace_file')
+        if isinstance(trace_file, str) and trace_file:
+            trace_files.append(str(trace_dir / trace_file))
+        actions_file = step.get('browser_actions_file')
+        if isinstance(actions_file, str) and actions_file:
+            browser_actions_files.append(str(trace_dir / actions_file))
+        for screenshot in step.get('screenshots') or []:
+            if isinstance(screenshot, str) and screenshot:
+                screenshots.append(str(trace_dir / screenshot))
+
+    return {
+        'run_dir': str(run_dir),
+        'manifest': str(run_dir / 'manifest.json'),
+        'judge_input': str(output_path),
+        'evaluation_output': str(output_path.with_name(output_path.name.replace('.judge-input.json', '.evaluation.json'))),
+        'trace_dir': str(trace_dir) if trace_dir is not None else None,
+        'trace_files': trace_files,
+        'browser_actions_files': browser_actions_files,
+        'screenshots': screenshots,
+    }
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
