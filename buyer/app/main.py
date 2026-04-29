@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 
 from .auth_scripts import SberIdScriptRunner, parse_allowlist
 from .callback import CallbackClient
+from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionKnowledgeAnalyzer
 from .models import (
     SessionDetail,
@@ -62,6 +63,13 @@ purchase_script_runner = PurchaseScriptRunner(
     timeout_sec=settings.purchase_script_timeout_sec,
     trace_dir=settings.buyer_trace_dir,
 )
+external_auth_client = None
+if settings.sber_auth_source == 'external_cookies_api':
+    external_auth_client = ExternalSberCookiesClient(
+        base_url=settings.sber_cookies_api_url,
+        timeout_sec=settings.sber_cookies_api_timeout_sec,
+        retries=settings.sber_cookies_api_retries,
+    )
 service = BuyerService(
     store=store,
     callback_client=callback_client,
@@ -77,6 +85,7 @@ service = BuyerService(
     purchase_script_runner=purchase_script_runner,
     knowledge_analyzer=knowledge_analyzer,
     buyer_user_info_path=settings.buyer_user_info_path,
+    external_auth_client=external_auth_client,
 )
 
 app = FastAPI(title='buyer-mvp', version='0.1.0')
@@ -95,6 +104,8 @@ async def startup() -> None:
 @app.on_event('shutdown')
 async def shutdown() -> None:
     await service.shutdown_post_session_analysis()
+    if external_auth_client is not None:
+        await external_auth_client.aclose()
     await callback_client.aclose()
     await store.aclose()
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -12,68 +10,10 @@ from typing import Any
 from buyer.app.auth_scripts import (
     AUTH_FAILED_INVALID_SESSION,
     AUTH_OK,
-    AUTH_REFRESH_REQUESTED,
-    AuthScriptResult,
     SberIdScriptRunner,
 )
-from buyer.app.models import EventEnvelope, SessionStatus, TaskAuthPayload
-from buyer.app.service import BuyerService
-from buyer.app.state import SessionState, SessionStore
-
-
-class _RecordingCallbackClient:
-    def __init__(self) -> None:
-        self.delivered: list[EventEnvelope] = []
-
-    def build_envelope(
-        self,
-        session_id: str,
-        event_type: str,
-        payload: dict[str, Any],
-        idempotency_suffix: str | None = None,
-        *,
-        eval_run_id: str | None = None,
-        eval_case_id: str | None = None,
-    ) -> EventEnvelope:
-        seq = len(self.delivered) + 1
-        suffix = idempotency_suffix or str(seq)
-        return EventEnvelope(
-            event_id=f'event-{seq}',
-            session_id=session_id,
-            event_type=event_type,
-            occurred_at=datetime.now(timezone.utc),
-            idempotency_key=f'{session_id}:{event_type}:{suffix}',
-            payload=payload,
-            eval_run_id=eval_run_id,
-            eval_case_id=eval_case_id,
-        )
-
-    async def deliver(self, callback_url: str, envelope: EventEnvelope, *, headers: dict[str, str] | None = None) -> None:
-        _ = callback_url
-        _ = headers
-        self.delivered.append(envelope)
-
-
-class _UnusedRunner:
-    async def run_step(self, **_: Any) -> None:
-        raise AssertionError('generic runner не должен запускаться в auth unit test')
-
-
-class _SuccessfulAuthScriptRunner:
-    def __init__(self) -> None:
-        self.seen_storage_state: dict[str, Any] | None = None
-
-    def registry_snapshot(self) -> list[dict[str, str]]:
-        return [{'domain': 'litres.ru', 'lifecycle': 'publish', 'script': 'sberid/litres.ts'}]
-
-    async def run(self, **kwargs: Any) -> AuthScriptResult:
-        self.seen_storage_state = kwargs['storage_state']
-        return AuthScriptResult(
-            status='completed',
-            reason_code=AUTH_OK,
-            message='ok',
-            artifacts={'context_prepared_for_reuse': True},
-        )
+from buyer.app.models import SessionStatus
+from buyer.app.state import SessionState
 
 
 class _FakeConn:
@@ -122,60 +62,6 @@ def _assert_no_raw_auth_payload(test: unittest.TestCase, value: str) -> None:
 
 
 class AuthSecretRetentionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_sberid_auth_refresh_reply_keeps_raw_only_for_runtime_and_stores_marker(self) -> None:
-        store = SessionStore()
-        auth_runner = _SuccessfulAuthScriptRunner()
-        service = BuyerService(
-            store=store,
-            callback_client=_RecordingCallbackClient(),  # type: ignore[arg-type]
-            runner=_UnusedRunner(),  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist={'litres.ru'},
-            sberid_auth_retry_budget=1,
-            auth_script_runner=auth_runner,  # type: ignore[arg-type]
-        )
-        state = await store.create_session(
-            task='Купить книгу',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            novnc_url='http://novnc',
-            metadata={},
-            auth=TaskAuthPayload(storageState={'invalid': True}),
-        )
-        await store.set_status(state.session_id, SessionStatus.RUNNING)
-
-        auth_flow = asyncio.create_task(service._run_sberid_auth_flow(state))
-        reply_id = ''
-        for _ in range(50):
-            refreshed = await store.get(state.session_id)
-            if refreshed.waiting_reply_id:
-                reply_id = refreshed.waiting_reply_id
-                break
-            await asyncio.sleep(0.01)
-        self.assertTrue(reply_id)
-
-        await service.submit_reply(state.session_id, reply_id, _raw_storage_state_reply())
-        summary = await asyncio.wait_for(auth_flow, timeout=1)
-
-        self.assertEqual(summary['reason_code'], AUTH_OK)
-        self.assertEqual(
-            auth_runner.seen_storage_state,
-            {
-                'cookies': [{'name': 'sid', 'value': 'cookie-secret-value'}],
-                'origins': [
-                    {
-                        'origin': 'https://www.litres.ru',
-                        'localStorage': [{'name': 'token', 'value': 'local-storage-token-secret'}],
-                    }
-                ],
-            },
-        )
-        memory_dump = json.dumps(await store.get_agent_memory(state.session_id), ensure_ascii=False)
-        _assert_no_raw_auth_payload(self, memory_dump)
-
     async def test_persistent_sync_redacts_auth_reply_and_memory_storage_state(self) -> None:
         from buyer.app.persistence import _sync_session_related
 

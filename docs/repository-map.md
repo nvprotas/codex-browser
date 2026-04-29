@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volumes `buyer-postgres-data`, `eval-auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя или eval callbacks; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_*`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volumes `buyer-postgres-data`, `eval-auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя или eval callbacks; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
 
@@ -47,7 +47,7 @@
 | `docs/buyer.md` | Согласованная v1-спецификация домена `buyer`. | Граница SberPay, lifecycle, auth, handoff, knowledge-analysis. |
 | `docs/architecture-decisions.md` | Decision log обязательных архитектурных решений. | Сначала обновлять его при новых требованиях, затем остальные документы. |
 | `docs/buyer-roadmap.md` | Приоритизированный roadmap и ссылки на Linear. | При изменении roadmap синхронизировать Linear issue. |
-| `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow. | Исторический контекст планов; не является runtime-контрактом. |
+| `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow, включая дизайн external Sber auth source и запрет ручной передачи auth-пакетов. | Исторический контекст планов; не является runtime-контрактом. |
 | `docs/repository-map.md` | Эта карта репозитория. | Любые изменения кода, контрактов, ошибок, структуры или runtime-зависимостей. |
 
 ## `buyer`: HTTP API и сервисная сборка
@@ -72,12 +72,13 @@ FastAPI-точка входа `buyer`.
 - `PostSessionKnowledgeAnalyzer`.
 - `SberIdScriptRunner`.
 - `PurchaseScriptRunner`.
+- `ExternalSberCookiesClient`, только если `SBER_AUTH_SOURCE=external_cookies_api`.
 - `BuyerService`.
 
 Lifecycle:
 
 - `startup`: `store.initialize()`, для Postgres создает pool и миграции.
-- `shutdown`: отменяет post-session analysis, закрывает HTTP client callbacks и repository.
+- `shutdown`: отменяет post-session analysis, закрывает external auth client при наличии, HTTP client callbacks и repository.
 
 ### `buyer/app/url_policy.py`
 
@@ -97,7 +98,7 @@ Pydantic-контракты API и внутренних результатов.
 Ключевые модели:
 
 - `SessionStatus`: `created`, `running`, `waiting_user`, `completed`, `failed`.
-- `TaskAuthPayload`: `provider`, `storageState`/`storage_state`.
+- `TaskAuthPayload`: `provider`, `storageState`/`storage_state`; пользовательские replies не должны переносить auth-пакеты.
 - `TaskCreateRequest`: задача, стартовый URL, callback URL, ephemeral callback token, metadata, auth.
 - `SessionReplyRequest`: ответ пользователя на конкретный `reply_id`.
 - `EventEnvelope`: callback envelope.
@@ -137,6 +138,7 @@ Pydantic-контракты API и внутренних результатов.
 - Codex: `CODEX_BIN`, `CODEX_MODEL`, sandbox, reasoning, web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
 - SberId и scripts-first: allowlist, timeouts, scripts dir;
+- external Sber cookies API: `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`;
 - state: `STATE_BACKEND`, `DATABASE_URL`, pool sizes;
 - runtime limit: `MAX_ACTIVE_SESSIONS`.
 
@@ -175,7 +177,8 @@ Pydantic-контракты API и внутренних результатов.
 - `SessionNotFoundError`: неизвестный `session_id`.
 - `ReplyValidationError`: сессия не ждет ответ, неверный `reply_id`, нет активного runner после рестарта, либо ответ уже потреблен.
 
-Важное ограничение: storageState/auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта. Raw auth-refresh reply в `BuyerService` хранится только во временном in-process буфере до потребления `_ask_user_for_reply`; в durable replies и agent memory пишется marker `[SBERID_AUTH_RECEIVED]` с безопасной сводкой.
+Важное ограничение: auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта. Пользовательский reply не должен быть auth-source.
+Передача `storageState` через чат запрещена; external cookies API является только машинным source для текущей сессии и не отменяет это ограничение.
 
 ### `buyer/app/persistence.py`
 
@@ -205,8 +208,34 @@ Postgres repository и inline migrations.
 
 - `_sanitize_auth_context` удаляет `storageState`, cookies, localStorage, auth/token/password-like ключи.
 - `_sanitize_persistent_metadata` дополнительно удаляет stdout/stderr/prompt preview.
-- `summarize_sberid_auth_reply` и `_sanitize_reply_or_memory_text` заменяют JSON auth-refresh reply со `storageState` на marker `[SBERID_AUTH_RECEIVED]` для `buyer_replies` и `buyer_agent_memory`.
+- `_sanitize_reply_or_memory_text` и legacy helper `summarize_sberid_auth_reply` остаются защитным редактированием на persistence-границе, но `BuyerService` больше не запрашивает и не принимает auth-пакеты через пользовательский reply.
 - `_iter_artifact_paths` не сохраняет path к `storageState`/cookies/localStorage.
+
+### `buyer/app/external_auth.py`
+
+Машинный source SberId cookies из внешнего API.
+
+Входы:
+
+- base URL, timeout и retry budget из настроек;
+- `GET /api/v1/cookies` внешнего сервиса;
+- JSON payload с `cookies`, optional `updatedAt` и `count`.
+
+Выходы:
+
+- `ExternalSberCookiesResult(reason_code, storage_state, metadata, message)`;
+- Playwright `storageState` вида `{"cookies": [...], "origins": []}`;
+- sanitized metadata: `cookie_count`, `domains`, `updated_at`, `attempts` без cookie values.
+
+Основные reason-коды:
+
+- `auth_external_loaded`: payload валиден и преобразован в runtime auth;
+- `auth_external_empty_payload`: сервис вернул пустой массив cookies;
+- `auth_external_invalid_payload`: JSON shape или cookie shape невалидны;
+- `auth_external_timeout`: исчерпан timeout/retry budget;
+- `auth_external_unavailable`: URL не настроен, HTTP/network error или невалидный JSON.
+
+Ограничения: client не реализует `POST /api/v1/cookies`, не пишет cookies в persistent state и не должен логировать cookie values.
 
 ## `buyer`: orchestration
 
@@ -225,7 +254,7 @@ Postgres repository и inline migrations.
 
 1. Отправляет `session_started`.
 2. Добавляет `Start URL` и задачу в agent memory.
-3. Запускает `_run_sberid_auth_flow`.
+3. Запускает `_run_sberid_auth_flow`, где `_resolve_session_auth` выбирает inline auth или external cookies API.
 4. Запускает `_run_purchase_script_flow`.
 5. Если быстрый скрипт не завершил сценарий, циклически вызывает `AgentRunner.run_step`.
 6. Обрабатывает статусы `needs_user_input`, `completed`, `failed`.
@@ -256,6 +285,10 @@ Callback-события:
 - `SessionNotFoundError`, `SessionConflictError`, `ReplyValidationError`: runner тихо завершает текущую задачу, потому что состояние уже недоступно/невалидно.
 - Любое другое исключение: `_handle_failed(..., "Непредвиденная ошибка: ...")`; если callback тоже падает, пишется fallback event и status `failed`.
 - Ошибка quick purchase script не валит сценарий: добавляется `[PURCHASE_SCRIPT_FALLBACK]`, затем generic flow.
+- Невалидный inline `auth.storageState` не вызывает `ask_user` и `handoff`: auth summary получает `reason_code='auth_inline_invalid_payload'`, `mode='guest'`, `path='guest'`.
+- Если inline auth отсутствует и подключен external client, `BuyerService` вызывает внешний cookies API, сохраняет успешный пакет через `SessionStore.set_auth()` только в runtime auth и добавляет sanitized `external_auth` metadata в auth summary.
+- Если external client вернул `auth_external_unavailable`, `auth_external_timeout`, `auth_external_invalid_payload` или `auth_external_empty_payload`, `BuyerService` не запускает auth script, фиксирует reason-code и продолжает guest-flow.
+- Ошибки SberId script auth `auth_refresh_requested`, `auth_failed_redirect_loop` и `auth_failed_invalid_session` не просят новый auth-пакет через `/v1/replies`; сервис добавляет `[SBERID_AUTH_HEURISTIC_REQUIRED]` и продолжает через heuristic/generic путь, где handoff возможен только как ручной шаг без передачи cookies/storageState через чат.
 
 ### `buyer/app/callback.py`
 
@@ -749,11 +782,11 @@ Runtime flow:
 
 | Данные | Где живут | Что содержит | Что нельзя сохранять |
 | --- | --- | --- | --- |
-| Runtime auth payload | Память `SessionStore._runtime_auth` | `TaskAuthPayload` с `storageState`. | Нельзя переносить в Postgres. |
+| Runtime auth payload | Память `SessionStore._runtime_auth` | `TaskAuthPayload` с `storageState`; пакет может прийти inline из `POST /v1/tasks` или быть получен из external cookies API и преобразован в storage state. | Нельзя переносить в Postgres или передавать через пользовательский чат. |
 | Persistent sessions | Postgres `buyer_sessions` | Статус, task, URL, callback, metadata. | Cookies/localStorage/tokens. |
 | Events | Postgres `buyer_events`, память `micro-ui`, eval `manifest.json` | Callback envelope и sanitized payload; eval manifest хранит redacted callback events. | Raw stdout/stderr/auth secrets в persistent metadata; raw callback/payment/order secrets не должны попадать в eval manifest. |
-| Agent memory | Postgres `buyer_agent_memory` | Последние сообщения для prompt context; auth-refresh replies пишутся marker-ом `[SBERID_AUTH_RECEIVED]`. | Нужно следить за утечками чувствительных данных при новых источниках. |
-| Replies | Postgres `buyer_replies` | Pending/answered/consumed ответы пользователя; auth-refresh payload сохраняется только как marker/summary. | Не предназначено для auth-payload reuse. |
+| Agent memory | Postgres `buyer_agent_memory` | Последние сообщения для prompt context; auth-пакеты не должны попадать через пользовательские replies. | Нужно следить за утечками чувствительных данных при новых источниках. |
+| Replies | Postgres `buyer_replies` | Pending/answered/consumed ответы пользователя; legacy auth-like текст дополнительно редактируется на persistence-границе. | Не предназначено для auth-payload reuse. |
 | Trace artifacts | `BUYER_TRACE_DIR` | prompts, browser actions JSONL, step trace JSON, script traces, knowledge analysis. | Knowledge analysis дополнительно редактирует auth/payment/order secrets. |
 | User profile | `BUYER_USER_INFO_PATH` | Долговременные пользовательские факты. | Auth, cookies, storageState, платежные данные, одноразовые детали заказа. |
 
@@ -764,6 +797,7 @@ Runtime flow:
 | OpenAI/Codex auth | `AgentRunner`, `PostSessionKnowledgeAnalyzer` | Запуск `codex exec`. | Нет `OPENAI_API_KEY` и `/root/.codex/auth.json`; 401; 429. |
 | Codex CLI | `AgentRunner`, analyzer | Structured agent step и post-session analysis. | `CODEX_BIN` не найден; timeout; non-zero return. |
 | browser-sidecar CDP | `cdp_tool.py`, script runners | Управление Chromium. | CDP connect/command/transient errors. |
+| External Sber cookies API | `ExternalSberCookiesClient`, `BuyerService._resolve_session_auth` | Машинная загрузка cookies через `GET /api/v1/cookies` при `SBER_AUTH_SOURCE=external_cookies_api` и отсутствии inline auth. | Timeout, HTTP/network error, invalid JSON, invalid/empty cookies payload; все переходят в `auth_external_*` reason-code и guest-flow. |
 | Postgres | `PostgresSessionRepository` | Persistent state. | Недоступная БД, pool/init/migration errors. |
 | Callback receiver | `CallbackClient` | Доставка событий в `middle`. | timeout, non-2xx, network error -> `CallbackDeliveryError`. |
 | Node.js + TSX | `SberIdScriptRunner`, `PurchaseScriptRunner` | Запуск TypeScript Playwright scripts. | Нет Node/TSX, timeout, process failed, invalid JSON. |
@@ -803,10 +837,15 @@ Runtime flow:
 
 ### Auth scripts
 
+- `auth_external_unavailable`: внешний cookies API не настроен, недоступен, вернул HTTP/network error или невалидный JSON.
+- `auth_external_timeout`: внешний cookies API не ответил в пределах timeout/retry budget.
+- `auth_external_invalid_payload`: внешний cookies API вернул JSON без валидного массива cookies или с невалидной cookie shape.
+- `auth_external_empty_payload`: внешний cookies API вернул пустой массив cookies.
+- `auth_external_loaded`: внешний cookies API успешно загружен и преобразован в `storageState`.
 - `auth_failed_payload`: битый или невалидный `storageState`.
 - `auth_failed_redirect_loop`: цикл на SberId.
 - `auth_failed_invalid_session`: нет скрипта/runtime/CDP/result или сессия не подтверждена.
-- `auth_refresh_requested`: нужен новый auth-пакет или fallback.
+- `auth_refresh_requested`: auth-скрипт запросил fallback; новый auth-пакет через reply не запрашивается.
 - `auth_ok`: auth context подготовлен.
 
 ### Purchase scripts
@@ -831,7 +870,9 @@ Runtime flow:
 | --- | --- |
 | `buyer/tests/test_persistent_state.py` | Store/repository lifecycle, restore, reply validation, redaction persistent state, stale runtime sessions. |
 | `buyer/tests/test_url_policy.py` | URL policy для `start_url`/`callback_url`, включая запрет query/fragment в callback URL и trusted allowlist. |
-| `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, redaction auth-refresh replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
+| `buyer/tests/test_auth_reply_removal.py` | MON-29 regression: inline invalid auth уходит в guest без `ask_user`, auth-script refresh/failure уходит в heuristic без запроса auth-пакета, parser reply-auth удален. |
+| `buyer/tests/test_external_auth.py` | MON-30 regression: external cookies payload validation, httpx `MockTransport`, timeout mapping, source priority inline over external и guest fallback с `auth_external_*` reason-code. |
+| `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, persistence redaction legacy auth-like replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
 | `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout; purchase runner stale output, уникальный output path и non-zero diagnostics behavior. |
 | `buyer/tests/test_knowledge_analyzer.py` | Sanitization, safe paths, trace refs, analysis payload/output. |
 | `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior и payment-boundary regression для Litres/unsupported domains. |

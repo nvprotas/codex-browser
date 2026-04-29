@@ -33,6 +33,8 @@
 | 1 | [MON-12](https://linear.app/monaco-dev/issue/MON-12/buyer-phase-1-persistent-state-na-postgres-dlya-zadach-sessij-sobytij) | Persistent state: Postgres для задач, сессий, событий и артефактов |
 | 2 | [MON-13](https://linear.app/monaco-dev/issue/MON-13/buyer-phase-1-redis-locks-i-runtime-markers) | Postgres task queue и browser-slot runtime |
 | 2.1 | [MON-27](https://linear.app/monaco-dev/issue/MON-27/buyer-phase-1-issledovanie-persistence-brauzernogo-sostoyaniya-mezhdu) | Исследование persistence браузерного состояния между рестартами |
+| 2.2 | [MON-29](https://linear.app/monaco-dev/issue/MON-29/buyer-phase-1-udalit-ruchnuyu-peredachu-auth-paketov-cherez) | Удалить ручную передачу auth-пакетов через пользовательский чат |
+| 2.3 | [MON-30](https://linear.app/monaco-dev/issue/MON-30/buyer-phase-1-external-sber-cookies-api-kak-auth-source) | External Sber cookies API как auth source |
 | 3 | [MON-14](https://linear.app/monaco-dev/issue/MON-14/buyer-phase-1-handoff-fsm) | Handoff FSM |
 | 4 | [MON-15](https://linear.app/monaco-dev/issue/MON-15/buyer-phase-1-api-upravleniya-lifecycle-sessii) | API управления lifecycle: pause, resume, abort, operator command |
 | 5 | [MON-16](https://linear.app/monaco-dev/issue/MON-16/buyer-phase-1-artifact-i-trace-manifest) | Artifact и trace manifest |
@@ -116,7 +118,7 @@
 **Value:** 4
 **Effort:** 3
 **V/E:** 1.33
-**Статус:** planned
+**Статус:** implemented in code
 **Зависимости:** задачи 1-2.
 
 **Что сделать:**
@@ -130,6 +132,59 @@
 **Value для `openclaw`:**
 
 Если сохранение браузерного состояния окажется безопасным, `openclaw` сможет продолжать часть нестабильных сценариев после рестарта без повторного прохождения логина и выбора контекста магазина. До отдельного решения текущая Postgres-задача не сохраняет browser cookies/tokens/storageState.
+
+#### 2.2. Удалить ручную передачу auth-пакетов через пользовательский чат
+
+**Value:** 5
+**Effort:** 1
+**V/E:** 5.00
+**Статус:** planned
+**Зависимости:** нет.
+**Linear:** [MON-29](https://linear.app/monaco-dev/issue/MON-29/buyer-phase-1-udalit-ruchnuyu-peredachu-auth-paketov-cherez)
+
+**Что сделать:**
+
+- Удалить UX, где `buyer` просит пользователя отправить cookies, `storageState`, localStorage, tokens или JSON auth-пакет через `ask_user`/`/v1/replies`.
+- Для невалидного inline-пакета использовать `auth_inline_invalid_payload` и не запрашивать новый auth-пакет у пользователя.
+- Если auth-пакет отсутствует или невалиден, фиксировать machine-readable reason-code в auth summary и продолжать guest-flow.
+- Если магазин дальше блокирует покупку логином, применять обычный handoff, но без передачи cookies через чат.
+- Удалить `_parse_auth_from_user_reply` и тестами закрыть, что пользовательский reply больше не является auth-source.
+- Сохранить session-bound политику: cookies/storageState не пишутся в Postgres и не восстанавливаются после рестарта.
+- Обновить тесты, OpenAPI, callback reason-коды, `docs/buyer.md`, `docs/architecture-decisions.md` и карту репозитория.
+
+**Value для `openclaw`:**
+
+Пользовательский канал останется только для решений по покупке и handoff. `buyer` перестанет просить человека вручную передавать чувствительные auth-данные в чат, а ошибки auth станут machine-readable для вызывающего агента.
+
+#### 2.3. External Sber cookies API как auth source
+
+**Value:** 5
+**Effort:** 2
+**V/E:** 2.50
+**Статус:** implemented in code
+**Зависимости:** [MON-29](https://linear.app/monaco-dev/issue/MON-29/buyer-phase-1-udalit-ruchnuyu-peredachu-auth-paketov-cherez).
+**Linear:** [MON-30](https://linear.app/monaco-dev/issue/MON-30/buyer-phase-1-external-sber-cookies-api-kak-auth-source)
+
+**Что сделать:**
+
+- Добавить config-driven external auth source для SberId cookies API:
+  - `SBER_AUTH_SOURCE=inline_only|external_cookies_api`;
+  - `SBER_COOKIES_API_URL`;
+  - `SBER_COOKIES_API_TIMEOUT_SEC`;
+  - `SBER_COOKIES_API_RETRIES`.
+- Сохранить приоритет inline `auth.storageState`: если вызывающий сервис передал пакет в `POST /v1/tasks`, внешний cookies API не вызывается.
+- Для external source вызвать `GET /api/v1/cookies`, проверить JSON, cookies, обязательные cookie-поля и преобразовать ответ в Playwright `storageState` с пустым `origins`.
+- При сбоях external source фиксировать machine-readable reason-code в auth summary и продолжать guest-flow:
+  - `auth_external_unavailable`;
+  - `auth_external_timeout`;
+  - `auth_external_invalid_payload`;
+  - `auth_external_empty_payload`.
+- Сохранить session-bound политику: cookies/storageState не пишутся в Postgres и не восстанавливаются после рестарта.
+- Добавить тесты external client, source priority, timeout/invalid/empty response.
+
+**Value для `openclaw`:**
+
+`openclaw` сможет запускать покупку без inline auth-пакета: `buyer` сам заберет cookies из настроенного внешнего сервиса, а ошибки auth будут видны как reason-коды.
 
 #### 3. Handoff FSM
 

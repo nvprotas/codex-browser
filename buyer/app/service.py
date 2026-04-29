@@ -3,24 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from ._utils import head_text as _head_text, tail_text as _tail_text
 from .auth_scripts import (
-    AUTH_FAILED_INVALID_SESSION,
-    AUTH_FAILED_PAYLOAD,
-    AUTH_FAILED_REDIRECT_LOOP,
     AUTH_OK,
-    AUTH_REFRESH_REQUESTED,
     SberIdScriptRunner,
     domain_from_url,
     is_domain_in_allowlist,
 )
 from .callback import CallbackClient, CallbackDeliveryError
+from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
-from .persistence import _sanitize_persistent_metadata, summarize_sberid_auth_reply
+from .persistence import _sanitize_persistent_metadata
 from .payment_verifier import payment_evidence_from_purchase_script, verify_completed_payment
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
@@ -54,6 +51,7 @@ class BuyerService:
         purchase_script_runner: PurchaseScriptRunner | None = None,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
         buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
+        external_auth_client: ExternalSberCookiesClient | None = None,
     ) -> None:
         self._store = store
         self._callback_client = callback_client
@@ -71,9 +69,8 @@ class BuyerService:
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
         self._buyer_user_info_path = buyer_user_info_path
-        self._sensitive_reply_kinds: dict[tuple[str, str], str] = {}
-        self._sensitive_reply_texts: dict[tuple[str, str], str] = {}
         self._callback_tokens: dict[str, str] = {}
+        self._external_auth_client = external_auth_client
 
     async def create_session(
         self,
@@ -108,16 +105,7 @@ class BuyerService:
         return await self._store.list_sessions()
 
     async def submit_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
-        sensitive_key = (session_id, reply_id)
-        message_for_storage = message
-        if self._sensitive_reply_kinds.get(sensitive_key) == 'sberid_auth':
-            self._sensitive_reply_texts[sensitive_key] = message
-            message_for_storage = summarize_sberid_auth_reply(message)
-        try:
-            return await self._store.apply_reply(session_id, reply_id, message_for_storage)
-        except Exception:
-            self._sensitive_reply_texts.pop(sensitive_key, None)
-            raise
+        return await self._store.apply_reply(session_id, reply_id, message)
 
     async def wait_for_post_session_analysis(self) -> None:
         if not self._post_session_analysis_tasks:
@@ -450,9 +438,8 @@ class BuyerService:
             'allowlist': sorted(self._sberid_allowlist),
             'script_registry': self._auth_script_runner.registry_snapshot(),
         }
-        auth = state.auth
+        auth = await self._resolve_session_auth(state, summary)
         if auth is None:
-            summary['reason_code'] = 'auth_not_provided'
             return summary
 
         provider = (auth.provider or '').strip().lower()
@@ -476,35 +463,9 @@ class BuyerService:
             summary['attempts'] = attempt
             storage_state = current_auth.storage_state
             if not _is_valid_storage_state(storage_state):
-                summary['path'] = 'script'
-                summary['reason_code'] = AUTH_FAILED_PAYLOAD
-                if attempt < max_attempts:
-                    user_reply = await self._ask_user_for_reply(
-                        state,
-                        'Нужен корректный auth-пакет SberId (JSON с storageState). Отправьте новый пакет.',
-                        reason_code=AUTH_FAILED_PAYLOAD,
-                        extra_context={
-                            'attempt': attempt,
-                            'max_attempts': max_attempts,
-                        },
-                        sensitive_reply_kind='sberid_auth',
-                        reply_memory_formatter=summarize_sberid_auth_reply,
-                    )
-                    parsed_auth = self._parse_auth_from_user_reply(user_reply)
-                    if parsed_auth is not None:
-                        current_auth = parsed_auth
-                        await self._store.set_auth(state.session_id, current_auth)
-                    else:
-                        current_auth = TaskAuthPayload(provider='sberid', storage_state=None)
-                    continue
-
-                await self._emit_handoff_and_wait(
-                    state,
-                    reason_code=AUTH_FAILED_PAYLOAD,
-                    message='Автоматический auth-пакет невалиден после повторной попытки.',
-                )
-                summary['path'] = 'handoff'
-                summary['handoff'] = True
+                summary['mode'] = 'guest'
+                summary['path'] = 'guest'
+                summary['reason_code'] = 'auth_inline_invalid_payload'
                 return summary
 
             script_result = await self._auth_script_runner.run(
@@ -524,38 +485,6 @@ class BuyerService:
                 summary['context_prepared'] = bool(last_script_artifacts.get('context_prepared_for_reuse'))
                 return summary
 
-            if (
-                attempt < max_attempts
-                and script_result.reason_code
-                in {
-                    AUTH_REFRESH_REQUESTED,
-                    AUTH_FAILED_REDIRECT_LOOP,
-                    AUTH_FAILED_INVALID_SESSION,
-                }
-            ):
-                user_reply = await self._ask_user_for_reply(
-                    state,
-                    (
-                        'SberId-авторизация не подтвердилась. '
-                        'Отправьте новый auth-пакет (JSON с storageState) для повтора.'
-                    ),
-                    reason_code=AUTH_REFRESH_REQUESTED,
-                    extra_context=_build_auth_retry_context(
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        script_result=script_result,
-                    ),
-                    sensitive_reply_kind='sberid_auth',
-                    reply_memory_formatter=summarize_sberid_auth_reply,
-                )
-                parsed_auth = self._parse_auth_from_user_reply(user_reply)
-                if parsed_auth is not None:
-                    current_auth = parsed_auth
-                    await self._store.set_auth(state.session_id, current_auth)
-                else:
-                    current_auth = TaskAuthPayload(provider='sberid', storage_state=None)
-                continue
-
             break
 
         summary['path'] = 'heuristic'
@@ -570,6 +499,28 @@ class BuyerService:
             ),
         )
         return summary
+
+    async def _resolve_session_auth(self, state: SessionState, summary: dict[str, Any]) -> TaskAuthPayload | None:
+        if state.auth is not None:
+            summary['source'] = 'inline'
+            return state.auth
+
+        if self._external_auth_client is None:
+            summary['source'] = 'none'
+            summary['reason_code'] = 'auth_not_provided'
+            return None
+
+        result = await self._external_auth_client.fetch_storage_state()
+        summary['source'] = 'external_cookies_api'
+        summary['external_auth'] = result.metadata
+        summary['reason_code'] = result.reason_code
+        if result.storage_state is None:
+            return None
+
+        auth = TaskAuthPayload(provider='sberid', storageState=result.storage_state)
+        await self._store.set_auth(state.session_id, auth)
+        state.auth = auth
+        return auth
 
     async def _run_purchase_script_flow(self, state: SessionState) -> AgentOutput | None:
         if self._purchase_script_runner is None:
@@ -668,45 +619,30 @@ class BuyerService:
         *,
         reason_code: str | None,
         extra_context: dict[str, Any] | None,
-        sensitive_reply_kind: str | None = None,
-        reply_memory_formatter: Callable[[str], str] | None = None,
     ) -> str:
         reply_id = str(uuid4())
-        sensitive_key: tuple[str, str] | None = None
-        if sensitive_reply_kind:
-            sensitive_key = (state.session_id, reply_id)
-            self._sensitive_reply_kinds[sensitive_key] = sensitive_reply_kind
-        try:
-            await self._store.set_waiting_question(state.session_id, message, reply_id)
-            refreshed_state = await self._store.get(state.session_id)
-            payload: dict[str, Any] = {
-                'message': message,
-                'reply_id': reply_id,
-            }
-            if reason_code:
-                payload['reason_code'] = reason_code
-            if extra_context:
-                payload['context'] = extra_context
-            await self._emit_event(
-                refreshed_state,
-                event_type='ask_user',
-                payload=payload,
-                idempotency_suffix=reply_id,
-            )
-            logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
+        await self._store.set_waiting_question(state.session_id, message, reply_id)
+        refreshed_state = await self._store.get(state.session_id)
+        payload: dict[str, Any] = {
+            'message': message,
+            'reply_id': reply_id,
+        }
+        if reason_code:
+            payload['reason_code'] = reason_code
+        if extra_context:
+            payload['context'] = extra_context
+        await self._emit_event(
+            refreshed_state,
+            event_type='ask_user',
+            payload=payload,
+            idempotency_suffix=reply_id,
+        )
+        logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
 
-            await refreshed_state.wake_event.wait()
-            stored_reply_text = await self._store.pop_reply(state.session_id)
-            reply_text = stored_reply_text
-            if sensitive_key is not None:
-                reply_text = self._sensitive_reply_texts.pop(sensitive_key, stored_reply_text)
-            memory_text = reply_memory_formatter(reply_text) if reply_memory_formatter is not None else stored_reply_text
-            await self._store.add_agent_memory(state.session_id, 'user', memory_text)
-            return reply_text
-        finally:
-            if sensitive_key is not None:
-                self._sensitive_reply_kinds.pop(sensitive_key, None)
-                self._sensitive_reply_texts.pop(sensitive_key, None)
+        await refreshed_state.wake_event.wait()
+        reply_text = await self._store.pop_reply(state.session_id)
+        await self._store.add_agent_memory(state.session_id, 'user', reply_text)
+        return reply_text
 
     async def _emit_handoff_and_wait(
         self,
@@ -757,29 +693,6 @@ class BuyerService:
             appended,
             self._buyer_user_info_path,
         )
-
-    @staticmethod
-    def _parse_auth_from_user_reply(raw: str) -> TaskAuthPayload | None:
-        text = (raw or '').strip()
-        if not text:
-            return None
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        candidate = payload.get('auth') if isinstance(payload.get('auth'), dict) else payload
-        if not isinstance(candidate, dict):
-            return None
-        if 'storageState' not in candidate and 'storage_state' not in candidate:
-            if isinstance(candidate.get('cookies'), list) and isinstance(candidate.get('origins'), list):
-                candidate = {'provider': 'sberid', 'storageState': candidate}
-        try:
-            auth = TaskAuthPayload.model_validate(candidate)
-        except Exception:
-            return None
-        return auth
 
     async def _emit_event(
         self,
@@ -933,17 +846,6 @@ def _artifacts_with_payment_evidence(result: AgentOutput) -> dict[str, Any]:
     if result.payment_evidence is not None:
         artifacts['payment_evidence'] = result.payment_evidence.model_dump(mode='json')
     return artifacts
-
-
-def _build_auth_retry_context(*, attempt: int, max_attempts: int, script_result: Any) -> dict[str, Any]:
-    artifacts = script_result.artifacts if isinstance(getattr(script_result, 'artifacts', None), dict) else {}
-    return {
-        'attempt': attempt,
-        'max_attempts': max_attempts,
-        'script_reason_code': getattr(script_result, 'reason_code', None),
-        'script_message': _tail_text(getattr(script_result, 'message', ''), limit=220),
-        'stderr_tail': _tail_text(str(artifacts.get('stderr_tail', '')), limit=220),
-    }
 
 
 def _build_agent_step_payload(*, step_index: int, result: AgentOutput) -> dict[str, Any]:

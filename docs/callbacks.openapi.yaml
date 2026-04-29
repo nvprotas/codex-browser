@@ -120,6 +120,12 @@ components:
         - auth_not_provided
         - auth_provider_not_supported
         - auth_domain_not_in_allowlist
+        - auth_inline_invalid_payload
+        - auth_external_unavailable
+        - auth_external_timeout
+        - auth_external_invalid_payload
+        - auth_external_empty_payload
+        - auth_external_loaded
 
     EventType:
       type: string
@@ -355,6 +361,10 @@ components:
           default: null
         artifacts:
           $ref: '#/components/schemas/JsonObject'
+          description: |
+            Артефакты сценария. При наличии auth summary поле `auth` содержит
+            только sanitized metadata, включая `source`, `reason_code` и
+            `external_auth` без cookie values.
           default: {}
       additionalProperties:
         $ref: '#/components/schemas/JsonValue'

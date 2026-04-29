@@ -278,7 +278,12 @@ components:
 
     TaskAuthPayload:
       type: object
-      description: Опциональный auth-пакет. В v1 поддерживается SberId.
+      description: |
+        Опциональный inline auth-пакет. В v1 поддерживается SberId.
+
+        Если пакет передан, он имеет приоритет над внешним cookies API,
+        настроенным через env. Пользовательские replies не используются
+        для передачи cookies, `storageState`, localStorage или tokens.
       properties:
         provider:
           type: string
