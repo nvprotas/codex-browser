@@ -1,0 +1,15 @@
+{
+  "id": "openclaw-buyer",
+  "name": "OpenClaw Buyer",
+  "description": "Skill-only extension for launching buyer tasks from OpenClaw.",
+  "version": "0.1.0",
+  "kind": "extension",
+  "skills": [
+    "skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
