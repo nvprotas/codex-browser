@@ -12,9 +12,18 @@
 - `micro-ui`: callbacks, SSE, buyer/eval UI, proxy.
 - `docs`, OpenAPI/JSON Schema, Docker/env и тесты.
 
+## Допущение о среде запуска
+
+После первичного ревью зафиксировано дополнительное допущение: система запускается на доверенной VPS. Это меняет модель угроз:
+
+- вне рассматриваемой модели: вредоносный локальный пользователь на хосте и недоверенная многопользовательская машина;
+- в рамках модели: публичная доступность портов VPS, ошибка firewall/VPN, SSRF в metadata/private network, эксфильтрация через callback receiver, утечка долговременных артефактов через backup/debug/support-выгрузки, callbacks, trace и LLM prompt.
+
+Поэтому сетевые findings ниже нужно читать условно: если порты закрыты firewall/VPN и доступны только оператору, это важная эксплуатационная мера усиления; если они доступны из интернета, это critical release blocker. Findings про долговременные секреты, payment boundary, broken contracts/tests и schema drift остаются применимыми.
+
 ## Краткий итог
 
-Текущая ветка не готова к эксплуатации за пределами локальной доверенной машины. Главные блокеры: открытые control-plane порты без auth, SSRF/эксфильтрация через `callback_url` и `start_url`, утечки `storageState`/payment/callback secrets в trace/Postgres/eval artifacts, недостаточная проверка SberPay evidence, а также сломанный eval/micro-ui reply flow.
+С учетом доверенной VPS главный риск смещается с локального недоверенного пользователя на публичный сетевой периметр, unsafe callback/start URLs, durable secrets/artifacts и корректность payment/contracts. Ветка может быть допустима только при явно зафиксированном инварианте периметра: доступ к control-plane/noVNC/CDP закрыт firewall/VPN/SSH tunnel и не публикуется в интернет. Без этого инварианта остаются критичные блокеры: открытые control-plane порты без auth, SSRF/эксфильтрация через `callback_url` и `start_url`, утечки `storageState`/payment/callback secrets в trace/Postgres/eval artifacts, недостаточная проверка SberPay evidence и сломанный eval/micro-ui reply flow.
 
 Приоритет исправлений:
 
@@ -45,15 +54,16 @@
 
 ### RB-02. Control-plane и browser-sidecar открыты без защиты
 
-**Severity:** critical
+**Severity:** critical при публичной доступности; high при закрытом firewall/VPN
 **Файлы:** `docker-compose.yml:28`, `docker-compose.yml:92`, `docker-compose.yml:110`, `browser/entrypoint.sh:43`, `browser/entrypoint.sh:55`, `browser/entrypoint.sh:69`, `browser/entrypoint.sh:79`, `buyer/app/main.py:101`
 
-**Проблема:** `buyer` (`8000`), `micro-ui` (`8080`), noVNC (`6901`) и CDP (`9223`) публикуются на все интерфейсы. API buyer не требует auth; noVNC/CDP доступны без auth; Chromium remote debugging слушает `0.0.0.0`.
+**Проблема:** `buyer` (`8000`), `micro-ui` (`8080`), noVNC (`6901`) и CDP (`9223`) публикуются на все интерфейсы. API buyer не требует auth; noVNC/CDP доступны без auth; Chromium remote debugging слушает `0.0.0.0`. Доверенная VPS снижает риск локального недоверенного пользователя, но текущий compose не фиксирует обязательное условие закрытого периметра, поэтому ошибка firewall/security group превращает это в удаленный control-plane takeover.
 
 **Доказательство:** compose использует `"8000:8000"`, `"8080:8080"`, `"6901:6901"`, `"9223:9223"`; FastAPI endpoints `/v1/tasks`, `/v1/sessions`, `/v1/replies` не имеют auth dependency; `websockify` публикует noVNC на `0.0.0.0`; CDP опубликован через Chromium/socat.
 
 **План исправления:**
 
+- Если production-инвариант: "только доверенная VPS", зафиксировать его в `README`/deployment docs/`.env.example`: доступ к `8000`, `8080`, `6901`, `9223` только через firewall/VPN/SSH tunnel.
 - По умолчанию bind host-порты только на `127.0.0.1` или убрать публикацию CDP наружу.
 - CDP оставить только во внутренней Docker-сети.
 - Добавить API token/mTLS для `/v1/*` и micro-ui callback endpoint.
@@ -62,10 +72,10 @@
 
 ### RB-03. SSRF и эксфильтрация через `callback_url` и `start_url`
 
-**Severity:** critical
+**Severity:** high; critical если task API доступен недоверенным клиентам
 **Файлы:** `buyer/app/models.py:33`, `buyer/app/models.py:35`, `buyer/app/callback.py:53`, `buyer/app/runner.py:452`, `buyer/app/prompt_builder.py:50`
 
-**Проблема:** `callback_url` и `start_url` принимаются как произвольные строки. Buyer POST-ит полный callback envelope на `callback_url`; browser/Codex flow открывает `start_url`. Это позволяет SSRF, обращение к internal/private hosts и эксфильтрацию trace/artifacts.
+**Проблема:** `callback_url` и `start_url` принимаются как произвольные строки. Buyer POST-ит полный callback envelope на `callback_url`; browser/Codex flow открывает `start_url`. Доверенная VPS снижает риск недоверенного локального caller, но не убирает SSRF при ошибке perimeter/API exposure, компрометации клиента или ошибочной задаче: запросы уходят изнутри VPS и могут достучаться до metadata/private hosts, а callback receiver получает полный envelope.
 
 **Доказательство:** `TaskCreateRequest.callback_url` и `start_url` имеют только `min_length`; `CallbackClient.deliver()` делает `httpx.post(callback_url, json=...)`; runner/CDP сбрасывает браузер на `start_url`; prompt требует первым действием `goto start_url`. Ревьюеры подтвердили acceptance для loopback/link-local style URLs.
 
@@ -78,10 +88,10 @@
 
 ### RB-04. Callback/eval secrets и raw events сохраняются и отдаются наружу
 
-**Severity:** critical
+**Severity:** high; critical при доступе третьих лиц к artifacts/API
 **Файлы:** `eval_service/app/callback_urls.py:19`, `buyer/app/persistence.py:277`, `buyer/app/main.py:149`, `eval_service/app/run_store.py:187`
 
-**Проблема:** `EVAL_CALLBACK_SECRET` передается в query string (`?token=...`), затем buyer сохраняет raw `callback_url` в `buyer_sessions.callback_url` и возвращает его через API. Eval `manifest.json` сохраняет raw callback events/idempotency/artifacts, включая order IDs, payment URLs и tokens.
+**Проблема:** `EVAL_CALLBACK_SECRET` передается в query string (`?token=...`), затем buyer сохраняет raw `callback_url` в `buyer_sessions.callback_url` и возвращает его через API. Eval `manifest.json` сохраняет raw callback events/idempotency/artifacts, включая order IDs, payment URLs и tokens. На доверенной VPS это уже не про локального атакующего по умолчанию, но остается риском durable retention: backup, debug bundle, support export, log shipping или read-only доступ к artifacts раскрывают платежные и callback-секреты.
 
 **Доказательство:** `build_buyer_callback_url()` добавляет token в URL; Postgres schema хранит `callback_url TEXT`; `_to_view()` возвращает `callback_url`; `RunStore._update_case()` кладет `callback_event` в manifest без redaction.
 
@@ -418,7 +428,7 @@
 
 ## Рекомендуемый порядок работ
 
-1. **Security patch:** закрыть порты, добавить auth, убрать arbitrary callback/start URL, убрать query token.
+1. **Security patch:** зафиксировать инвариант доверенной VPS и закрытого периметра, закрыть порты firewall/VPN/SSH tunnel, добавить auth, убрать arbitrary callback/start URL, убрать query token.
 2. **Secret redaction patch:** ephemeral auth storage, redacted auth replies, redacted Postgres/eval manifest/prompt/trace/profile updates.
 3. **Payment boundary patch:** strict evidence verifier, schema/model sync, non-Litres no-success-without-verifier.
 4. **Contract patch:** callback schema, eval ids, `ask_user.message`, eval reply body, malformed callback validation.
