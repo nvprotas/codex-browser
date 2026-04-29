@@ -3,12 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/skills/openclaw-buyer"
-DEFAULT_OPENCLAW_SKILLS_DIR="/root/.openclaw/workspace/skills"
-TARGET_BASE="${1:-${OPENCLAW_SKILLS_DIR:-$DEFAULT_OPENCLAW_SKILLS_DIR}}"
+DEFAULT_OPENCLAW_EXTENSION_DIR="${HOME:-/root}/.openclaw/extensions/openclaw-buyer"
+TARGET_BASE="${1:-${OPENCLAW_BUYER_EXTENSION_DIR:-$DEFAULT_OPENCLAW_EXTENSION_DIR}}"
+TARGET_SKILL_DIR="$TARGET_BASE/skills/openclaw-buyer"
+TARGET_AGENTS_DIR="$TARGET_BASE/agents"
 
 if [[ -z "$TARGET_BASE" ]]; then
-  echo "Usage: $0 <openclaw-skills-dir>" >&2
-  echo "Or set OPENCLAW_SKILLS_DIR=/path/to/openclaw/skills" >&2
+  echo "Usage: $0 <openclaw-buyer-extension-dir>" >&2
+  echo "Or set OPENCLAW_BUYER_EXTENSION_DIR=/path/to/openclaw-buyer" >&2
   exit 2
 fi
 
@@ -17,13 +19,9 @@ if [[ ! -f "$SOURCE_DIR/SKILL.md" ]]; then
   exit 1
 fi
 
-if [[ "$(basename "$TARGET_BASE")" == "openclaw-buyer" ]]; then
-  TARGET_DIR="$TARGET_BASE"
-else
-  TARGET_DIR="$TARGET_BASE/openclaw-buyer"
-fi
+mkdir -p "$TARGET_SKILL_DIR" "$TARGET_AGENTS_DIR"
+cp "$SOURCE_DIR/SKILL.md" "$TARGET_SKILL_DIR/SKILL.md"
+cp -R "$SOURCE_DIR/agents"/. "$TARGET_AGENTS_DIR"/
 
-mkdir -p "$TARGET_DIR"
-cp -R "$SOURCE_DIR"/. "$TARGET_DIR"/
-
-echo "Installed openclaw-buyer skill to $TARGET_DIR"
+echo "Installed openclaw-buyer extension to $TARGET_BASE"
+echo "Skill: $TARGET_SKILL_DIR/SKILL.md"

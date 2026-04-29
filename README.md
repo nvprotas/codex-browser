@@ -121,13 +121,13 @@ docker compose -f docker-compose.openclaw.yml up --build
 
 Если `middle` или cookies-сервис запущены на той же host-машине, из контейнера `buyer` можно обращаться к ним через `host.docker.internal`.
 
-Чтобы скопировать скилл для `openclaw` в целевую директорию skills:
+Чтобы скопировать extension для `openclaw` в стандартную директорию extensions:
 
 ```bash
 scripts/install-openclaw-buyer-skill.sh
 ```
 
-По умолчанию скрипт устанавливает скилл в `/root/.openclaw/workspace/skills`. Для нестандартного пути передайте директорию первым аргументом или задайте `OPENCLAW_SKILLS_DIR`.
+По умолчанию скрипт устанавливает extension в `~/.openclaw/extensions/openclaw-buyer`. Внутри него создаются `agents/openai.yaml` и `skills/openclaw-buyer/SKILL.md`, как в текущем layout OpenClaw extension на сервере. Для нестандартного пути передайте директорию первым аргументом или задайте `OPENCLAW_BUYER_EXTENSION_DIR`.
 
 Обычный локальный compose рассчитан на доверенную VPS с закрытым периметром: host-порты `5432`, `6901`, `8000`, `8080` и `8090` публикуются только на `127.0.0.1`, а CDP `9223` не публикуется на host вообще и доступен только внутри docker-сети как `http://browser:9223`.
 Не открывайте эти endpoints напрямую в интернет. Для удаленного доступа используйте VPN, SSH tunnel или reverse proxy с аутентификацией и TLS. Минимальный SSH tunnel для операторского UI и noVNC:
