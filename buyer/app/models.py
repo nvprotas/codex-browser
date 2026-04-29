@@ -67,6 +67,16 @@ class SessionReplyResponse(BaseModel):
     status: SessionStatus
 
 
+class SessionStopRequest(BaseModel):
+    reason: str | None = Field(default=None, min_length=1)
+
+
+class SessionStopResponse(BaseModel):
+    session_id: str
+    accepted: bool
+    status: SessionStatus
+
+
 class EventEnvelope(BaseModel):
     event_id: str
     session_id: str

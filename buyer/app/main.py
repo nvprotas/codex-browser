@@ -10,6 +10,8 @@ from .models import (
     SessionDetail,
     SessionReplyRequest,
     SessionReplyResponse,
+    SessionStopRequest,
+    SessionStopResponse,
     SessionView,
     TaskCreateRequest,
     TaskCreateResponse,
@@ -160,6 +162,14 @@ async def submit_reply(request: SessionReplyRequest) -> SessionReplyResponse:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return SessionReplyResponse(session_id=state.session_id, accepted=True, status=state.status)
+
+
+@app.post('/v1/sessions/{session_id}/stop', response_model=SessionStopResponse)
+async def stop_session(session_id: str, request: SessionStopRequest | None = None) -> SessionStopResponse:
+    try:
+        return await service.stop_session(session_id, reason=request.reason if request else None)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _to_view(state: SessionState) -> SessionView:

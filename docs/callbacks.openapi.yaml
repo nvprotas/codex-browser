@@ -346,6 +346,10 @@ components:
 
     ScenarioFinishedPayload:
       type: object
+      description: |
+        Финальное событие сценария. Ручная остановка активной сессии приходит
+        этим же событием со `status=failed` и
+        `reason_code=session_stopped_by_operator`.
       required:
         - status
         - message
@@ -354,6 +358,14 @@ components:
           $ref: '#/components/schemas/ScenarioStatus'
         message:
           type: string
+        reason_code:
+          type:
+            - string
+            - 'null'
+          default: null
+          description: |
+            Машинно-читаемая причина финализации. Для ручной остановки buyer
+            отправляет `session_stopped_by_operator`.
         order_id:
           type:
             - string

@@ -16,6 +16,7 @@
 - Семантика доставки: `at-least-once` с дедупликацией на стороне `middle`.
 - Профиль доставки callback: `timeout=10s`, `3 retries`, exponential backoff + jitter.
 - При исчерпании retry-бюджета событие помечается как failed и переводится в ошибку сессии.
+- Ручная остановка активной сессии выполняется через HTTP API `POST /v1/sessions/{session_id}/stop`; отдельный callback event не вводится, итог передается как `scenario_finished(status=failed, reason_code=session_stopped_by_operator)`.
 - Отдельные auth-события не добавляются; auth-статусы передаются через `scenario_finished` и через `ask_user` только для пользовательских действий без передачи auth-секретов.
 - Канонические reason-коды auth: `auth_ok`, `auth_failed_payload`, `auth_failed_redirect_loop`, `auth_failed_invalid_session`, `auth_refresh_requested`, `auth_inline_invalid_payload`, `auth_external_unavailable`, `auth_external_timeout`, `auth_external_invalid_payload`, `auth_external_empty_payload`, `auth_external_loaded`.
 
@@ -39,6 +40,7 @@
   - `max_handoff_sessions=1`
   - доменные лимиты для снижения флейков и банов.
 - После рестарта `buyer` не продолжает активный runner и не восстанавливает утраченную browser page. Сессии, потерявшие runtime browser slot, должны завершаться понятной ошибкой или требовать нового запуска.
+- Stop active-session обязан отменить runtime task и завершить активный `codex exec` subprocess через `kill()`, если агентный шаг уже запущен. Late-results от отмененного runner не должны создавать `payment_ready` или повторный `scenario_finished`.
 - Политика восстановления CDP (hotfix 2026-04-23):
   - единое окно восстановления: `CDP_RECOVERY_WINDOW_SEC=20`,
   - интервал retry: `CDP_RECOVERY_INTERVAL_MS=500`,

@@ -63,6 +63,31 @@ class _StreamingFakeProcess:
         self.returncode = -9
 
 
+class _BlockingLineReader:
+    async def readline(self) -> bytes:
+        await asyncio.Event().wait()
+        return b''
+
+
+class _CancellationBlockingProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.stdout = _BlockingLineReader()
+        self.stderr = _BlockingLineReader()
+        self.killed = False
+
+    async def wait(self) -> int:
+        await asyncio.Event().wait()
+        return self.returncode or 0
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return b'', b''
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
 class _SequenceRunner:
     def __init__(self, outputs: list[AgentOutput]) -> None:
         self._outputs = outputs
@@ -478,6 +503,51 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         trace = result.artifacts['trace']
         self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
         self.assertEqual(trace['codex_tokens_used'], 30)
+
+    async def test_run_step_cancellation_kills_codex_process(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-test',
+                buyer_model_strategy='single',
+            )
+            runner = AgentRunner(settings)
+            process = _CancellationBlockingProcess()
+            process_started = asyncio.Event()
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _CancellationBlockingProcess:
+                _ = cmd, kwargs
+                process_started.set()
+                return process
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                task = asyncio.create_task(
+                    runner.run_step(
+                        session_id='session-cancel',
+                        step_index=1,
+                        task='test-task',
+                        start_url='https://example.com',
+                        metadata={},
+                        auth=None,
+                        auth_context=None,
+                        memory=[],
+                        latest_user_reply=None,
+                    )
+                )
+                await asyncio.wait_for(process_started.wait(), timeout=1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+
+        self.assertTrue(process.killed)
 
     async def test_stream_event_delivery_failure_is_best_effort_and_saved(self) -> None:
         callback_client = _FailingStreamCallbackClient()
