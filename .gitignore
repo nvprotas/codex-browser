@@ -13,6 +13,7 @@ coverage/
 *.log
 
 .tmp/
+.worktrees/
 eval/auth-profiles.local/
 .env
 .env.local
