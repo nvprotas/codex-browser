@@ -163,7 +163,7 @@ class ExternalAuthClientTests(unittest.IsolatedAsyncioTestCase):
 
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         client = ExternalSberCookiesClient(
-            base_url='https://auth.example/',
+            base_url='https://auth.example/api/v1/cookies',
             timeout_sec=1,
             retries=0,
             http_client=http_client,

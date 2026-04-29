@@ -81,10 +81,10 @@
   - внешний cookies API, включенный через конфигурацию `buyer`.
 - Конфигурация внешнего источника:
   - `SBER_AUTH_SOURCE=inline_only|external_cookies_api` (по умолчанию `inline_only`);
-  - `SBER_COOKIES_API_URL` как base URL внешнего сервиса;
+  - `SBER_COOKIES_API_URL` как полный URL чтения внешнего сервиса;
   - `SBER_COOKIES_API_TIMEOUT_SEC` и `SBER_COOKIES_API_RETRIES`.
 - Inline `storageState` имеет приоритет: если он передан, внешний cookies API для этой сессии не вызывается.
-- Внешний cookies API читается только через `GET /api/v1/cookies`; write-path остается во внешнем auth-контуре.
+- Внешний cookies API читается через `GET` по полному URL из `SBER_COOKIES_API_URL`; write-path остается во внешнем auth-контуре.
 - Внешний cookies API отдает массив cookies; `buyer` валидирует обязательные поля cookie и преобразует payload в Playwright `storageState` с пустым `origins`.
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
 - При битом/непарсящемся inline `storageState` `buyer` фиксирует `auth_inline_invalid_payload` и не просит пользователя прислать новый auth-пакет.
