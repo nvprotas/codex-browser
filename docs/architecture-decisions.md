@@ -16,8 +16,8 @@
 - Семантика доставки: `at-least-once` с дедупликацией на стороне `middle`.
 - Профиль доставки callback: `timeout=10s`, `3 retries`, exponential backoff + jitter.
 - При исчерпании retry-бюджета событие помечается как failed и переводится в ошибку сессии.
-- Отдельные auth-события не добавляются; auth-статусы передаются через `ask_user` и `scenario_finished`.
-- Канонические reason-коды auth: `auth_ok`, `auth_failed_payload`, `auth_failed_redirect_loop`, `auth_failed_invalid_session`, `auth_refresh_requested`.
+- Отдельные auth-события не добавляются; auth-статусы передаются через `scenario_finished` и через `ask_user` только для пользовательских действий без передачи auth-секретов.
+- Канонические reason-коды auth: `auth_ok`, `auth_failed_payload`, `auth_failed_redirect_loop`, `auth_failed_invalid_session`, `auth_refresh_requested`, `auth_inline_invalid_payload`, `auth_external_unavailable`, `auth_external_timeout`, `auth_external_invalid_payload`, `auth_external_empty_payload`, `auth_external_loaded`.
 
 ## State и runtime
 
@@ -52,16 +52,21 @@
 - Охват v1: смешанный режим.
   - SberId-поддерживаемые сайты (по allowlist) используют SberId-логин.
   - Неподдерживаемые сайты используют guest-flow; при блокирующем логине включается handoff.
-- Канонический владелец auth-данных: `middle`; `openclaw` является прокси до `buyer`.
-- Передача auth-пакета: inline `storageState` в task payload.
+- Канонический владелец auth-данных: внешний auth-контур/`middle`; `openclaw` является прокси до `buyer`.
+- Источники auth-пакета: inline `storageState` в task payload или внешний cookies API, включенный через конфигурацию `buyer`.
+- Конфигурация external source: `SBER_AUTH_SOURCE=inline_only|external_cookies_api`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`; default `inline_only`.
+- Приоритет источников: inline `storageState` выше внешнего cookies API; если inline-пакет передан, внешний сервис для этой сессии не вызывается.
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
 - Сохранение browser context/storage между рестартами является отдельным открытым вопросом: до отдельного threat model и решения нельзя писать cookies, tokens, `storageState` или localStorage в долговременное хранилище.
-- Ошибка формата `storageState`: `auth_failed_payload` + `ask_user` на новый пакет.
+- Ошибка формата inline `storageState`: `auth_inline_invalid_payload` без запроса нового пакета у пользователя.
+- Внешний cookies API читается через `GET /api/v1/cookies`, возвращает cookies, которые `buyer` валидирует и преобразует в Playwright `storageState` с пустым `origins`; `POST /api/v1/cookies` остается вне ответственности `buyer`.
+- Пользовательский канал `ask_user` и `/v1/replies` нельзя использовать для запроса или передачи cookies, tokens, localStorage, `storageState` или JSON auth-пакетов.
+- Если auth-пакет не удалось получить из машинных источников, `buyer` фиксирует reason-code в auth summary и продолжает guest-flow; при блокирующем логине применяется handoff.
 - Вход через SberId: `scripts first` → эвристический fallback → handoff.
 - Опубликованные магазинные auth-скрипты SberId: `litres.ru`, `brandshop.ru`.
 - Критерий auth success: редирект обратно на магазин + маркер авторизованного состояния.
 - Redirect loop guard на `id.sber.ru`: максимум 2 цикла.
-- Retry budget auth: 1 повтор с новым auth-пакетом.
+- Retry budget auth-скрипта по умолчанию: 1 повтор; новый auth-пакет не запрашивается через пользовательский reply.
 - Для ускорения известных сценариев допускается `purchase scripts-first` после подготовки auth-контекста.
   - Охват первого шага: только `litres.ru`.
   - Успех purchase-скрипта: найден `orderId` на странице SberPay без выполнения платежа.
