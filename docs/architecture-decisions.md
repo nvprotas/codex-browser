@@ -54,12 +54,12 @@
   - Неподдерживаемые сайты используют guest-flow; при блокирующем логине включается handoff.
 - Канонический владелец auth-данных: внешний auth-контур/`middle`; `openclaw` является прокси до `buyer`.
 - Источники auth-пакета: inline `storageState` в task payload или внешний cookies API, включенный через конфигурацию `buyer`.
-- Конфигурация external source: `SBER_AUTH_SOURCE=inline_only|external_cookies_api`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`; default `inline_only`.
+- Конфигурация external source: `SBER_AUTH_SOURCE=inline_only|external_cookies_api`, полный endpoint `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`; default `inline_only`.
 - Приоритет источников: inline `storageState` выше внешнего cookies API; если inline-пакет передан, внешний сервис для этой сессии не вызывается.
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
 - Сохранение browser context/storage между рестартами является отдельным открытым вопросом: до отдельного threat model и решения нельзя писать cookies, tokens, `storageState` или localStorage в долговременное хранилище.
 - Ошибка формата inline `storageState`: `auth_inline_invalid_payload` без запроса нового пакета у пользователя.
-- Внешний cookies API читается через `GET /api/v1/cookies`, возвращает cookies, которые `buyer` валидирует и преобразует в Playwright `storageState` с пустым `origins`; `POST /api/v1/cookies` остается вне ответственности `buyer`.
+- Внешний cookies API читается через `GET` по полному URL из `SBER_COOKIES_API_URL`, возвращает cookies, которые `buyer` валидирует и преобразует в Playwright `storageState` с пустым `origins`; write-path остается вне ответственности `buyer`.
 - Пользовательский канал `ask_user` и `/v1/replies` нельзя использовать для запроса или передачи cookies, tokens, localStorage, `storageState` или JSON auth-пакетов.
 - Если auth-пакет не удалось получить из машинных источников, `buyer` фиксирует reason-code в auth summary и продолжает guest-flow; при блокирующем логине применяется handoff.
 - Вход через SberId: `scripts first` → эвристический fallback → handoff.

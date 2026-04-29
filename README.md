@@ -74,7 +74,7 @@ USER_BUYER_INFO_PATH=
 
 # Источник SberId cookies. Для развертывания рядом с openclaw включите внешний сервис.
 # SBER_AUTH_SOURCE=external_cookies_api
-# SBER_COOKIES_API_URL=http://<cookies-service-host>:<port>
+# SBER_COOKIES_API_URL=http://<cookies-service-host>:<port>/cookies
 # SBER_COOKIES_API_TIMEOUT_SEC=5
 # SBER_COOKIES_API_RETRIES=1
 
@@ -106,7 +106,7 @@ docker compose up --build
 
 ```bash
 MIDDLE_CALLBACK_URL=https://middle.example/callbacks \
-SBER_COOKIES_API_URL=http://cookies-service:8080 \
+SBER_COOKIES_API_URL=http://cookies-service:8080/cookies \
 docker compose -f docker-compose.openclaw.yml up --build
 ```
 
