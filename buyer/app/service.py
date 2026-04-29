@@ -16,7 +16,7 @@ from .auth_scripts import (
 from .callback import CallbackClient, CallbackDeliveryError
 from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
-from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
+from .models import AgentOutput, EventEnvelope, SessionStatus, SessionStopResponse, TaskAuthPayload
 from .persistence import _sanitize_persistent_metadata
 from .payment_verifier import payment_evidence_from_purchase_script, verify_completed_payment
 from .purchase_scripts import PurchaseScriptRunner
@@ -31,6 +31,9 @@ from .state import (
 from .user_profile import append_profile_updates
 
 logger = logging.getLogger('uvicorn.error')
+
+SESSION_STOPPED_REASON_CODE = 'session_stopped_by_operator'
+DEFAULT_SESSION_STOP_REASON = 'Сессия остановлена оператором.'
 
 
 class BuyerService:
@@ -106,6 +109,42 @@ class BuyerService:
 
     async def submit_reply(self, session_id: str, reply_id: str, message: str) -> SessionState:
         return await self._store.apply_reply(session_id, reply_id, message)
+
+    async def stop_session(self, session_id: str, *, reason: str | None = None) -> SessionStopResponse:
+        reason_text = reason.strip() if reason and reason.strip() else DEFAULT_SESSION_STOP_REASON
+        state = await self._store.get(session_id)
+        if state.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}:
+            return SessionStopResponse(session_id=state.session_id, accepted=False, status=state.status)
+
+        task_ref = state.task_ref
+        callback_headers = self._callback_headers_for_session(session_id)
+        stopped_state, accepted = await self._store.stop_waiting_or_running(session_id, error=reason_text)
+        if not accepted:
+            return SessionStopResponse(
+                session_id=stopped_state.session_id,
+                accepted=False,
+                status=stopped_state.status,
+            )
+
+        if task_ref is not None and not task_ref.done():
+            task_ref.cancel()
+
+        await self._emit_event(
+            stopped_state,
+            event_type='scenario_finished',
+            payload={
+                'status': 'failed',
+                'message': reason_text,
+                'reason_code': SESSION_STOPPED_REASON_CODE,
+                'artifacts': {
+                    'stop_reason': reason_text,
+                },
+            },
+            idempotency_suffix='scenario-stopped',
+            headers_override=callback_headers,
+        )
+        logger.info('session_stopped session_id=%s reason=%s', session_id, _tail_text(reason_text, limit=700))
+        return SessionStopResponse(session_id=stopped_state.session_id, accepted=True, status=stopped_state.status)
 
     async def wait_for_post_session_analysis(self) -> None:
         if not self._post_session_analysis_tasks:
@@ -187,6 +226,15 @@ class BuyerService:
                         payload,
                     ),
                 )
+                state = await self._store.get(session_id)
+                if state.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}:
+                    logger.info(
+                        'session_late_runner_result_ignored session_id=%s step=%s status=%s',
+                        session_id,
+                        step_index,
+                        state.status,
+                    )
+                    return
                 self._persist_profile_updates(session_id=session_id, step_index=step_index, updates=result.profile_updates)
                 await self._emit_event(
                     state,
@@ -701,6 +749,7 @@ class BuyerService:
         event_type: str,
         payload: dict[str, Any],
         idempotency_suffix: str | None = None,
+        headers_override: dict[str, str] | None = None,
     ) -> EventEnvelope:
         envelope = self._callback_client.build_envelope(
             session_id=state.session_id,
@@ -711,7 +760,7 @@ class BuyerService:
         )
         await self._store.append_event(state.session_id, envelope)
         try:
-            headers = self._callback_headers_for_session(state.session_id)
+            headers = headers_override if headers_override is not None else self._callback_headers_for_session(state.session_id)
             if headers:
                 await self._callback_client.deliver(state.callback_url, envelope, headers=headers)
             else:

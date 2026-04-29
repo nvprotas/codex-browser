@@ -18,6 +18,7 @@ OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.
 - HTTP старт задачи: `POST /v1/tasks`.
 - HTTP статус сессии: `GET /v1/sessions/{session_id}`.
 - HTTP ответ пользователя в сессию: `POST /v1/replies`.
+- HTTP остановка активной сессии: `POST /v1/sessions/{session_id}/stop`; `micro-ui` проксирует остановку и показывает кнопку для активных сессий.
 - Callback envelope от `buyer` в `micro-ui`.
 - Дедупликация callback-событий в `micro-ui` (`event_id` и `idempotency_key`).
 - Отдельный контейнер `browser` с noVNC + CDP (`http://browser:9223`).

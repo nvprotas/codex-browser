@@ -244,6 +244,22 @@ class SessionStore:
                 self._runtime_sessions.discard(session_id)
             return self._attach_runtime(state)
 
+    async def stop_waiting_or_running(self, session_id: str, *, error: str) -> tuple[SessionState, bool]:
+        async with self._lock:
+            state = await self._get_locked(session_id)
+            if state.status in self._TERMINAL_STATUSES:
+                return self._attach_runtime(state), False
+            state.status = SessionStatus.FAILED
+            state.last_error = error
+            state.waiting_reply_id = None
+            state.waiting_question = None
+            state.pending_reply_text = None
+            self._runtime_sessions.discard(session_id)
+            self._wake_for(session_id).set()
+            self._touch_locked(state)
+            await self._repository.update_session(state)
+            return self._attach_runtime(state), True
+
     async def set_waiting_question(self, session_id: str, question: str, reply_id: str) -> SessionState:
         async with self._lock:
             state = await self._get_locked(session_id)

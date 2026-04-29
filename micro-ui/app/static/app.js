@@ -417,6 +417,10 @@ function isWaitingSession(session) {
   return session.status === 'waiting_user' || Boolean(session.waiting_reply_id);
 }
 
+function isActiveSessionStatus(status) {
+  return ['created', 'running', 'waiting_user'].includes(String(status || '').toLowerCase());
+}
+
 function isErrorSession(session) {
   const status = String(session.status || '').toLowerCase();
   const eventType = String(session.last_event_type || '').toLowerCase();
@@ -431,9 +435,29 @@ function updateMetrics(sessions) {
   sessionsCountNode.textContent = `${sessions.length} ACTIVE`;
 }
 
+async function stopSession(session) {
+  if (!session?.session_id || !isActiveSessionStatus(session.status)) {
+    return;
+  }
+
+  statusNode.textContent = `Остановка сессии ${shortId(session.session_id)}…`;
+  await fetchJson(`/api/sessions/${encodeURIComponent(session.session_id)}/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      reason: 'Оператор остановил сценарий из micro-ui',
+    }),
+  });
+  await refreshAll();
+  statusNode.textContent = `Сессия ${shortId(session.session_id)} остановлена.`;
+}
+
 function createSessionItem(session, sessions) {
-  const item = node('button', `session-item ${session.session_id === selectedSessionId ? 'active' : ''}`);
-  item.type = 'button';
+  const item = node('div', `session-item ${session.session_id === selectedSessionId ? 'active' : ''}`);
+  const selectButton = node('button', 'session-select');
+  selectButton.type = 'button';
 
   const top = node('div', 'session-top');
   const sessionIdNode = node('span', 'code', shortId(session.session_id));
@@ -455,8 +479,8 @@ function createSessionItem(session, sessions) {
     meta('Обновлено', fmtDate(session.updated_at)),
   );
 
-  item.append(top, eventMeta, message, metaGrid);
-  item.addEventListener('click', () => {
+  selectButton.append(top, eventMeta, message, metaGrid);
+  selectButton.addEventListener('click', () => {
     selectedSessionId = session.session_id;
     selectedSession = session;
     hydrateReplyForm();
@@ -465,6 +489,18 @@ function createSessionItem(session, sessions) {
     renderSessions(sessions);
     refreshEvents().catch(showError);
   });
+
+  item.append(selectButton);
+  if (isActiveSessionStatus(session.status)) {
+    const actions = node('div', 'session-actions');
+    const stopButton = node('button', 'session-stop-button', 'Остановить');
+    stopButton.type = 'button';
+    stopButton.addEventListener('click', () => {
+      stopSession(session).catch(showError);
+    });
+    actions.append(stopButton);
+    item.append(actions);
+  }
 
   return item;
 }
