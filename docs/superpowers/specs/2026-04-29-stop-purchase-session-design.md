@@ -23,6 +23,7 @@
 - передает в payload `status: failed`, `reason_code: session_stopped_by_operator`, сообщение и артефакт с причиной остановки;
 - переводит сессию в `failed` и записывает `last_error`;
 - отменяет runtime `task_ref`;
+- если runner уже запустил `codex exec`, гарантированно завершает соответствующий OS-процесс `codex`, чтобы он больше не выполнял браузерные действия по остановленной сессии;
 - будит `waiting_user`, если сессия ждала reply;
 - освобождает active-session slot.
 
@@ -72,10 +73,17 @@ Response:
 
 `micro-ui` добавляет backend proxy endpoint `POST /api/sessions/{session_id}/stop`. Frontend показывает кнопку остановки только для активных статусов `created`, `running`, `waiting_user`. После успешного запроса UI перечитывает сессии и события обычным механизмом обновления.
 
+## Runtime cancellation
+
+Остановка должна быть сильнее обычной отмены coroutine. `BuyerService` отменяет сессионный `task_ref`, а `AgentRunner` обязан быть cancellation-aware: если отмена происходит во время `codex exec`, runner завершает subprocess через `kill()` и дожидается cleanup stdout/stderr readers. После этого остановленная сессия не должна получать новые `agent_step_finished`, `payment_ready` или успешный `scenario_finished` от старого runner.
+
+Тот же принцип применяется к текущему runtime task целиком: после принятой остановки все late-results от отмененного сценария игнорируются, а единственным финальным событием остается `scenario_finished` с `reason_code: session_stopped_by_operator`.
+
 ## Тестирование
 
 - Сервисный тест: остановка `running` сессии отправляет `scenario_finished`, переводит статус в `failed` и освобождает слот.
 - Сервисный тест: остановка `waiting_user` будит ожидающий runner и не зависает.
+- Runner-тест: отмена `AgentRunner.run_step()` во время активного `codex exec` убивает subprocess и не оставляет процесс выполнять действия после stop.
 - API-тест `buyer`: endpoint возвращает `404` для неизвестной сессии и корректный response для активной.
 - Тест `micro-ui`: proxy вызывает buyer stop endpoint и пробрасывает ответ.
 
