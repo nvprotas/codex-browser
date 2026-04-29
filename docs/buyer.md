@@ -47,13 +47,19 @@
 - Обязательные поля envelope: `event_id`, `session_id`, `event_type`, `occurred_at`, `idempotency_key`, `payload`.
 - Семантика доставки: `at-least-once`; `middle` обязан дедуплицировать события по `event_id` и/или `idempotency_key`.
 - Профиль доставки по умолчанию: `timeout=10s`, `3 retries`, exponential backoff с jitter; после исчерпания попыток событие помечается как failed и поднимается в сессионную ошибку.
-- Отдельные auth-события в v1 не вводятся; auth-статусы и причины передаются в `scenario_finished` и `ask_user`.
+- Отдельные auth-события в v1 не вводятся; auth-статусы и причины передаются в `scenario_finished` и, только для пользовательских действий без auth-секретов, в `ask_user`.
 - Канонические reason-коды auth:
   - `auth_ok`
   - `auth_failed_payload`
   - `auth_failed_redirect_loop`
   - `auth_failed_invalid_session`
   - `auth_refresh_requested`
+  - `auth_inline_invalid_payload`
+  - `auth_external_unavailable`
+  - `auth_external_timeout`
+  - `auth_external_invalid_payload`
+  - `auth_external_empty_payload`
+  - `auth_external_loaded`
 
 ## Persistent State
 
@@ -69,19 +75,27 @@
   - На поддерживаемых SberId-сайтах — авторизация через SberId.
   - На неподдерживаемых — guest-flow; если логин становится блокирующим, `buyer` переводит сценарий в handoff.
 - Поддерживаемые SberId-сайты определяются через allowlist доменов.
-- Владение auth-данными: `middle` является каноническим владельцем, `openclaw` работает как прокси при доставке задачи в `buyer`.
-- Формат передачи auth-пакета: inline `storageState` в task payload.
+- Владение auth-данными: внешний auth-контур/`middle` является каноническим владельцем, `openclaw` работает как прокси при доставке задачи в `buyer`.
+- Источники auth-пакета:
+  - inline `storageState` в task payload;
+  - внешний cookies API, включенный через конфигурацию `buyer`.
+- Конфигурация внешнего источника:
+  - `SBER_AUTH_SOURCE=inline_only|external_cookies_api` (по умолчанию `inline_only`);
+  - `SBER_COOKIES_API_URL` как base URL внешнего сервиса;
+  - `SBER_COOKIES_API_TIMEOUT_SEC` и `SBER_COOKIES_API_RETRIES`.
+- Inline `storageState` имеет приоритет: если он передан, внешний cookies API для этой сессии не вызывается.
+- Внешний cookies API читается только через `GET /api/v1/cookies`; write-path остается во внешнем auth-контуре.
+- Внешний cookies API отдает массив cookies; `buyer` валидирует обязательные поля cookie и преобразует payload в Playwright `storageState` с пустым `origins`.
 - Жизненный цикл auth-пакета: только в памяти текущей сессии (`session-bound`), без постоянного хранения и reuse между сессиями.
-- При битом/непарсящемся `storageState`:
-  - `buyer` фиксирует `auth_failed_payload`,
-  - отправляет `ask_user`,
-  - запрашивает новый auth-пакет.
+- При битом/непарсящемся inline `storageState` `buyer` фиксирует `auth_inline_invalid_payload` и не просит пользователя прислать новый auth-пакет.
+- Если внешний cookies API недоступен, вернул timeout, пустой или невалидный payload, `buyer` фиксирует соответствующий `auth_external_*` reason-code и продолжает guest-flow.
+- `ask_user` и `/v1/replies` нельзя использовать для запроса или передачи cookies, Playwright `storageState`, localStorage, tokens или JSON auth-пакетов.
 - Стратегия входа через SberId: сначала магазинные скрипты, затем эвристический fallback, затем handoff.
 - Успех авторизации через SberId фиксируется при двух условиях:
   - произошел редирект обратно на домен магазина,
   - найден маркер авторизованного состояния на сайте.
 - Ограничение redirect-loop при `id.sber.ru`: максимум 2 полных цикла; дальше фиксируется `auth_failed_redirect_loop`.
-- Бюджет повторов auth: 1 повторный цикл с новым auth-пакетом, далее эскалация в handoff/остановка сценария.
+- Бюджет повторов auth применяется только к машинным источникам и auth-скриптам; новый auth-пакет не запрашивается через пользовательский reply.
 - Проверка соответствия аккаунта пользователя после логина в v1 не выполняется.
 - Фильтрация входящего `storageState` по доменам в v1 не выполняется.
 
