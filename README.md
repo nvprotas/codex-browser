@@ -72,6 +72,12 @@ USER_BUYER_INFO_PATH=
 # SBERID_ALLOWLIST=litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv
 # SBERID_AUTH_RETRY_BUDGET=1
 
+# Источник SberId cookies. Для развертывания рядом с openclaw включите внешний сервис.
+# SBER_AUTH_SOURCE=external_cookies_api
+# SBER_COOKIES_API_URL=http://<cookies-service-host>:<port>
+# SBER_COOKIES_API_TIMEOUT_SEC=5
+# SBER_COOKIES_API_RETRIES=1
+
 # Параметры запуска TS auth-скриптов
 # AUTH_SCRIPTS_DIR=/app/scripts
 # AUTH_SCRIPT_TIMEOUT_SEC=90
@@ -96,7 +102,25 @@ USER_BUYER_INFO_PATH=
 docker compose up --build
 ```
 
-По умолчанию compose рассчитан на доверенную VPS с закрытым периметром: host-порты `5432`, `6901`, `8000`, `8080` и `8090` публикуются только на `127.0.0.1`, а CDP `9223` не публикуется на host вообще и доступен только внутри docker-сети как `http://browser:9223`.
+Для развертывания рядом с `openclaw` без eval-сервиса и временного `micro-ui` используйте отдельный compose-файл. Он поднимает только `postgres`, `browser` и `buyer`; callbacks уходят во внешний `middle` по `MIDDLE_CALLBACK_URL`.
+
+```bash
+MIDDLE_CALLBACK_URL=https://middle.example/callbacks \
+SBER_COOKIES_API_URL=http://cookies-service:8080 \
+docker compose -f docker-compose.openclaw.yml up --build
+```
+
+Если `middle` или cookies-сервис запущены на той же host-машине, из контейнера `buyer` можно обращаться к ним через `host.docker.internal`.
+
+Чтобы скопировать скилл для `openclaw` в целевую директорию skills:
+
+```bash
+scripts/install-openclaw-buyer-skill.sh
+```
+
+По умолчанию скрипт устанавливает скилл в `/root/.openclaw/workspace/skills`. Для нестандартного пути передайте директорию первым аргументом или задайте `OPENCLAW_SKILLS_DIR`.
+
+Обычный локальный compose рассчитан на доверенную VPS с закрытым периметром: host-порты `5432`, `6901`, `8000`, `8080` и `8090` публикуются только на `127.0.0.1`, а CDP `9223` не публикуется на host вообще и доступен только внутри docker-сети как `http://browser:9223`.
 Не открывайте эти endpoints напрямую в интернет. Для удаленного доступа используйте VPN, SSH tunnel или reverse proxy с аутентификацией и TLS. Минимальный SSH tunnel для операторского UI и noVNC:
 
 ```bash
@@ -115,6 +139,12 @@ ssh -L 8080:127.0.0.1:8080 \
 - `eval_service`: `http://localhost:8090` (loopback host или SSH tunnel)
 - CDP endpoint sidecar: только внутри docker-сети, `http://browser:9223`
 
+В `docker-compose.openclaw.yml` доступны только:
+
+- `buyer` API: `http://localhost:${BUYER_PORT:-8000}`
+- noVNC: `http://localhost:${NOVNC_PORT:-6901}/vnc.html?autoconnect=1&resize=scale`
+- Postgres: `localhost:${POSTGRES_PORT:-5432}` для локальной диагностики
+
 ## Пример сценария
 
 1. `openclaw` запускает задачу:
@@ -125,13 +155,6 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
   -d '{
     "task": "Открой сайт и подготовь путь до шага оплаты без реального платежа",
     "start_url": "https://www.litres.ru/",
-    "auth": {
-      "provider": "sberid",
-      "storageState": {
-        "cookies": [],
-        "origins": []
-      }
-    },
     "metadata": {
       "budget": 2500,
       "city": "Москва"
@@ -141,7 +164,7 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
 
 2. `buyer` отправляет callbacks в `micro-ui` (`/callbacks`), в панели появляются события.
 
-3. В `micro-ui` форму запуска задачи можно передавать `auth` JSON (опционально), чтобы запускать SberId-flow без `curl`.
+3. В `micro-ui` форму запуска задачи можно использовать для ручной отладки. Auth JSON через UI/чат передавать не нужно: при `SBER_AUTH_SOURCE=external_cookies_api` cookies берутся из внешнего сервиса.
 
 4. Если приходит `ask_user`, оператор в `micro-ui` вводит ответ. Панель отправляет его в `buyer` как:
 
