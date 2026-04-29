@@ -9,7 +9,7 @@ services:
     volumes:
       - buyer-postgres-data:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-buyer} -d ${POSTGRES_DB:-buyer}"]
       interval: 5s
@@ -23,10 +23,10 @@ services:
       dockerfile: browser/Dockerfile
     restart: unless-stopped
     environment:
-      SCREEN_WIDTH: "1440"
-      SCREEN_HEIGHT: "900"
+      SCREEN_WIDTH: ${SCREEN_WIDTH:-1440}
+      SCREEN_HEIGHT: ${SCREEN_HEIGHT:-900}
     ports:
-      - "127.0.0.1:6901:6901"
+      - "${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}:6901"
     shm_size: 2gb
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9223/json/version || exit 1"]
@@ -39,14 +39,15 @@ services:
     build:
       context: .
       dockerfile: buyer/Dockerfile
+    restart: unless-stopped
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
       CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}
       BUYER_USER_INFO_PATH: /run/buyer/user-buyer-info.md
-      MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
-      NOVNC_PUBLIC_URL: http://localhost:6901/vnc.html?autoconnect=1&resize=scale
+      MIDDLE_CALLBACK_URL: ${MIDDLE_CALLBACK_URL:?set MIDDLE_CALLBACK_URL}
+      NOVNC_PUBLIC_URL: ${NOVNC_PUBLIC_URL:-http://localhost:6901/vnc.html?autoconnect=1&resize=scale}
       BROWSER_CDP_ENDPOINT: http://browser:9223
       CDP_RECOVERY_WINDOW_SEC: ${CDP_RECOVERY_WINDOW_SEC:-20}
       CDP_RECOVERY_INTERVAL_MS: ${CDP_RECOVERY_INTERVAL_MS:-500}
@@ -67,8 +68,8 @@ services:
       BUYER_BROWSER_ACTIONS_TAIL: ${BUYER_BROWSER_ACTIONS_TAIL:-40}
       SBERID_ALLOWLIST: ${SBERID_ALLOWLIST:-litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv}
       SBERID_AUTH_RETRY_BUDGET: ${SBERID_AUTH_RETRY_BUDGET:-1}
-      SBER_AUTH_SOURCE: ${SBER_AUTH_SOURCE:-inline_only}
-      SBER_COOKIES_API_URL: ${SBER_COOKIES_API_URL:-}
+      SBER_AUTH_SOURCE: ${SBER_AUTH_SOURCE:-external_cookies_api}
+      SBER_COOKIES_API_URL: ${SBER_COOKIES_API_URL:?set SBER_COOKIES_API_URL}
       SBER_COOKIES_API_TIMEOUT_SEC: ${SBER_COOKIES_API_TIMEOUT_SEC:-5}
       SBER_COOKIES_API_RETRIES: ${SBER_COOKIES_API_RETRIES:-1}
       AUTH_SCRIPTS_DIR: ${AUTH_SCRIPTS_DIR:-/app/scripts}
@@ -79,10 +80,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://buyer:buyer@postgres:5432/buyer}
       POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
       POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-5}
-      CALLBACK_RETRIES: "3"
-      CALLBACK_TIMEOUT_SEC: "10"
-      TRUSTED_CALLBACK_URLS: ${TRUSTED_CALLBACK_URLS:-http://eval_service:8090/callbacks/buyer}
-      MAX_ACTIVE_SESSIONS: "1"
+      CALLBACK_RETRIES: ${CALLBACK_RETRIES:-3}
+      CALLBACK_TIMEOUT_SEC: ${CALLBACK_TIMEOUT_SEC:-10}
+      TRUSTED_CALLBACK_URLS: ${TRUSTED_CALLBACK_URLS:-}
+      MAX_ACTIVE_SESSIONS: ${MAX_ACTIVE_SESSIONS:-1}
     volumes:
       - ./:/workspace
       - type: bind
@@ -93,66 +94,15 @@ services:
         source: ${USER_BUYER_INFO_PATH:-./buyer/docker/user-buyer-info.placeholder.md}
         target: /run/buyer/user-buyer-info.md
         read_only: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}:8000"
     depends_on:
-      micro-ui:
-        condition: service_started
       postgres:
         condition: service_healthy
       browser:
         condition: service_healthy
 
-  micro-ui:
-    build:
-      context: .
-      dockerfile: micro-ui/Dockerfile
-    environment:
-      BUYER_BASE_URL: http://buyer:8000
-      EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
-      UI_POLL_INTERVAL_SEC: "3"
-    ports:
-      - "127.0.0.1:8080:8080"
-
-  eval_service:
-    build:
-      context: .
-      dockerfile: eval_service/Dockerfile
-    environment:
-      BUYER_API_BASE_URL: ${BUYER_API_BASE_URL:-http://buyer:8000}
-      BUYER_TRACE_DIR: ${BUYER_TRACE_DIR:-/workspace/.tmp/buyer-observability}
-      EVAL_RUNS_DIR: ${EVAL_RUNS_DIR:-/workspace/eval/runs}
-      EVAL_CASES_DIR: ${EVAL_CASES_DIR:-/workspace/eval/cases}
-      EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
-      EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-gpt-5.5}
-      EVAL_BASELINE_WINDOW: ${EVAL_BASELINE_WINDOW:-5}
-      EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}
-      EVAL_CALLBACK_SECRET: ${EVAL_CALLBACK_SECRET:?set EVAL_CALLBACK_SECRET}
-      EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
-    volumes:
-      - ./:/workspace
-      - type: volume
-        source: eval-auth-profiles
-        target: /run/eval/auth-profiles
-        read_only: true
-    ports:
-      - "127.0.0.1:8090:8090"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
 volumes:
   buyer-postgres-data:
-  eval-auth-profiles:
