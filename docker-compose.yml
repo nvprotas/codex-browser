@@ -134,8 +134,8 @@ services:
       OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
     volumes:
       - ./:/workspace
-      - type: volume
-        source: eval-auth-profiles
+      - type: bind
+        source: ${EVAL_AUTH_PROFILES_HOST_DIR:-./eval/auth-profiles.local}
         target: /run/eval/auth-profiles
         read_only: true
     ports:
@@ -155,4 +155,3 @@ services:
 
 volumes:
   buyer-postgres-data:
-  eval-auth-profiles:

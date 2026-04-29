@@ -215,6 +215,28 @@
     };
   }
 
+  function runTimestamp(run) {
+    const raw = run?.updated_at || run?.created_at || '';
+    const value = Date.parse(raw);
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function latestRun(runs) {
+    return asArray(runs)
+      .slice()
+      .sort((left, right) => runTimestamp(right) - runTimestamp(left))[0] || null;
+  }
+
+  async function loadLatestRun() {
+    const data = await evalRequest(CONTRACT_PATHS.runs);
+    const run = latestRun(extractList(data, ['runs', 'items']));
+    if (!run?.eval_run_id) {
+      return null;
+    }
+    await loadRunDetail(run.eval_run_id);
+    return state.activeRun;
+  }
+
   function extractEvaluations(data) {
     return extractList(data, ['evaluations', 'results', 'items']);
   }
@@ -730,6 +752,7 @@
     try {
       state.cases = extractList(await evalRequest(CONTRACT_PATHS.cases), ['cases', 'items']);
       renderCases();
+      await loadLatestRun();
       await loadDashboards();
       renderAll();
     } catch (error) {

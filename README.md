@@ -98,6 +98,15 @@ USER_BUYER_INFO_PATH=
 `buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
 Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
+Auth-профили для `eval_service` монтируются из host-директории `EVAL_AUTH_PROFILES_HOST_DIR` в `/run/eval/auth-profiles`.
+Имя файла совпадает с `auth_profile` в `eval/cases/*.yaml` плюс расширение `.json`: для текущего Litres-кейса нужен `litres_sberid.json`.
+Например:
+
+```bash
+mkdir -p /Users/nikolay/Desktop/eval-auth-profiles
+cp /Users/nikolay/Desktop/sber-cookies.json /Users/nikolay/Desktop/eval-auth-profiles/litres_sberid.json
+```
+
 ```bash
 docker compose up --build
 ```

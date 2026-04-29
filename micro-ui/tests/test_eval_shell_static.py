@@ -126,6 +126,21 @@ class EvalShellStaticTests(unittest.TestCase):
         self.assertIn('normalizeRunCase', script)
         self.assertGreaterEqual(script.count('await loadRunDetail'), 2)
 
+    def test_eval_js_loads_latest_run_on_initial_render(self) -> None:
+        script = _static_file('eval.js')
+
+        expected_fragments = [
+            'function latestRun',
+            'async function loadLatestRun',
+            'CONTRACT_PATHS.runs',
+            'await loadLatestRun();',
+            'run?.eval_run_id',
+        ]
+
+        for fragment in expected_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+
     def test_eval_js_reply_payload_does_not_send_session_id(self) -> None:
         script = _static_file('eval.js')
         handler = script[
