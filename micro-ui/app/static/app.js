@@ -5,9 +5,7 @@ const sessionsCountNode = document.getElementById('sessions-count');
 const eventsNode = document.getElementById('events-list');
 const eventsEmptyNode = document.getElementById('events-empty');
 const eventsCountNode = document.getElementById('events-count');
-const streamNode = document.getElementById('stream-list');
-const streamEmptyNode = document.getElementById('stream-empty');
-const streamCountNode = document.getElementById('stream-count');
+const eventTypeFiltersNode = document.getElementById('event-type-filters');
 const noVncFrame = document.getElementById('novnc-frame');
 const noVncSessionLabel = document.getElementById('novnc-session-label');
 const noVncPlaceholderNode = document.getElementById('novnc-placeholder');
@@ -38,9 +36,22 @@ const agentQuestionOptionsNode = document.getElementById('agent-question-options
 const replyEmptyNode = document.getElementById('reply-empty');
 const replyStateBadgeNode = document.getElementById('reply-state-badge');
 
+const KNOWN_EVENT_TYPES = [
+  'session_started',
+  'agent_step_started',
+  'agent_stream_event',
+  'agent_step_finished',
+  'ask_user',
+  'handoff_requested',
+  'handoff_resumed',
+  'payment_ready',
+  'scenario_finished',
+];
+
 let selectedSessionId = null;
 let selectedSession = null;
 let pendingSessionSelectionId = null;
+let selectedEventTypeFilters = new Set(KNOWN_EVENT_TYPES);
 let selectedEvents = [];
 let seenEventIds = new Set();
 let eventSource = null;
@@ -547,31 +558,75 @@ function createStreamItem(event) {
   return item;
 }
 
-function renderLiveEvents(events) {
-  const streamEvents = events.filter((event) => event.event_type === 'agent_stream_event');
-  streamNode.replaceChildren();
-  streamCountNode.textContent = `${streamEvents.length} STREAM EVENTS`;
-  streamEmptyNode.textContent = selectedSessionId ? 'Пока нет live-событий.' : 'Выберите сессию.';
-  streamEmptyNode.style.display = streamEvents.length ? 'none' : 'block';
+function eventTypeFilterValues(events) {
+  const actualTypes = events.map((event) => event.event_type).filter(Boolean);
+  return [...new Set([...KNOWN_EVENT_TYPES, ...actualTypes])];
+}
 
-  for (const event of streamEvents.slice(-80)) {
-    streamNode.appendChild(createStreamItem(event));
+function filterEventsByType(events) {
+  return events.filter((event) => selectedEventTypeFilters.has(event.event_type));
+}
+
+function ensureKnownEventTypeFilters(types) {
+  for (const type of types) {
+    if (!KNOWN_EVENT_TYPES.includes(type) && !selectedEventTypeFilters.has(type)) {
+      selectedEventTypeFilters.add(type);
+    }
   }
+}
+
+function renderEventTypeFilters(events) {
+  const filterTypes = eventTypeFilterValues(events);
+  ensureKnownEventTypeFilters(filterTypes);
+
+  const counts = new Map();
+  for (const event of events) {
+    counts.set(event.event_type, (counts.get(event.event_type) || 0) + 1);
+  }
+
+  eventTypeFiltersNode.replaceChildren();
+  for (const type of filterTypes) {
+    const count = counts.get(type) || 0;
+    const active = selectedEventTypeFilters.has(type);
+    const button = node('button', `event-type-filter ${active ? 'active' : ''}`);
+    button.type = 'button';
+    button.textContent = `${type} · ${count}`;
+    button.setAttribute('aria-pressed', String(active));
+    button.addEventListener('click', () => {
+      if (selectedEventTypeFilters.has(type)) {
+        selectedEventTypeFilters.delete(type);
+      } else {
+        selectedEventTypeFilters.add(type);
+      }
+      renderEvents(selectedEvents);
+    });
+    eventTypeFiltersNode.append(button);
+  }
+}
+
+function emptyEventsMessage(events) {
+  if (!selectedSessionId) {
+    return 'Выберите сессию.';
+  }
+  if (!events.length) {
+    return 'Пока нет событий в сессии.';
+  }
+  return 'Нет событий выбранных типов.';
 }
 
 function renderEvents(events) {
   selectedEvents = events;
   seenEventIds = new Set(events.map((event) => event.event_id).filter(Boolean));
+  const filteredEvents = filterEventsByType(events);
   eventsNode.replaceChildren();
-  eventsCountNode.textContent = `${events.length} EVENTS`;
-  eventsEmptyNode.textContent = selectedSessionId ? 'Пока нет событий в сессии.' : 'Выберите сессию.';
-  eventsEmptyNode.style.display = events.length ? 'none' : 'block';
+  eventsCountNode.textContent = `${filteredEvents.length}/${events.length} EVENTS`;
+  eventsEmptyNode.textContent = emptyEventsMessage(events);
+  eventsEmptyNode.style.display = filteredEvents.length ? 'none' : 'block';
+  renderEventTypeFilters(events);
 
-  for (const event of events) {
-    eventsNode.appendChild(createEventItem(event));
+  for (const event of filteredEvents) {
+    eventsNode.appendChild(event.event_type === 'agent_stream_event' ? createStreamItem(event) : createEventItem(event));
   }
-
-  renderLiveEvents(events);
 
   setNoVncUrl(selectedSession?.novnc_url);
   setNoVncLabel(selectedSession);
@@ -694,11 +749,13 @@ async function refreshSessions() {
 
 async function refreshEvents() {
   if (!selectedSessionId) {
+    selectedEvents = [];
+    seenEventIds = new Set();
     eventsNode.replaceChildren();
     eventsCountNode.textContent = '0 EVENTS';
     eventsEmptyNode.textContent = 'Выберите сессию.';
     eventsEmptyNode.style.display = 'block';
-    renderLiveEvents([]);
+    renderEventTypeFilters([]);
     return;
   }
 

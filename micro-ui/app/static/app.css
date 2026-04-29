@@ -255,7 +255,8 @@ input,
 
 .workspace,
 .telemetry-grid,
-.stream-row {
+.sessions-row,
+.events-row {
   display: grid;
   gap: 18px;
   min-width: 0;
@@ -271,18 +272,19 @@ input,
   width: 100%;
 }
 
+.sessions-row,
+.events-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .telemetry-grid.two > .panel {
   width: 100%;
   min-width: 0;
   justify-self: stretch;
 }
 
-.telemetry-grid.two .sessions-list {
+.sessions-row .sessions-list {
   max-height: 560px;
-}
-
-.stream-row {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .stack {
@@ -708,10 +710,45 @@ input[readonly] {
   scrollbar-color: rgba(88, 104, 122, 0.42) transparent;
 }
 
-.events-list,
-.stream-list {
+.event-type-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 12px;
+  min-width: 0;
+}
+
+.event-type-filter {
+  appearance: none;
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  padding: 5px 9px;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.event-type-filter:hover,
+.event-type-filter.active {
+  border-color: rgba(255, 107, 45, 0.62);
+  background: var(--panel-active);
+  color: var(--accent-strong);
+}
+
+.events-list {
   display: grid;
   gap: 10px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-color: rgba(88, 104, 122, 0.42) transparent;
 }
 
 .session-item,
