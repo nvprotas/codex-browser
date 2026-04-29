@@ -144,11 +144,51 @@ def test_append_callback_event_tracks_event_and_optional_case_fields(tmp_path: P
     assert case.state == CaseRunState.WAITING_USER
     assert case.session_id == 'session-123'
     assert case.waiting_reply_id == 'reply-42'
-    assert case.callback_events == [event]
+    assert len(case.callback_events) == 1
+    assert case.callback_events[0].event_id == event.event_id
+    assert case.callback_events[0].idempotency_key.startswith('sha256:')
+    assert case.callback_events[0].idempotency_key != event.idempotency_key
+    assert case.callback_events[0].payload == {'reply_id': 'reply-42', 'question': 'Подтвердить размер?'}
     stored = json.loads(
         (tmp_path / 'eval-20260428-120000' / 'manifest.json').read_text(encoding='utf-8')
     )
     assert stored['cases'][0]['callback_events'][0]['event_type'] == 'ask_user'
+    assert stored['cases'][0]['callback_events'][0]['idempotency_key'].startswith('sha256:')
+
+
+def test_append_callback_event_redacts_payment_and_callback_secrets_on_disk(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+    store.create_run('eval-20260428-120000', cases=[_case()])
+    event = BuyerCallbackEnvelope(
+        event_id='event-payment-ready',
+        session_id='session-123',
+        event_type=CallbackEventType.PAYMENT_READY,
+        occurred_at=datetime(2026, 4, 28, 12, 0, tzinfo=UTC),
+        idempotency_key='sha256:ORDER-999-secret',
+        payload={
+            'order_id': 'ORDER-999',
+            'message': (
+                'Payment token=payment-token-secret order_id=ORDER-999 '
+                'url=https://pay.example/sberpay/order/ORDER-999?token=payment-token-secret'
+            ),
+            'payment_url': 'https://pay.example/sberpay/order/ORDER-999?token=payment-token-secret',
+            'callback_url': 'http://eval.test/callbacks/buyer?token=callback-secret',
+        },
+    )
+
+    store.append_callback_event('eval-20260428-120000', 'litres_book_odyssey_001', event)
+
+    manifest_text = store.manifest_path('eval-20260428-120000').read_text(encoding='utf-8')
+    stored_event = json.loads(manifest_text)['cases'][0]['callback_events'][0]
+    assert stored_event['idempotency_key'].startswith('sha256:')
+    assert stored_event['payload'] == {
+        'message': 'Payment token=[redacted] order_id=[redacted] url=[redacted-payment-url]',
+        'callback_url': 'http://eval.test/callbacks/buyer?token=[redacted]',
+    }
+    assert 'sha256:ORDER-999-secret' not in manifest_text
+    assert 'ORDER-999' not in manifest_text
+    assert 'payment-token-secret' not in manifest_text
+    assert 'callback-secret' not in manifest_text
 
 
 def test_concurrent_case_updates_and_callback_events_do_not_lose_updates(tmp_path: Path) -> None:
@@ -222,7 +262,9 @@ def test_append_callback_event_is_idempotent_under_concurrency(tmp_path: Path) -
             future.result()
 
     case = store.read_manifest('eval-20260428-120000').cases[0]
-    assert case.callback_events == [event]
+    assert len(case.callback_events) == 1
+    assert case.callback_events[0].event_id == event.event_id
+    assert case.callback_events[0].idempotency_key.startswith('sha256:')
 
 
 def test_write_summary_persists_supplied_aggregate_and_updates_manifest(tmp_path: Path) -> None:

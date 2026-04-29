@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import Field
 
 from eval_service.app.buyer_client import BuyerClient
-from eval_service.app.callback_urls import build_buyer_callback_url
+from eval_service.app.callback_urls import build_buyer_callback_token, build_buyer_callback_url
 from eval_service.app.models import (
     BuyerCallbackEnvelope,
     CallbackEventType,
@@ -60,6 +60,7 @@ async def receive_buyer_callback(
         manifest = store.read_manifest(eval_run_id)
         case = _find_case(manifest.cases, eval_case_id)
         _validate_callback_session(case, envelope)
+        _validate_callback_payload(envelope)
         envelope = envelope.model_copy(update={'eval_run_id': eval_run_id, 'eval_case_id': eval_case_id})
         manifest = store.append_callback_event(
             eval_run_id,
@@ -203,6 +204,7 @@ async def _schedule_orchestrator_resume(request: Request, eval_run_id: str, eval
         eval_run_id=eval_run_id,
         eval_case_id=eval_case_id,
         callback_url=build_buyer_callback_url(request),
+        callback_token=build_buyer_callback_token(request),
     )
     scheduler = getattr(request.app.state, 'orchestrator_resume_scheduler', None)
     if scheduler is not None:
@@ -230,6 +232,13 @@ def _state_updates_for_callback(envelope: BuyerCallbackEnvelope, case: EvalRunCa
             'state': CaseRunState.WAITING_USER,
             'waiting_reply_id': _payload_string(envelope, 'reply_id'),
         }
+    if envelope.event_type in {CallbackEventType.AGENT_STEP_STARTED, CallbackEventType.HANDOFF_RESUMED}:
+        if case.state == CaseRunState.WAITING_USER or case.waiting_reply_id is not None:
+            return {
+                'state': CaseRunState.RUNNING,
+                'waiting_reply_id': None,
+            }
+        return {}
     if envelope.event_type == CallbackEventType.PAYMENT_READY:
         return {
             'state': CaseRunState.PAYMENT_READY,
@@ -331,6 +340,21 @@ def _payload_status(envelope: BuyerCallbackEnvelope) -> str | None:
     if isinstance(status_value, str) and status_value:
         return status_value.strip().lower()
     return None
+
+
+def _validate_callback_payload(envelope: BuyerCallbackEnvelope) -> None:
+    if envelope.event_type == CallbackEventType.PAYMENT_READY:
+        _payload_string(envelope, 'order_id')
+        _payload_string(envelope, 'message')
+        return
+    if envelope.event_type == CallbackEventType.SCENARIO_FINISHED:
+        scenario_status = _payload_status(envelope)
+        if scenario_status not in {'completed', 'failed'}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail='callback scenario_finished должен содержать payload.status=completed|failed',
+            )
+        _payload_string(envelope, 'message')
 
 
 def _scenario_failure_error(envelope: BuyerCallbackEnvelope) -> str:

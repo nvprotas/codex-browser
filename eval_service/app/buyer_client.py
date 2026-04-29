@@ -24,6 +24,7 @@ class BuyerTaskCreateRequest(BaseModel):
     start_url: str = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
     callback_url: str | None = None
+    callback_token: str | None = Field(default=None, min_length=1)
     auth: BuyerTaskAuthPayload | None = None
 
 
@@ -88,6 +89,7 @@ class BuyerClient:
         start_url: str,
         metadata: dict[str, Any] | None = None,
         callback_url: str | None = None,
+        callback_token: str | None = None,
         storage_state: dict[str, Any] | None = None,
     ) -> BuyerTaskCreateResponse:
         request = BuyerTaskCreateRequest(
@@ -95,6 +97,7 @@ class BuyerClient:
             start_url=start_url,
             metadata=metadata or {},
             callback_url=callback_url,
+            callback_token=callback_token,
             auth=BuyerTaskAuthPayload(storage_state=storage_state) if storage_state is not None else None,
         )
         response = await self._client.post(

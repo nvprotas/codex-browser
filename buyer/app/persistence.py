@@ -354,7 +354,7 @@ async def _sync_session_related(conn: asyncpg.Connection, state: SessionState) -
                     state.session_id,
                     index,
                     str(item.get('role', '')),
-                    str(item.get('text', '')),
+                    _sanitize_reply_or_memory_text(str(item.get('text', ''))),
                 )
                 for index, item in enumerate(state.agent_memory)
             ],
@@ -391,7 +391,7 @@ async def _sync_session_related(conn: asyncpg.Connection, state: SessionState) -
             )
             """,
             state.session_id,
-            state.pending_reply_text,
+            _sanitize_reply_or_memory_text(state.pending_reply_text),
             state.updated_at,
         )
     else:
@@ -590,6 +590,89 @@ def _json_dict(value: Any) -> dict[str, Any]:
 
 def _ensure_json_safe(value: dict[str, Any]) -> None:
     json.dumps(value, ensure_ascii=False)
+
+
+AUTH_REPLY_MARKER = '[SBERID_AUTH_RECEIVED]'
+
+
+def summarize_sberid_auth_reply(raw: str) -> str:
+    summary = _summarize_storage_state_reply(raw)
+    if summary is not None:
+        return summary
+    return f'{AUTH_REPLY_MARKER} status=unparseable'
+
+
+def _sanitize_reply_or_memory_text(raw: str) -> str:
+    summary = _summarize_storage_state_reply(raw)
+    if summary is not None:
+        return summary
+    return raw
+
+
+def _summarize_storage_state_reply(raw: str) -> str | None:
+    try:
+        payload = json.loads((raw or '').strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    candidate = payload.get('auth') if isinstance(payload.get('auth'), dict) else payload
+    if not isinstance(candidate, dict):
+        return None
+
+    has_storage_state_key = 'storageState' in candidate or 'storage_state' in candidate
+    storage_state = candidate.get('storageState') if 'storageState' in candidate else candidate.get('storage_state')
+    if storage_state is None and (
+        isinstance(candidate.get('cookies'), list) or isinstance(candidate.get('origins'), list)
+    ):
+        storage_state = candidate
+    if not has_storage_state_key and storage_state is not candidate:
+        return None
+
+    provider = _safe_summary_value(candidate.get('provider') or 'sberid')
+    status = 'valid_shape' if _has_playwright_storage_state_shape(storage_state) else 'invalid_shape'
+    state_entries = _count_list_field(storage_state, 'cookies')
+    origin_entries = _count_list_field(storage_state, 'origins')
+    origin_storage_entries = _count_origin_storage_entries(storage_state)
+    return (
+        f'{AUTH_REPLY_MARKER} provider={provider} status={status} '
+        f'state_entries={state_entries} origin_entries={origin_entries} '
+        f'origin_storage_entries={origin_storage_entries}'
+    )
+
+
+def _safe_summary_value(value: Any) -> str:
+    text = str(value or '').strip().lower()
+    cleaned = ''.join(ch for ch in text if ch.isalnum() or ch in {'-', '_', '.'})
+    return (cleaned or 'unknown')[:40]
+
+
+def _has_playwright_storage_state_shape(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get('cookies'), list) and isinstance(value.get('origins'), list)
+
+
+def _count_list_field(value: Any, key: str) -> int:
+    if not isinstance(value, dict):
+        return 0
+    items = value.get(key)
+    return len(items) if isinstance(items, list) else 0
+
+
+def _count_origin_storage_entries(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    origins = value.get('origins')
+    if not isinstance(origins, list):
+        return 0
+    total = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        entries = origin.get('localStorage')
+        if isinstance(entries, list):
+            total += len(entries)
+    return total
 
 
 _AUTH_CONTEXT_BLOCKED: frozenset[str] = frozenset({

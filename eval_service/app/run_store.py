@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from eval_service.app.models import (
     EvalRunStatus,
     validate_path_segment_id,
 )
+from eval_service.app.redaction import sanitize_for_judge_input
 
 
 _UNSET = object()
@@ -128,17 +130,18 @@ class RunStore:
         error: str | None | object = _UNSET,
         artifact_paths: Mapping[str, str] | None = None,
     ) -> EvalRunManifest:
+        redacted_event = _redact_callback_event(event)
         return self._update_case(
             eval_run_id,
             eval_case_id,
             state=state,
-            session_id=event.session_id if session_id is _UNSET else session_id,
+            session_id=redacted_event.session_id if session_id is _UNSET else session_id,
             started_at=started_at,
             finished_at=finished_at,
             waiting_reply_id=waiting_reply_id,
             error=error,
             artifact_paths=artifact_paths,
-            callback_event=event,
+            callback_event=redacted_event,
         )
 
     def write_summary(self, eval_run_id: str, summary: Mapping[str, Any]) -> Path:
@@ -218,10 +221,13 @@ def _find_case_index(cases: Sequence[EvalRunCase], eval_case_id: str) -> int:
 
 
 def _has_callback_event(case: EvalRunCase, event: BuyerCallbackEnvelope) -> bool:
-    return any(
-        existing.event_id == event.event_id or existing.idempotency_key == event.idempotency_key
-        for existing in case.callback_events
-    )
+    incoming_idempotency_keys = _idempotency_key_aliases(event.idempotency_key)
+    for existing in case.callback_events:
+        if existing.event_id == event.event_id:
+            return True
+        if _idempotency_key_aliases(existing.idempotency_key) & incoming_idempotency_keys:
+            return True
+    return False
 
 
 def _set_if_present(data: dict[str, Any], key: str, value: Any) -> None:
@@ -239,3 +245,25 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _redact_callback_event(event: BuyerCallbackEnvelope) -> BuyerCallbackEnvelope:
+    event_data = event.model_dump(mode='json')
+    event_data['idempotency_key'] = _redacted_idempotency_key(event.idempotency_key)
+    event_data['payload'] = sanitize_for_judge_input(event.payload)
+    return BuyerCallbackEnvelope.model_validate(event_data)
+
+
+def _redacted_idempotency_key(value: str) -> str:
+    if _is_sha256_digest(value):
+        return value
+    return f'sha256:{hashlib.sha256(value.encode("utf-8")).hexdigest()}'
+
+
+def _idempotency_key_aliases(value: str) -> set[str]:
+    return {value, _redacted_idempotency_key(value)}
+
+
+def _is_sha256_digest(value: str) -> bool:
+    digest = value.removeprefix('sha256:')
+    return digest != value and len(digest) == 64 and all(char in '0123456789abcdef' for char in digest.lower())

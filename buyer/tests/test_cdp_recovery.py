@@ -77,6 +77,7 @@ class _SequenceRunner:
 class _RecordingCallbackClient:
     def __init__(self) -> None:
         self.delivered: list[EventEnvelope] = []
+        self.headers: list[dict[str, str] | None] = []
 
     def build_envelope(
         self,
@@ -101,18 +102,19 @@ class _RecordingCallbackClient:
             eval_case_id=eval_case_id,
         )
 
-    async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
+    async def deliver(self, callback_url: str, envelope: EventEnvelope, *, headers: dict[str, str] | None = None) -> None:
         _ = callback_url
         self.delivered.append(envelope)
+        self.headers.append(headers)
 
 
 class _FailingStreamCallbackClient(_RecordingCallbackClient):
-    async def deliver(self, callback_url: str, envelope: EventEnvelope) -> None:
+    async def deliver(self, callback_url: str, envelope: EventEnvelope, *, headers: dict[str, str] | None = None) -> None:
         if envelope.event_type == 'agent_stream_event':
             from buyer.app.callback import CallbackDeliveryError
 
             raise CallbackDeliveryError('stream receiver unavailable')
-        await super().deliver(callback_url, envelope)
+        await super().deliver(callback_url, envelope, headers=headers)
 
 
 class _NoopAuthScriptRunner:
@@ -161,6 +163,24 @@ class _UnavailableSberPayPurchaseScriptRunner:
             artifacts={
                 'source': 'purchase-script-test',
                 'observed_payment_methods': ['СБП', 'Российская карта'],
+            },
+        )
+
+
+class _CompletedPurchaseScriptRunnerWithFrame:
+    def __init__(self, frame_src: str, *, order_id: str = 'order-456') -> None:
+        self.frame_src = frame_src
+        self.order_id = order_id
+
+    async def run(self, **_: Any) -> PurchaseScriptResult:
+        return PurchaseScriptResult(
+            status='completed',
+            reason_code='purchase_ready',
+            message='Скрипт дошел до оплаты',
+            order_id=self.order_id,
+            artifacts={
+                'source': 'purchase-script-test',
+                'payment_frame_src': self.frame_src,
             },
         )
 
@@ -537,6 +557,45 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.eval_run_id, 'eval-run-001')
         self.assertEqual(event.eval_case_id, 'case-a')
 
+    async def test_callback_token_is_sent_as_header_and_not_kept_after_session(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='failed',
+                message='stop',
+                artifacts={},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=0,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test',
+            start_url='https://example.test',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+            callback_token='callback-secret',
+        )
+        await state.task_ref
+
+        self.assertTrue(callback_client.headers)
+        self.assertTrue(
+            all(headers == {'X-Eval-Callback-Token': 'callback-secret'} for headers in callback_client.headers)
+        )
+        self.assertEqual(service._callback_tokens, {})
+
     async def test_transient_failure_does_not_finish_session_immediately(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
@@ -550,6 +609,10 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 status='completed',
                 message='Шаг оплаты найден',
                 order_id='order-123',
+                payment_evidence={
+                    'source': 'litres_payecom_iframe',
+                    'url': 'https://payecom.ru/pay_ru?orderId=order-123',
+                },
                 artifacts={'source': 'test'},
             ),
         ])
@@ -569,7 +632,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         state = await service.create_session(
             task='test-task',
-            start_url='https://example.com',
+            start_url='https://www.litres.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
@@ -595,6 +658,10 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 status='completed',
                 message='Шаг оплаты найден',
                 order_id='order-123',
+                payment_evidence={
+                    'source': 'litres_payecom_iframe',
+                    'url': 'https://payecom.ru/pay_ru?orderId=order-123',
+                },
                 artifacts={'trace': {'trace_file': '/tmp/trace.json'}},
             ),
         ])
@@ -615,7 +682,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         state = await service.create_session(
             task='test-task',
-            start_url='https://brandshop.ru/',
+            start_url='https://www.litres.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
@@ -637,6 +704,10 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 status='completed',
                 message='Шаг оплаты найден',
                 order_id='order-123',
+                payment_evidence={
+                    'source': 'litres_payecom_iframe',
+                    'url': 'https://payecom.ru/pay_ru?orderId=order-123',
+                },
                 artifacts={},
             ),
         ])
@@ -657,7 +728,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         state = await service.create_session(
             task='test-task',
-            start_url='https://brandshop.ru/',
+            start_url='https://www.litres.ru/',
             callback_url='http://callback',
             metadata={},
             auth=None,
@@ -755,6 +826,58 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payment_ready_events), 1)
         self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-456')
 
+    async def test_litres_rejects_non_exact_payecom_payment_evidence(self) -> None:
+        cases = [
+            'http://payecom.ru/pay_ru?orderId=order-456',
+            'https://evil.payecom.ru/pay_ru?orderId=order-456',
+            'https://payecom.ru/pay_ru_malicious?orderId=order-456',
+            'https://payecom.ru/pay_ru?orderId=other-order',
+        ]
+
+        for frame_src in cases:
+            with self.subTest(frame_src=frame_src):
+                callback_client = _RecordingCallbackClient()
+                runner = _SequenceRunner([
+                    AgentOutput(
+                        status='failed',
+                        message='generic runner did not recover payment boundary',
+                        order_id=None,
+                        artifacts={},
+                    ),
+                ])
+                store = SessionStore(max_active_sessions=1)
+                service = BuyerService(
+                    store=store,
+                    callback_client=callback_client,  # type: ignore[arg-type]
+                    runner=runner,  # type: ignore[arg-type]
+                    novnc_url='http://novnc',
+                    default_callback_url='http://callback',
+                    cdp_recovery_window_sec=0.2,
+                    cdp_recovery_interval_ms=1,
+                    sberid_allowlist=set(),
+                    sberid_auth_retry_budget=1,
+                    auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+                    purchase_script_allowlist={'litres.ru'},
+                    purchase_script_runner=_CompletedPurchaseScriptRunnerWithFrame(frame_src),  # type: ignore[arg-type]
+                )
+
+                state = await service.create_session(
+                    task='Открой litres. Ищи книгу одиссея гомера',
+                    start_url='https://www.litres.ru/',
+                    callback_url='http://callback',
+                    metadata={},
+                    auth=None,
+                )
+                await state.task_ref
+
+                final_state = await store.get(state.session_id)
+                self.assertEqual(final_state.status, SessionStatus.FAILED)
+                self.assertEqual(runner.calls, 1)
+                self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
+                scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+                self.assertEqual(len(scenario_finished_events), 1)
+                self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
+
     async def test_litres_completed_without_order_id_finishes_as_failed(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
@@ -794,6 +917,47 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
         self.assertIn('order_id', scenario_finished_events[0].payload.get('message', ''))
+
+    async def test_unsupported_domain_completed_with_order_id_is_not_success(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Дошел до неизвестного платежного шага',
+                order_id='order-unsupported',
+                artifacts={'source': 'generic'},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='Купить товар и дойти до SberPay',
+            start_url='https://brandshop.ru/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.FAILED)
+        self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
+        scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
+        self.assertIn('не поддерживается verifier', scenario_finished_events[0].payload.get('message', ''))
 
     async def test_invalid_completed_purchase_script_falls_back_to_generic_runner(self) -> None:
         callback_client = _RecordingCallbackClient()

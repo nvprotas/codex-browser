@@ -61,6 +61,7 @@ class FakeBuyerClient:
         start_url: str,
         metadata: dict[str, Any] | None = None,
         callback_url: str | None = None,
+        callback_token: str | None = None,
         storage_state: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         call = {
@@ -68,6 +69,7 @@ class FakeBuyerClient:
             'start_url': start_url,
             'metadata': metadata or {},
             'callback_url': callback_url,
+            'callback_token': callback_token,
             'storage_state': storage_state,
         }
         session_number = len(self.calls) + 1
@@ -165,6 +167,22 @@ def test_post_runs_uses_configured_callback_url_instead_of_request_host(tmp_path
 
     assert response.status_code == 200
     assert buyer.calls[0]['callback_url'] == 'http://eval_service:8090/callbacks/buyer'
+
+
+def test_post_runs_passes_configured_callback_secret_as_token_field(tmp_path: Path) -> None:
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-a')],
+        on_create=lambda call: _append_payment_ready(store, call),
+        eval_callback_base_url='http://eval_service:8090',
+        eval_callback_secret='callback-secret',
+    )
+
+    response = client.post('/runs', json={'case_ids': ['case-a']})
+
+    assert response.status_code == 200
+    assert buyer.calls[0]['callback_url'] == 'http://eval_service:8090/callbacks/buyer'
+    assert buyer.calls[0]['callback_token'] == 'callback-secret'
 
 
 def test_empty_case_ids_runs_all_cases(tmp_path: Path) -> None:
@@ -717,6 +735,7 @@ def _client_with_orchestrator(
     timer: FakeTimer | None = None,
     raise_server_exceptions: bool = True,
     eval_callback_base_url: str | None = 'http://eval_service:8090',
+    eval_callback_secret: str | None = None,
     client_base_url: str = 'http://testserver',
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
     settings = Settings(
@@ -724,6 +743,7 @@ def _client_with_orchestrator(
         eval_runs_dir=tmp_path,
         buyer_api_base_url='http://buyer.test',
         eval_callback_base_url=eval_callback_base_url,
+        eval_callback_secret=eval_callback_secret,
     )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))

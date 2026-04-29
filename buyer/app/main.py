@@ -26,6 +26,7 @@ from .state import (
     SessionState,
     SessionStore,
 )
+from .url_policy import UrlPolicyError, parse_url_allowlist, validate_callback_url, validate_start_url
 
 
 def _build_session_store(settings: Settings) -> SessionStore:
@@ -101,13 +102,17 @@ async def shutdown() -> None:
 @app.post('/v1/tasks', response_model=TaskCreateResponse, status_code=201)
 async def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
     try:
+        start_url, callback_url = _validate_task_urls(request)
         state = await service.create_session(
             task=request.task,
-            start_url=request.start_url,
-            callback_url=request.callback_url,
+            start_url=start_url,
+            callback_url=callback_url,
             metadata=request.metadata,
             auth=request.auth,
+            callback_token=request.callback_token,
         )
+    except UrlPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except SessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -165,3 +170,13 @@ def _to_detail(state: SessionState) -> SessionDetail:
         **_to_view(state).model_dump(),
         events=state.events,
     )
+
+
+def _validate_task_urls(request: TaskCreateRequest) -> tuple[str, str]:
+    start_url = validate_start_url(request.start_url)
+    callback_url = validate_callback_url(
+        request.callback_url or settings.middle_callback_url,
+        default_callback_url=settings.middle_callback_url,
+        trusted_callback_urls=parse_url_allowlist(settings.trusted_callback_urls),
+    )
+    return start_url, callback_url

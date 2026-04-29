@@ -1,10 +1,12 @@
 # buyer MVP: Codex + Playwright + browser-sidecar + microUI
 
-Минимальная версия системы из трех сервисов:
+Минимальная версия системы из сервисов:
 
 - `buyer` (FastAPI): принимает задачу от `openclaw`, запускает `codex exec`, оркестрирует шаги и отправляет callback-события.
 - `browser` (отдельный sidecar): держит Chromium + Xvfb + x11vnc + noVNC и отдает CDP endpoint для Playwright.
 - `micro-ui` (FastAPI + HTML/JS): временный `middle`, принимает callbacks, показывает ленту событий, noVNC и форму ответа пользователя (`reply_id`).
+- `postgres`: хранит durable состояние `buyer`.
+- `eval_service`: запускает eval-кейсы, принимает callbacks от `buyer` и готовит judge/dashboard артефакты.
 
 Roadmap развития после MVP: `docs/buyer-roadmap.md`.
 
@@ -23,7 +25,8 @@ OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.
 - Трассировка шагов `codex`: сохраняются prompt, stdout/stderr tail, итог шага и лог браузерных команд.
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
-- Быстрый `purchase scripts-first` для `litres.ru`: если скрипт надежно доходит до `orderId`, generic `codex exec` не запускается.
+- Быстрый `purchase scripts-first` и строгий SberPay verifier для `litres.ru`: если скрипт надежно доходит до подтвержденного `orderId`, generic `codex exec` не запускается.
+- Non-Litres `payment_ready` временно запрещен до появления domain-specific verifier, чтобы не показывать непроверенный платежный шаг.
 - Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
@@ -93,12 +96,24 @@ USER_BUYER_INFO_PATH=
 docker compose up --build
 ```
 
+По умолчанию compose рассчитан на доверенную VPS с закрытым периметром: host-порты `5432`, `6901`, `8000`, `8080` и `8090` публикуются только на `127.0.0.1`, а CDP `9223` не публикуется на host вообще и доступен только внутри docker-сети как `http://browser:9223`.
+Не открывайте эти endpoints напрямую в интернет. Для удаленного доступа используйте VPN, SSH tunnel или reverse proxy с аутентификацией и TLS. Минимальный SSH tunnel для операторского UI и noVNC:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 \
+  -L 8000:127.0.0.1:8000 \
+  -L 6901:127.0.0.1:6901 \
+  -L 8090:127.0.0.1:8090 \
+  user@trusted-vps
+```
+
 После запуска:
 
-- `buyer` API: `http://localhost:8000`
-- `micro-ui`: `http://localhost:8080` (можно запускать новую сессию прямо из UI)
-- noVNC (из sidecar): `http://localhost:6901/vnc.html?autoconnect=1&resize=scale`
-- CDP endpoint sidecar (с host-машины): `http://localhost:9223`
+- `buyer` API: `http://localhost:8000` (loopback host или SSH tunnel)
+- `micro-ui`: `http://localhost:8080` (loopback host или SSH tunnel; можно запускать новую сессию прямо из UI)
+- noVNC (из sidecar): `http://localhost:6901/vnc.html?autoconnect=1&resize=scale` (loopback host или SSH tunnel)
+- `eval_service`: `http://localhost:8090` (loopback host или SSH tunnel)
+- CDP endpoint sidecar: только внутри docker-сети, `http://browser:9223`
 
 ## Пример сценария
 
@@ -147,6 +162,8 @@ curl -sS -X POST http://localhost:8000/v1/tasks \
 ```bash
 python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://example.com
 ```
+
+С host-машины CDP `9223` по умолчанию недоступен. Для диагностики запускайте CDP-команды из контейнера `buyer` или используйте одноразовый override, который также привязывает порт только к `127.0.0.1`.
 
 Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
 
@@ -197,11 +214,13 @@ docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|sessi
 ```
 
 `micro-ui` также показывает live-поток `agent_stream_event` через общий SSE `/api/events/stream`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`. UI обновляется по callback-событиям от `buyer`; периодический polling для списка сессий и событий не используется.
-MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; предполагается локальный trusted контур разработки.
+MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; compose публикует UI только на `127.0.0.1`, а удаленный доступ предполагает trusted контур через VPN/SSH tunnel/authenticated reverse proxy.
 
 ## Контракт callback (MVP)
 
 Каноническая OpenAPI-спецификация callback-вызовов находится в `docs/callbacks.openapi.yaml`.
+
+Секреты callback receiver не передаются в query string. Если receiver требует shared secret, `POST /v1/tasks` принимает ephemeral `callback_token`; `buyer` отправляет его как `X-Eval-Callback-Token` и не сохраняет в Postgres/session view.
 
 Общий envelope:
 
@@ -230,7 +249,7 @@ MVP `micro-ui` не добавляет отдельную аутентифика
 - После перезапуска контейнера `buyer` восстанавливает сохраненные статусы и историю, но не автопродолжает активный runner и не восстанавливает утраченную browser page.
 - Следующий этап runtime заменяет Redis-подход на Postgres task queue и browser-slot manager: `waiting_user` освобождает agent runner, browser slot удерживается только до TTL ожидания, после timeout сессия завершается без resume.
 - Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
-- noVNC поднят всегда и без пароля (только для MVP).
+- noVNC поднят всегда и без пароля (только для MVP), поэтому compose публикует его только на `127.0.0.1`; удаленный доступ должен идти через VPN/SSH tunnel/authenticated reverse proxy.
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).
 - `buyer` требует авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.
 - Режим sandbox для `codex` в `buyer` управляется `CODEX_SANDBOX_MODE` (по умолчанию `danger-full-access` для стабильного CDP-доступа к `browser-sidecar`).

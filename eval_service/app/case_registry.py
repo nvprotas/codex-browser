@@ -34,6 +34,8 @@ class CaseRegistry:
 
     def _load_file(self, path: Path) -> list[EvalCase]:
         template = _load_yaml_template(path)
+        if template.get('enabled') is False:
+            return []
         variants = template.get('variants')
         if not isinstance(variants, list) or not variants:
             raise CaseRegistryError(f'{path}: variants должен быть непустым списком')

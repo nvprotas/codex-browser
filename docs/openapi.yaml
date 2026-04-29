@@ -43,6 +43,16 @@ paths:
 
         Дальнейший прогресс приходит callback-событиями на `callback_url`.
         Если `callback_url` не передан, buyer использует `MIDDLE_CALLBACK_URL`.
+        `start_url` должен быть публичным http/https URL без userinfo и без
+        loopback/private/link-local/metadata hostname или IP. Task-provided
+        `callback_url` должен быть публичным https URL или совпадать с
+        доверенным callback URL из `TRUSTED_CALLBACK_URLS`; default
+        `MIDDLE_CALLBACK_URL` тоже считается доверенным. `callback_url`,
+        `MIDDLE_CALLBACK_URL` и entries `TRUSTED_CALLBACK_URLS` не должны
+        содержать query string или fragment.
+        Если callback receiver требует секрет, передавайте его отдельным
+        `callback_token`: buyer отправит его как `X-Eval-Callback-Token`
+        и не сохранит в persistent state.
         Формат callback-событий описан в `docs/callbacks.openapi.yaml`.
       requestBody:
         required: true
@@ -294,7 +304,10 @@ components:
         start_url:
           type: string
           minLength: 1
-          description: URL магазина для начала сценария.
+          description: |
+            URL магазина для начала сценария. Разрешены только публичные
+            http/https URL с hostname, без userinfo и без
+            loopback/private/link-local/metadata hosts.
         callback_url:
           oneOf:
             - type: string
@@ -302,7 +315,20 @@ components:
           default: null
           description: |
             Куда buyer отправляет callback-события. Схема исходящих callback-вызовов
-            описана в `docs/callbacks.openapi.yaml`.
+            описана в `docs/callbacks.openapi.yaml`. Если поле передано задачей,
+            URL должен быть публичным https URL или совпадать с trusted callback
+            allowlist `TRUSTED_CALLBACK_URLS`. Если поле не передано, используется
+            `MIDDLE_CALLBACK_URL`. Query string и fragment запрещены для
+            task-provided, default и trusted callback URL.
+        callback_token:
+          oneOf:
+            - type: string
+              minLength: 1
+            - type: 'null'
+          default: null
+          description: |
+            Ephemeral token для callback receiver. Buyer отправляет его в
+            заголовке `X-Eval-Callback-Token` и не сохраняет в persistent state.
         metadata:
           $ref: '#/components/schemas/JsonObject'
           default: {}

@@ -682,7 +682,6 @@
         evalRunId: state.activeRun.eval_run_id,
         evalCaseId: waiting.eval_case_id,
         payload: {
-          session_id: waiting.session_id,
           reply_id: waiting.waiting_reply_id,
           message,
         },

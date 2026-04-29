@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,19 @@ import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
+try:
+    from buyer.app.url_policy import UrlPolicyError, validate_start_url
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app.url_policy import UrlPolicyError, validate_start_url
+
 HTML_STDOUT_LIMIT = 20_000
 TEXT_STDOUT_LIMIT = 4_000
 LINKS_DEFAULT_LIMIT = 50
 SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
+REQUEST_GUARD_ROUTE_PATTERN = '**/*'
+NAVIGATION_RESOURCE_TYPES = {'document'}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -103,6 +112,58 @@ def is_transient_context_error(error_text: str) -> bool:
     return any(marker in lowered for marker in TRANSIENT_CONTEXT_MARKERS)
 
 
+def _navigation_url_policy_error(url: str) -> str | None:
+    try:
+        validate_start_url(url)
+    except UrlPolicyError as exc:
+        return normalize_error_text(exc)
+    return None
+
+
+def _is_guarded_navigation_request(request: Any) -> bool:
+    resource_type = str(getattr(request, 'resource_type', '') or '').lower()
+    if resource_type in NAVIGATION_RESOURCE_TYPES:
+        return True
+
+    checker = getattr(request, 'is_navigation_request', None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:  # noqa: BLE001 - неизвестный request не должен ломать ненавигационные команды
+        return False
+
+
+async def _guard_navigation_request_route(route: Any) -> None:
+    request = getattr(route, 'request', None)
+    if request is None or not _is_guarded_navigation_request(request):
+        await route.continue_()
+        return
+
+    url = str(getattr(request, 'url', '') or '')
+    policy_error = _navigation_url_policy_error(url)
+    if policy_error is None:
+        await route.continue_()
+        return
+
+    _append_action_log(
+        'browser_request_blocked',
+        {
+            'url': url,
+            'resource_type': str(getattr(request, 'resource_type', '') or ''),
+            'error': policy_error,
+        },
+    )
+    await route.abort('blockedbyclient')
+
+
+async def install_navigation_request_guard(page: Any) -> None:
+    context = getattr(page, 'context', None)
+    if context is None:
+        return
+    await context.route(REQUEST_GUARD_ROUTE_PATTERN, _guard_navigation_request_route)
+
+
 def recovery_interval_sec(args: argparse.Namespace) -> float:
     return max(args.recovery_interval_ms, 1) / 1000.0
 
@@ -183,8 +244,6 @@ def _page_priority(page: Any) -> int:
     url = (getattr(page, 'url', '') or '').strip().lower()
     if not url or url == 'about:blank':
         return 0
-    if 'litres.ru' in url:
-        return 30
     if url.startswith(('http://', 'https://')):
         return 20
     return 10
@@ -209,16 +268,17 @@ def _describe_contexts(browser) -> list[dict[str, Any]]:
 
 
 async def ensure_page(browser):
-    best: tuple[int, int, int, Any, Any] | None = None
+    best: tuple[tuple[int, int, int], Any, Any] | None = None
     for context_index, context in enumerate(browser.contexts):
         for page_index, page in enumerate(context.pages):
             priority = _page_priority(page)
-            candidate = (priority, context_index, page_index, context, page)
-            if best is None or priority > best[0]:
+            candidate_key = (priority, context_index, page_index)
+            candidate = (candidate_key, context, page)
+            if best is None or candidate_key > best[0]:
                 best = candidate
 
-    if best is not None and best[0] > 0:
-        priority, context_index, page_index, _context, page = best
+    if best is not None and best[0][0] > 0:
+        (priority, context_index, page_index), _context, page = best
         _append_action_log(
             'browser_page_selected',
             {
@@ -345,6 +405,7 @@ async def connect_page_with_retry(
             browser = await playwright.chromium.connect_over_cdp(target)
             page = await ensure_page(browser)
             page.set_default_timeout(args.timeout_ms)
+            await install_navigation_request_guard(page)
             return browser, page
         except Exception as exc:  # noqa: BLE001 - нормализуем и возвращаем стабильный код ошибки
             last_error = normalize_error_text(exc)
@@ -549,6 +610,12 @@ async def run_command(args: argparse.Namespace) -> dict:
         result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-interval-ms должен быть > 0.'}
         _log_command_finished(args, started, command_details, result)
         return result
+    if args.command == 'goto':
+        policy_error = _navigation_url_policy_error(args.url)
+        if policy_error is not None:
+            result = {'ok': False, 'error': f'CDP_COMMAND_ERROR: {policy_error}'}
+            _log_command_finished(args, started, command_details, result)
+            return result
 
     playwright = await async_playwright().start()
     try:
