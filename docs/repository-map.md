@@ -220,8 +220,8 @@ Postgres repository и inline migrations.
 
 Входы:
 
-- base URL, timeout и retry budget из настроек;
-- `GET /api/v1/cookies` внешнего сервиса;
+- полный cookies endpoint, timeout и retry budget из настроек;
+- `GET` по полному URL из `SBER_COOKIES_API_URL`;
 - JSON payload с `cookies`, optional `updatedAt` и `count`.
 
 Выходы:
@@ -238,7 +238,7 @@ Postgres repository и inline migrations.
 - `auth_external_timeout`: исчерпан timeout/retry budget;
 - `auth_external_unavailable`: URL не настроен, HTTP/network error или невалидный JSON.
 
-Ограничения: client не реализует `POST /api/v1/cookies`, не пишет cookies в persistent state и не должен логировать cookie values.
+Ограничения: client не реализует write-path внешнего cookies API, не пишет cookies в persistent state и не должен логировать cookie values.
 
 ## `buyer`: orchestration
 
@@ -800,7 +800,7 @@ Runtime flow:
 | OpenAI/Codex auth | `AgentRunner`, `PostSessionKnowledgeAnalyzer` | Запуск `codex exec`. | Нет `OPENAI_API_KEY` и `/root/.codex/auth.json`; 401; 429. |
 | Codex CLI | `AgentRunner`, analyzer | Structured agent step и post-session analysis. | `CODEX_BIN` не найден; timeout; non-zero return. |
 | browser-sidecar CDP | `cdp_tool.py`, script runners | Управление Chromium. | CDP connect/command/transient errors. |
-| External Sber cookies API | `ExternalSberCookiesClient`, `BuyerService._resolve_session_auth` | Машинная загрузка cookies через `GET /api/v1/cookies` при `SBER_AUTH_SOURCE=external_cookies_api` и отсутствии inline auth. | Timeout, HTTP/network error, invalid JSON, invalid/empty cookies payload; все переходят в `auth_external_*` reason-code и guest-flow. |
+| External Sber cookies API | `ExternalSberCookiesClient`, `BuyerService._resolve_session_auth` | Машинная загрузка cookies через `GET` по полному URL из `SBER_COOKIES_API_URL` при `SBER_AUTH_SOURCE=external_cookies_api` и отсутствии inline auth. | Timeout, HTTP/network error, invalid JSON, invalid/empty cookies payload; все переходят в `auth_external_*` reason-code и guest-flow. |
 | Postgres | `PostgresSessionRepository` | Persistent state. | Недоступная БД, pool/init/migration errors. |
 | Callback receiver | `CallbackClient` | Доставка событий в `middle`. | timeout, non-2xx, network error -> `CallbackDeliveryError`. |
 | Node.js + TSX | `SberIdScriptRunner`, `PurchaseScriptRunner` | Запуск TypeScript Playwright scripts. | Нет Node/TSX, timeout, process failed, invalid JSON. |

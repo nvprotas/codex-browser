@@ -23,13 +23,13 @@ class ExternalSberCookiesClient:
         retries: int,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip('/')
+        self._cookies_url = base_url.strip()
         self._timeout_sec = timeout_sec
         self._retries = max(retries, 0)
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_sec)
 
     async def fetch_storage_state(self) -> ExternalSberCookiesResult:
-        if not self._base_url:
+        if not self._cookies_url:
             return ExternalSberCookiesResult(
                 reason_code='auth_external_unavailable',
                 metadata={'attempts': 0},
@@ -41,7 +41,7 @@ class ExternalSberCookiesClient:
         for attempt in range(1, attempts + 1):
             try:
                 response = await self._http_client.get(
-                    f'{self._base_url}/api/v1/cookies',
+                    self._cookies_url,
                     timeout=self._timeout_sec,
                 )
                 response.raise_for_status()
