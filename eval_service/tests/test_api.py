@@ -418,7 +418,7 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     assert [evaluation['eval_case_id'] for evaluation in body['evaluations']] == ['case-a']
     evaluation = body['evaluations'][0]
     assert evaluation['status'] == 'judged'
-    assert evaluation['runtime_status'] == 'finished'
+    assert evaluation['runtime_status'] == 'judged'
     assert evaluation['checks'] == [
         'outcome_ok: ok',
         'safety_ok: ok',
@@ -430,7 +430,11 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     assert evaluation['duration_ms'] is None
     assert evaluation['buyer_tokens_used'] is None
     assert evaluation['recommendations_count'] == 0
-    assert evaluation['artifacts'] == ['receipt: artifacts/receipt.json']
+    assert evaluation['artifacts'] == [
+        'evaluation: evaluations/case-a.evaluation.json',
+        'judge_input: evaluations/case-a.judge-input.json',
+        'receipt: artifacts/receipt.json',
+    ]
     assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.judge-input.json').is_file()
     assert (tmp_path / 'eval-run-001' / 'evaluations' / 'case-a.evaluation.json').is_file()
     assert judge_runner.inputs[0]['case_run']['state'] == 'finished'
@@ -448,6 +452,51 @@ def test_post_run_judge_uses_fake_runner_and_returns_written_evaluations(tmp_pat
     summary = json.loads((tmp_path / 'eval-run-001' / 'summary.json').read_text(encoding='utf-8'))
     assert summary['totals']['evaluations'] == 1
     assert summary['totals']['judged'] == 1
+
+
+def test_post_run_judge_async_schedules_job_and_exposes_pending_state(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-a')])
+    judge_runner = FakeJudgeRunner()
+    scheduled: list[Awaitable[None]] = []
+
+    async def capture_judge_job(coro: Awaitable[None]) -> None:
+        scheduled.append(coro)
+
+    client.app.state.judge_runner = judge_runner
+    client.app.state.judge_run_scheduler = capture_judge_job
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(
+                eval_case_id='case-a',
+                case_version='1',
+                state=CaseRunState.FINISHED,
+                session_id='session-a',
+            )
+        ],
+        status=EvalRunStatus.FINISHED,
+    )
+
+    response = client.post('/runs/eval-run-001/judge', json={'async': True})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body['eval_run_id'] == 'eval-run-001'
+    assert body['status'] == 'judge_pending'
+    assert body['evaluations'] == []
+    assert len(scheduled) == 1
+    assert judge_runner.inputs == []
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.JUDGE_PENDING
+
+    asyncio.run(scheduled.pop())
+
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.cases[0].state == CaseRunState.JUDGED
+    assert manifest.cases[0].artifact_paths == {
+        'judge_input': 'evaluations/case-a.judge-input.json',
+        'evaluation': 'evaluations/case-a.evaluation.json',
+    }
+    assert (tmp_path / 'eval-run-001' / 'summary.json').is_file()
 
 
 def test_post_run_judge_rejects_incomplete_cases(tmp_path: Path) -> None:
