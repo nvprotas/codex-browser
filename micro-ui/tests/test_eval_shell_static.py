@@ -95,10 +95,12 @@ class EvalShellStaticTests(unittest.TestCase):
 
     def test_eval_proxy_timeout_allows_long_run_creation(self) -> None:
         run_timeout = eval_proxy_timeout('runs', 'POST')
+        judge_timeout = eval_proxy_timeout('runs/run-1/judge', 'POST')
         default_get_timeout = eval_proxy_timeout('runs', 'GET')
-        default_post_timeout = eval_proxy_timeout('runs/run-1/judge', 'POST')
+        default_post_timeout = eval_proxy_timeout('dashboard/cases', 'POST')
 
         self.assertGreaterEqual(run_timeout.read, 650.0)
+        self.assertGreaterEqual(judge_timeout.read, 650.0)
         self.assertEqual(default_get_timeout.read, 60.0)
         self.assertEqual(default_post_timeout.read, 60.0)
 

@@ -152,6 +152,11 @@ class JudgeRunner:
                 reason=identity_mismatch,
             )
 
+        evaluation = _with_server_judge_metadata(
+            evaluation,
+            model=self._settings.eval_judge_model,
+        )
+        _write_json_atomic(evaluation_path, evaluation)
         return JudgeRunResult(evaluation_path=evaluation_path, evaluation=evaluation)
 
     def _build_command(self, *, evaluation_path: Path) -> list[str]:
@@ -224,6 +229,16 @@ def _fallback_evaluation(
         },
         'evidence_refs': [],
         'recommendations': [],
+        'judge_metadata': {
+            'backend': 'codex_exec',
+            'model': _string_value(model, fallback='unknown-model'),
+        },
+    }
+
+
+def _with_server_judge_metadata(evaluation: dict[str, Any], *, model: str) -> dict[str, Any]:
+    return {
+        **evaluation,
         'judge_metadata': {
             'backend': 'codex_exec',
             'model': _string_value(model, fallback='unknown-model'),

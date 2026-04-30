@@ -19,7 +19,9 @@ RUN pip install -r /tmp/requirements.txt
 RUN npm install -g @openai/codex
 
 COPY eval_service ./eval_service
+RUN chmod +x /workspace/eval_service/docker/entrypoint.sh
 
 EXPOSE 8090
 
+ENTRYPOINT ["/workspace/eval_service/docker/entrypoint.sh"]
 CMD ["uvicorn", "eval_service.app.main:app", "--host", "0.0.0.0", "--port", "8090"]

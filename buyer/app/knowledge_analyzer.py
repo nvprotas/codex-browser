@@ -183,6 +183,7 @@ class PostSessionKnowledgeAnalyzer:
         prompt = build_knowledge_analysis_prompt(safe_input)
         write_fixed_session_text_file(trace['prompt_path'], prompt, session_dir=trace['session_dir'])
         prompt_hash = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+        prompt_diagnostics = build_prompt_diagnostics(prompt, safe_input)
 
         with tempfile.NamedTemporaryFile(
             prefix='knowledge-analysis-result-',
@@ -208,10 +209,30 @@ class PostSessionKnowledgeAnalyzer:
             str(self._schema_path),
             '-o',
             output_path,
-            prompt,
         ])
-        command_for_log = [*cmd[:-1], f'@{trace["prompt_path"]}']
+        command_for_log = [*cmd, f'<stdin:@{trace["prompt_path"]}>']
         analyzer_workdir = str(trace['session_dir'].resolve(strict=False))
+        logger.info(
+            'knowledge_analysis_prompt_prepared '
+            'session_id=%s prompt_path=%s prompt_bytes=%s prompt_chars=%s input_bytes=%s '
+            'session_bytes=%s events_bytes=%s events_count=%s artifacts_bytes=%s '
+            'trace_refs_bytes=%s trace_refs_count=%s trace_summaries_bytes=%s '
+            'trace_summaries_count=%s truncated=%s',
+            snapshot.session_id,
+            trace['prompt_path'],
+            prompt_diagnostics['prompt_bytes'],
+            prompt_diagnostics['prompt_chars'],
+            prompt_diagnostics['input_bytes'],
+            prompt_diagnostics['session_bytes'],
+            prompt_diagnostics['events_bytes'],
+            prompt_diagnostics['events_count'],
+            prompt_diagnostics['artifacts_bytes'],
+            prompt_diagnostics['trace_refs_bytes'],
+            prompt_diagnostics['trace_refs_count'],
+            prompt_diagnostics['trace_summaries_bytes'],
+            prompt_diagnostics['trace_summaries_count'],
+            prompt_diagnostics['truncated'],
+        )
         logger.info(
             'knowledge_analysis_started session_id=%s prompt_path=%s sandbox=%s workdir=%s',
             snapshot.session_id,
@@ -254,7 +275,7 @@ class PostSessionKnowledgeAnalyzer:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     cwd=analyzer_workdir,
-                    stdin=asyncio.subprocess.DEVNULL,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
@@ -279,7 +300,10 @@ class PostSessionKnowledgeAnalyzer:
                 return status
 
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._settings.codex_timeout_sec)
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(prompt.encode('utf-8')),
+                    timeout=self._settings.codex_timeout_sec,
+                )
             except asyncio.TimeoutError:
                 process.kill()
                 await process.communicate()
@@ -476,6 +500,30 @@ def build_knowledge_analysis_prompt(analysis_input: dict[str, Any]) -> str:
 Входные данные:
 {input_json}
 """.strip()
+
+
+def build_prompt_diagnostics(prompt: str, analysis_input: dict[str, Any]) -> dict[str, Any]:
+    events = analysis_input.get('events')
+    trace_refs = analysis_input.get('trace_refs')
+    trace_summaries = analysis_input.get('trace_summaries')
+    return {
+        'prompt_bytes': len(prompt.encode('utf-8')),
+        'prompt_chars': len(prompt),
+        'input_bytes': json_value_size(analysis_input),
+        'session_bytes': json_value_size(analysis_input.get('session')),
+        'events_bytes': json_value_size(events),
+        'events_count': len(events) if isinstance(events, list) else None,
+        'artifacts_bytes': json_value_size(analysis_input.get('artifacts')),
+        'trace_refs_bytes': json_value_size(trace_refs),
+        'trace_refs_count': len(trace_refs) if isinstance(trace_refs, list) else None,
+        'trace_summaries_bytes': json_value_size(trace_summaries),
+        'trace_summaries_count': len(trace_summaries) if isinstance(trace_summaries, list) else None,
+        'truncated': bool(analysis_input.get('truncated')),
+    }
+
+
+def json_value_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode('utf-8'))
 
 
 def collect_trace_refs(events: Any, artifacts: Any) -> list[dict[str, Any]]:
