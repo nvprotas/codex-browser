@@ -520,6 +520,130 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
         self.assertEqual(trace['codex_tokens_used'], 30)
 
+    async def test_run_step_retries_same_model_when_failed_without_browser_mutation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-same',
+                buyer_model_strategy='fast_then_strong',
+                buyer_fast_codex_model='gpt-same',
+                buyer_strong_codex_model='gpt-same',
+            )
+            runner = AgentRunner(settings)
+            calls: list[tuple[Any, ...]] = []
+            reset_calls = 0
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
+                nonlocal reset_calls
+                reset_calls += 1
+                return True, 'reset_ok'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
+                calls.append(cmd)
+                actions_path = Path(kwargs['env']['BUYER_CDP_ACTIONS_LOG_PATH'])
+                if len(calls) == 1:
+                    actions_path.write_text(
+                        json.dumps({'event': 'browser_command_finished', 'command': 'url', 'ok': True})
+                        + '\n'
+                        + json.dumps({'event': 'browser_command_finished', 'command': 'snapshot', 'ok': True})
+                        + '\n',
+                        encoding='utf-8',
+                    )
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                status = 'failed' if len(calls) == 1 else 'completed'
+                output_path.write_text(
+                    json.dumps({'status': status, 'message': status, 'order_id': None, 'artifacts': {}}),
+                    encoding='utf-8',
+                )
+                return _FakeProcess(returncode=0, stderr_text=f'tokens used {len(calls) * 10}')
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                result = await runner.run_step(
+                    session_id='session-same-clean',
+                    step_index=1,
+                    task='test-task',
+                    start_url='https://example.com',
+                    metadata={},
+                    auth=None,
+                    auth_context=None,
+                    memory=[],
+                    latest_user_reply=None,
+                )
+
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(reset_calls, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('gpt-same', calls[0])
+        self.assertIn('gpt-same', calls[1])
+        trace = result.artifacts['trace']
+        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_same_model', 'same_model_retry'])
+
+    async def test_run_step_does_not_retry_same_model_when_failed_after_browser_mutation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = Settings(
+                buyer_trace_dir=tmpdir,
+                codex_workdir=tmpdir,
+                codex_model='gpt-same',
+                buyer_model_strategy='fast_then_strong',
+                buyer_fast_codex_model='gpt-same',
+                buyer_strong_codex_model='gpt-same',
+            )
+            runner = AgentRunner(settings)
+            calls: list[tuple[Any, ...]] = []
+            reset_calls = 0
+
+            async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
+                return True, 'OK'
+
+            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
+                nonlocal reset_calls
+                reset_calls += 1
+                return True, 'reset_ok'
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
+                calls.append(cmd)
+                Path(kwargs['env']['BUYER_CDP_ACTIONS_LOG_PATH']).write_text(
+                    json.dumps({'event': 'browser_command_finished', 'command': 'click', 'ok': True}) + '\n',
+                    encoding='utf-8',
+                )
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                output_path.write_text(
+                    json.dumps({'status': 'failed', 'message': 'stop', 'order_id': None, 'artifacts': {}}),
+                    encoding='utf-8',
+                )
+                return _FakeProcess(returncode=0, stderr_text='tokens used 10')
+
+            with (
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
+                patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
+                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
+                patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
+            ):
+                result = await runner.run_step(
+                    session_id='session-same-dirty',
+                    step_index=1,
+                    task='test-task',
+                    start_url='https://example.com',
+                    metadata={},
+                    auth=None,
+                    auth_context=None,
+                    memory=[],
+                    latest_user_reply=None,
+                )
+
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(reset_calls, 0)
+        self.assertEqual(len(calls), 1)
+
     async def test_stream_event_delivery_failure_is_best_effort_and_saved(self) -> None:
         callback_client = _FailingStreamCallbackClient()
         store = SessionStore(max_active_sessions=1)

@@ -178,6 +178,8 @@ class AgentRunner:
             )
 
         attempts = _build_model_attempt_specs(self._settings)
+        initial_attempt_count = len(attempts)
+        same_model_retry_added = False
         attempt_summaries: list[dict[str, Any]] = []
         attempt_results: list[_CodexAttemptResult] = []
         latest_attempt: _CodexAttemptResult | None = None
@@ -256,6 +258,55 @@ class AgentRunner:
                         'message': reset_summary,
                     }
                 )
+                continue
+
+            if (
+                initial_attempt_count == 1
+                and not same_model_retry_added
+                and retryable_failed_status
+            ):
+                if _browser_actions_have_mutating_commands(trace['browser_actions_log_path']):
+                    fallback_reason = 'same_model_retry_skipped_dirty_state'
+                    logger.info(
+                        'codex_step_same_model_retry_skipped session_id=%s step=%s reason=%s',
+                        session_id,
+                        step_index,
+                        fallback_reason,
+                    )
+                    break
+
+                reset_ok, reset_summary = await self._reset_browser_to_start_url(
+                    start_url=start_url,
+                    actions_log_path=trace['browser_actions_log_path'],
+                )
+                if not reset_ok:
+                    fallback_reason = 'same_model_retry_skipped_reset_failed'
+                    attempt_summaries.append(
+                        {
+                            'role': 'reset_before_same_model',
+                            'ok': False,
+                            'reason': fallback_reason,
+                            'message': reset_summary,
+                        }
+                    )
+                    logger.info(
+                        'codex_step_same_model_retry_skipped session_id=%s step=%s reason=%s reset_summary=%s',
+                        session_id,
+                        step_index,
+                        fallback_reason,
+                        _tail_text(reset_summary, limit=500),
+                    )
+                    break
+
+                attempt_summaries.append(
+                    {
+                        'role': 'reset_before_same_model',
+                        'ok': True,
+                        'message': reset_summary,
+                    }
+                )
+                attempts.append(_CodexAttemptSpec(role='same_model_retry', model=attempt.spec.model))
+                same_model_retry_added = True
                 continue
 
             break

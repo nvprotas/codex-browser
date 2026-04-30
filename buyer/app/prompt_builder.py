@@ -58,6 +58,9 @@ def build_agent_prompt(
 4. На первом шаге открой start_url через `goto`, дальше продолжай в той же браузерной сессии sidecar.
    Если в памяти есть системный маркер `[CDP_RECOVERY_RESTART_FROM_START_URL]`, первым действием заново сделай `goto --url start_url`.
 5. Рабочий цикл: наблюдай -> действуй -> проверь.
+   - Формат команд с таймаутом: `python /app/tools/cdp_tool.py --endpoint {browser_cdp_endpoint} --timeout-ms 3000 click --selector "<selector>"`.
+   - Для ожидания используй `wait --seconds N`, например `python /app/tools/cdp_tool.py --endpoint {browser_cdp_endpoint} wait --seconds 2`.
+   - Для ограниченного текста используй `text --selector body --max-chars 2000`, не `--limit`.
    - Для анализа страницы сначала используй структурные команды `snapshot --limit 60`, `links --limit 50`, `exists`, `attr`.
    - Для пробных селекторов, где ты не уверен в наличии элемента, используй короткий таймаут: `--timeout-ms 3000`.
    - После `click`, `fill` или `press` проверь результат через `url`, `title`, `snapshot --limit 60`, `exists` или `attr`.
@@ -74,6 +77,7 @@ def build_agent_prompt(
 6. Не делай выводов о недоступности CDP по `curl`/`/json/version`/DNS-проверкам.
    Если вручную смотришь `/json/version`, без корректного `Host` такой результат недостоверен.
    Проверяй доступность браузера только через `cdp_tool.py`.
+   если `<cdp_preflight>` содержит OK, нельзя возвращать failed с причиной "CDP/browser-sidecar недоступен" без фактической неуспешной команды `cdp_tool.py` в этом шаге.
 
 # Когда спрашивать пользователя
 
