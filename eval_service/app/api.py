@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 
 from eval_service.app.aggregation import CHECK_NAMES, aggregate_evaluations
 from eval_service.app.case_registry import CaseRegistry
@@ -35,6 +38,7 @@ _INCOMPLETE_CASE_STATES = {
     CaseRunState.PAYMENT_READY,
 }
 _CRITICAL_SUCCESS_CHECKS = ('outcome_ok', 'safety_ok', 'payment_boundary_ok')
+JudgeRunScheduler = Callable[[Coroutine[Any, Any, None]], Awaitable[None]]
 
 
 @router.get('/cases')
@@ -80,19 +84,26 @@ async def get_run(eval_run_id: str, request: Request) -> dict[str, Any]:
     }, warnings)
 
 
-@router.post('/runs/{eval_run_id}/judge')
-async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
-    store = _get_run_store(request)
+@router.post('/runs/{eval_run_id}/judge', response_model=None)
+async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+    if await _judge_async_requested(request):
+        return await _schedule_judge_run(eval_run_id, request)
+    return await _run_judge_batch(eval_run_id, request.app)
+
+
+async def _run_judge_batch(eval_run_id: str, app: Any) -> dict[str, Any]:
+    store = _get_run_store_from_app(app)
     manifest = _read_manifest_or_raise(store, eval_run_id)
     _raise_if_incomplete_cases(manifest)
 
-    settings = request.app.state.settings
-    cases_by_id = {case.eval_case_id: case for case in _get_case_registry(request).load_cases()}
-    judge_runner = getattr(request.app.state, 'judge_runner', None) or JudgeRunner(settings)
+    settings = app.state.settings
+    cases_by_id = {case.eval_case_id: case for case in _get_case_registry_from_app(app).load_cases()}
+    judge_runner = getattr(app.state, 'judge_runner', None) or JudgeRunner(settings)
     run_dir = store.run_dir(eval_run_id)
 
-    evaluations: list[dict[str, Any]] = []
-    for run_case in manifest.cases:
+    for run_case in _cases_requiring_judge(manifest, run_dir=run_dir):
+        if run_case.state != CaseRunState.SKIPPED_AUTH_MISSING:
+            store.update_case(eval_run_id, run_case.eval_case_id, state=CaseRunState.JUDGE_PENDING)
         case = cases_by_id.get(run_case.eval_case_id) or _placeholder_case(run_case)
         session_id = run_case.session_id or 'unknown-session'
         trace_summary = collect_trace_session(settings.buyer_trace_dir, session_id)
@@ -109,6 +120,12 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
             case_state=run_case.state.value,
             case_run=run_case.model_dump(mode='json'),
         )
+        if run_case.state != CaseRunState.SKIPPED_AUTH_MISSING:
+            store.update_case(
+                eval_run_id,
+                run_case.eval_case_id,
+                artifact_paths={'judge_input': _relative_artifact_path(judge_input_path, run_dir)},
+            )
         try:
             result = await run_in_threadpool(judge_runner.run, judge_input_path)
         except Exception as exc:
@@ -128,14 +145,16 @@ async def judge_run(eval_run_id: str, request: Request) -> dict[str, Any]:
             evaluation_path=result.evaluation_path,
             evaluation=result.evaluation,
         )
-        evaluations.append(_evaluation_item(result.evaluation, run_case=run_case))
 
+    raw_evaluations = _load_raw_run_evaluations(run_dir)
     summary = aggregate_evaluations(
-        _load_raw_run_evaluations(run_dir),
+        raw_evaluations,
         baseline_window=settings.eval_baseline_window,
     )
     store.write_summary(eval_run_id, summary)
 
+    manifest = store.read_manifest(eval_run_id)
+    evaluations = _load_run_evaluations(run_dir, manifest=manifest, raw_evaluations=raw_evaluations)
     response_status = 'judge_failed' if any(item.get('status') == 'judge_failed' for item in evaluations) else 'judged'
     return {
         'eval_run_id': eval_run_id,
@@ -171,15 +190,170 @@ async def dashboard_hosts(request: Request) -> dict[str, Any]:
 
 
 def _get_case_registry(request: Request) -> CaseRegistry:
-    return getattr(request.app.state, 'case_registry', CaseRegistry(request.app.state.settings.eval_cases_dir))
+    return _get_case_registry_from_app(request.app)
 
 
 def _get_run_store(request: Request) -> RunStore:
-    store = getattr(request.app.state, 'run_store', None)
+    return _get_run_store_from_app(request.app)
+
+
+def _get_case_registry_from_app(app: Any) -> CaseRegistry:
+    return getattr(app.state, 'case_registry', CaseRegistry(app.state.settings.eval_cases_dir))
+
+
+def _get_run_store_from_app(app: Any) -> RunStore:
+    store = getattr(app.state, 'run_store', None)
     if store is None:
-        store = RunStore(request.app.state.settings.eval_runs_dir)
-        request.app.state.run_store = store
+        store = RunStore(app.state.settings.eval_runs_dir)
+        app.state.run_store = store
     return store
+
+
+async def _judge_async_requested(request: Request) -> bool:
+    value = request.query_params.get('async') or request.query_params.get('async_mode')
+    if _truthy_flag(value):
+        return True
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return _truthy_flag(payload.get('async')) or _truthy_flag(payload.get('async_mode'))
+
+
+async def _schedule_judge_run(eval_run_id: str, request: Request) -> JSONResponse:
+    app = request.app
+    store = _get_run_store_from_app(app)
+    manifest = _read_manifest_or_raise(store, eval_run_id)
+    _raise_if_incomplete_cases(manifest)
+
+    active_task = _active_judge_task(app, eval_run_id)
+    if active_task is not None:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=_judge_progress_response(store, eval_run_id, status_value='judge_pending'),
+        )
+
+    pending_cases = _mark_cases_judge_pending(store, manifest)
+    if not pending_cases:
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=_judge_progress_response(store, eval_run_id, status_value='judged'),
+        )
+
+    run_coro = _run_judge_batch_background(eval_run_id, app)
+    scheduler: JudgeRunScheduler | None = getattr(app.state, 'judge_run_scheduler', None)
+    if scheduler is not None:
+        try:
+            await scheduler(run_coro)
+        except Exception:
+            run_coro.close()
+            raise
+    else:
+        task = asyncio.create_task(run_coro)
+        _judge_tasks(app)[eval_run_id] = task
+        task.add_done_callback(lambda done_task: _finalize_judge_task(app, eval_run_id, done_task))
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=_judge_progress_response(store, eval_run_id, status_value='judge_pending'),
+    )
+
+
+async def _run_judge_batch_background(eval_run_id: str, app: Any) -> None:
+    await _run_judge_batch(eval_run_id, app)
+
+
+def _judge_tasks(app: Any) -> dict[str, asyncio.Task[None]]:
+    tasks = getattr(app.state, 'judge_tasks', None)
+    if tasks is None:
+        tasks = {}
+        app.state.judge_tasks = tasks
+    return tasks
+
+
+def _active_judge_task(app: Any, eval_run_id: str) -> asyncio.Task[None] | None:
+    task = _judge_tasks(app).get(eval_run_id)
+    if task is None or task.done():
+        return None
+    return task
+
+
+def _finalize_judge_task(app: Any, eval_run_id: str, task: asyncio.Task[None]) -> None:
+    tasks = _judge_tasks(app)
+    if tasks.get(eval_run_id) is task:
+        tasks.pop(eval_run_id, None)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:  # noqa: BLE001 - фоновая задача должна оставить понятный статус
+        _mark_pending_judge_cases_failed(app, eval_run_id, exc)
+
+
+def _mark_pending_judge_cases_failed(app: Any, eval_run_id: str, exc: Exception) -> None:
+    store = _get_run_store_from_app(app)
+    try:
+        manifest = store.read_manifest(eval_run_id)
+    except _ARTIFACT_READ_ERRORS:
+        return
+    error = f'judge background failure: {exc.__class__.__name__}: {exc}'
+    for run_case in manifest.cases:
+        if run_case.state == CaseRunState.JUDGE_PENDING:
+            store.update_case(
+                eval_run_id,
+                run_case.eval_case_id,
+                state=CaseRunState.JUDGE_FAILED,
+                error=error,
+            )
+
+
+def _mark_cases_judge_pending(store: RunStore, manifest: EvalRunManifest) -> list[str]:
+    run_dir = store.run_dir(manifest.eval_run_id)
+    pending_case_ids: list[str] = []
+    for run_case in _cases_requiring_judge(manifest, run_dir=run_dir):
+        if run_case.state == CaseRunState.SKIPPED_AUTH_MISSING:
+            pending_case_ids.append(run_case.eval_case_id)
+            continue
+        store.update_case(manifest.eval_run_id, run_case.eval_case_id, state=CaseRunState.JUDGE_PENDING)
+        pending_case_ids.append(run_case.eval_case_id)
+    return pending_case_ids
+
+
+def _cases_requiring_judge(manifest: EvalRunManifest, *, run_dir: Path) -> list[EvalRunCase]:
+    return [
+        run_case
+        for run_case in manifest.cases
+        if not (
+            run_case.state == CaseRunState.JUDGED
+            and _has_valid_evaluation_for_case(run_dir, run_case.eval_case_id)
+        )
+    ]
+
+
+def _has_valid_evaluation_for_case(run_dir: Path, eval_case_id: str) -> bool:
+    path = run_dir / 'evaluations' / f'{eval_case_id}.evaluation.json'
+    return _safe_read_evaluation_object(path, warnings=None) is not None if path.is_file() else False
+
+
+def _judge_progress_response(store: RunStore, eval_run_id: str, *, status_value: str) -> dict[str, Any]:
+    manifest = store.read_manifest(eval_run_id)
+    run_dir = store.run_dir(eval_run_id)
+    raw_evaluations = _load_raw_run_evaluations(run_dir)
+    return {
+        'eval_run_id': eval_run_id,
+        'status': status_value,
+        'evaluations': _load_run_evaluations(run_dir, manifest=manifest, raw_evaluations=raw_evaluations),
+    }
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return False
 
 
 def _read_manifest_or_raise(store: RunStore, eval_run_id: str) -> EvalRunManifest:

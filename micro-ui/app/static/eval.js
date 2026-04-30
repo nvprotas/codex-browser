@@ -118,6 +118,7 @@
     activeRun: null,
     evaluations: [],
     runRefreshTimer: null,
+    judgePollingActive: false,
   };
 
   function clone(value) {
@@ -251,11 +252,20 @@
   }
 
   function shouldRefreshRun(run = state.activeRun) {
-    if (!window.EVAL_SERVICE_BASE_URL || !run?.eval_run_id || run.status !== 'running') {
+    if (!window.EVAL_SERVICE_BASE_URL || !run?.eval_run_id) {
       return false;
     }
     const cases = asArray(run.cases);
     if (cases.some((item) => item.runtime_status === 'waiting_user')) {
+      return false;
+    }
+    if (state.judgePollingActive) {
+      return true;
+    }
+    if (hasJudgePending(run)) {
+      return true;
+    }
+    if (run.status !== 'running') {
       return false;
     }
     return cases.some((item) =>
@@ -282,6 +292,7 @@
       }
       try {
         await loadRunDetail(state.activeRun.eval_run_id);
+        updateJudgeProgressFromRun();
         renderAll();
       } catch (error) {
         nodes.startResult.textContent = String(error.message || error);
@@ -320,6 +331,51 @@
       return null;
     }
     return asArray(state.activeRun.cases).find((item) => item.runtime_status === 'waiting_user' && item.waiting_reply_id) || null;
+  }
+
+  function hasJudgePending(run = state.activeRun) {
+    return asArray(run?.cases).some((item) => item.runtime_status === 'judge_pending');
+  }
+
+  function judgeProgressPayload(status = 'judge_pending') {
+    const cases = asArray(state.activeRun?.cases);
+    return {
+      eval_run_id: state.activeRun?.eval_run_id || null,
+      status,
+      evaluations: state.evaluations.length,
+      cases: cases.map((item) => ({
+        eval_case_id: item.eval_case_id,
+        status: item.runtime_status,
+      })),
+    };
+  }
+
+  function updateJudgeProgressFromRun() {
+    const currentText = nodes.judgeResult.textContent.trim();
+    const ownsResult = currentText.startsWith('Запуск') || currentText.startsWith('Judge') || currentText.startsWith('{');
+    if (!ownsResult) {
+      return;
+    }
+    if (hasJudgePending()) {
+      nodes.judgeResult.textContent = JSON.stringify(judgeProgressPayload('judge_pending'), null, 2);
+      return;
+    }
+    const hasFinalJudgeState = asArray(state.activeRun?.cases).some((item) =>
+      ['judged', 'judge_failed'].includes(item.runtime_status),
+    );
+    if (state.evaluations.length || (state.judgePollingActive && hasFinalJudgeState)) {
+      state.judgePollingActive = false;
+      const status = state.evaluations.some((item) => item.status === 'judge_failed') ? 'judge_failed' : 'judged';
+      nodes.judgeResult.textContent = JSON.stringify(
+        {
+          eval_run_id: state.activeRun?.eval_run_id,
+          status,
+          evaluations: state.evaluations,
+        },
+        null,
+        2,
+      );
+    }
   }
 
   function routeFor(contract, options) {
@@ -631,7 +687,7 @@
 
   function renderRunDetail() {
     nodes.runDetail.replaceChildren();
-    nodes.runJudge.disabled = !state.activeRun;
+    nodes.runJudge.disabled = !state.activeRun || hasJudgePending(state.activeRun);
 
     if (!state.activeRun) {
       nodes.runLabel.textContent = 'eval_run_id';
@@ -891,17 +947,28 @@
     if (!state.activeRun) {
       return;
     }
+    state.judgePollingActive = true;
     nodes.judgeResult.textContent = 'Запуск…';
     try {
       const data = await evalRequest(CONTRACT_PATHS.judge, {
         evalRunId: state.activeRun.eval_run_id,
+        payload: {
+          async: true,
+        },
       });
       state.activeRun.status = data.status || 'judge_pending';
       state.evaluations = extractEvaluations(data);
-      nodes.judgeResult.textContent = JSON.stringify(data, null, 2);
+      if (state.activeRun.eval_run_id && window.EVAL_SERVICE_BASE_URL) {
+        await loadRunDetail(state.activeRun.eval_run_id);
+      }
+      updateJudgeProgressFromRun();
+      if (!nodes.judgeResult.textContent.trim() || nodes.judgeResult.textContent.trim() === 'Запуск…') {
+        nodes.judgeResult.textContent = JSON.stringify(data, null, 2);
+      }
       renderAll();
-      stopRunRefresh();
+      scheduleRunRefresh();
     } catch (error) {
+      state.judgePollingActive = false;
       nodes.judgeResult.textContent = String(error.message || error);
     }
   });
