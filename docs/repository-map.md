@@ -340,7 +340,7 @@ HTTP-клиент доставки callback-событий.
 4. Проверяет `OPENAI_API_KEY` или `/root/.codex/auth.json`.
 5. Формирует попытки модели: `single` или `fast_then_strong`.
 6. Запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
-7. Параллельно стримит stdout/stderr и новые browser action records.
+7. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage.
 8. Парсит output JSON в `AgentOutput`.
 9. При fallback на strong модель сбрасывает браузер на `start_url`, если до этого не было mutating-команд.
 
@@ -616,6 +616,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 Особенности запуска Codex:
 
 - prompt записывается в `knowledge-analysis-prompt.txt` и передается в `codex exec` через stdin, чтобы большой snapshot не попадал в argv процесса;
+- `knowledge_analysis_schema.json` использует строгие object schemas без произвольных дополнительных полей для совместимости со Structured Outputs;
 - перед запуском пишется `knowledge_analysis_prompt_prepared` с размерами prompt и основных секций входного JSON без логирования полного содержимого.
 
 Security boundaries:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import json
 import logging
@@ -29,6 +30,10 @@ logger = logging.getLogger('uvicorn.error')
 MUTATING_BROWSER_COMMANDS = {'click', 'fill', 'press'}
 STREAM_BATCH_INTERVAL_SEC = 0.5
 STREAM_BATCH_SIZE = 20
+PROCESS_STREAM_READ_CHUNK_SIZE = 32768
+STREAM_TEXT_MAX_CHARS = 4000
+STREAM_TEXT_HEAD_CHARS = 2500
+STREAM_TEXT_TAIL_CHARS = 1000
 
 AgentStreamCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -1135,14 +1140,68 @@ async def _read_process_stream(
     chunks: list[str],
     publisher: _AgentStreamPublisher,
 ) -> None:
+    read = getattr(reader, 'read', None)
+    if callable(read):
+        decoder = codecs.getincrementaldecoder('utf-8')('ignore')
+        pending_text = ''
+        while True:
+            raw = await read(PROCESS_STREAM_READ_CHUNK_SIZE)
+            if not raw:
+                tail = decoder.decode(b'', final=True)
+                if tail:
+                    chunks.append(tail)
+                    pending_text += tail
+                if pending_text:
+                    await _publish_process_stream_text(
+                        source=source,
+                        stream=stream,
+                        text=pending_text,
+                        publisher=publisher,
+                    )
+                return
+
+            text = decoder.decode(raw, final=False)
+            if not text:
+                continue
+            chunks.append(text)
+            pending_text += text
+            while True:
+                newline_index = pending_text.find('\n')
+                if newline_index < 0:
+                    break
+                line = pending_text[: newline_index + 1]
+                pending_text = pending_text[newline_index + 1 :]
+                await _publish_process_stream_text(
+                    source=source,
+                    stream=stream,
+                    text=line,
+                    publisher=publisher,
+                )
+        return
+
     while True:
         raw = await reader.readline()
         if not raw:
             return
         text = raw.decode('utf-8', errors='ignore')
         chunks.append(text)
-        for payload_stream, item, message in _normalize_process_stream_line(stream=stream, text=text):
-            await publisher.publish(source=source, stream=payload_stream, item=item, message=message)
+        await _publish_process_stream_text(
+            source=source,
+            stream=stream,
+            text=text,
+            publisher=publisher,
+        )
+
+
+async def _publish_process_stream_text(
+    *,
+    source: str,
+    stream: str,
+    text: str,
+    publisher: _AgentStreamPublisher,
+) -> None:
+    for payload_stream, item, message in _normalize_process_stream_line(stream=stream, text=text):
+        await publisher.publish(source=source, stream=payload_stream, item=item, message=message)
 
 
 def _normalize_process_stream_line(*, stream: str, text: str) -> list[tuple[str, dict[str, Any], str]]:
@@ -1155,9 +1214,28 @@ def _normalize_process_stream_line(*, stream: str, text: str) -> list[tuple[str,
         except json.JSONDecodeError:
             return [('stdout', {'line': _tail_text(line, limit=2000)}, _tail_text(line, limit=140))]
         if isinstance(parsed, dict):
-            return [('codex_json', parsed, _stream_item_message(parsed))]
+            sanitized = _sanitize_stream_payload(parsed)
+            return [('codex_json', sanitized, _stream_item_message(sanitized))]
         return [('stdout', {'value': parsed}, _tail_text(str(parsed), limit=140))]
     return [('stderr', {'line': _tail_text(line, limit=2000)}, _tail_text(line, limit=140))]
+
+
+def _sanitize_stream_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sanitize_stream_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_stream_payload(item) for item in value]
+    if isinstance(value, str):
+        return _truncate_stream_text(value)
+    return value
+
+
+def _truncate_stream_text(value: str) -> str:
+    if len(value) <= STREAM_TEXT_MAX_CHARS:
+        return value
+    head = value[:STREAM_TEXT_HEAD_CHARS]
+    tail = value[-STREAM_TEXT_TAIL_CHARS:]
+    return f'{head}\n[truncated stream text: {len(value)} chars]\n{tail}'
 
 
 async def _tail_browser_actions(

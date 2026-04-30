@@ -35,6 +35,41 @@ class _FakeCodexProcess:
 
 
 class KnowledgeAnalyzerTests(unittest.TestCase):
+    def test_knowledge_analysis_schema_is_strict_for_structured_outputs(self) -> None:
+        schema_path = Path(__file__).parents[1] / 'app' / 'knowledge_analysis_schema.json'
+        schema = json.loads(schema_path.read_text(encoding='utf-8'))
+        violations: list[str] = []
+
+        def visit(node: object, path: str) -> None:
+            if not isinstance(node, dict):
+                return
+            properties = node.get('properties')
+            if node.get('type') == 'object' or isinstance(properties, dict):
+                if node.get('additionalProperties') is not False:
+                    violations.append(f'{path}: additionalProperties must be false')
+            if isinstance(properties, dict):
+                required = node.get('required')
+                if not isinstance(required, list):
+                    violations.append(f'{path}: missing required')
+                else:
+                    missing = sorted(set(properties) - set(required))
+                    extra = sorted(set(required) - set(properties))
+                    if missing or extra:
+                        violations.append(f'{path}: missing={missing} extra={extra}')
+                for key, value in properties.items():
+                    visit(value, f'{path}.properties.{key}')
+            for key in ('items', 'anyOf', 'oneOf', 'allOf', '$defs'):
+                value = node.get(key)
+                if isinstance(value, list):
+                    for index, item in enumerate(value):
+                        visit(item, f'{path}.{key}[{index}]')
+                elif isinstance(value, dict):
+                    visit(value, f'{path}.{key}')
+
+        visit(schema, '$')
+
+        self.assertEqual(violations, [])
+
     def test_sanitize_for_knowledge_drops_auth_payloads_and_secret_text(self) -> None:
         raw = {
             'auth': {'provider': 'sberid'},

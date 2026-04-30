@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
 from buyer.app.purchase_scripts import PurchaseScriptResult
-from buyer.app.runner import AgentRunner, _trace_date_dir_name
+from buyer.app.runner import AgentRunner, _AgentStreamPublisher, _read_process_stream, _trace_date_dir_name
 from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
@@ -419,6 +419,47 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item['source'] == 'codex' and item['stream'] == 'stderr' for item in stream_events))
         self.assertTrue(any(item['source'] == 'browser' and item['stream'] == 'browser_actions' for item in stream_events))
         self.assertTrue(all(isinstance(item.get('items'), list) and item['items'] for item in stream_events))
+
+    async def test_stream_reader_accepts_single_codex_json_line_longer_than_asyncio_limit(self) -> None:
+        oversized_line = json.dumps(
+            {
+                'type': 'item.completed',
+                'item': {
+                    'type': 'command_execution',
+                    'aggregated_output': 'x' * 120_000,
+                },
+            }
+        )
+        reader = asyncio.StreamReader(limit=64)
+        reader.feed_data(oversized_line.encode('utf-8') + b'\n')
+        reader.feed_eof()
+        chunks: list[str] = []
+        stream_events: list[dict[str, Any]] = []
+
+        async def stream_callback(payload: dict[str, Any]) -> None:
+            stream_events.append(payload)
+
+        publisher = _AgentStreamPublisher(
+            session_id='session-long-line',
+            step_index=1,
+            callback=stream_callback,
+        )
+
+        await _read_process_stream(
+            reader,
+            source='codex',
+            stream='stdout',
+            chunks=chunks,
+            publisher=publisher,
+        )
+        await publisher.aclose()
+
+        self.assertEqual(''.join(chunks), oversized_line + '\n')
+        self.assertTrue(any(event['stream'] == 'codex_json' for event in stream_events))
+        completed_event = next(event for event in stream_events if event['stream'] == 'codex_json')
+        output = completed_event['items'][0]['item']['aggregated_output']
+        self.assertLess(len(output), len(oversized_line))
+        self.assertIn('[truncated stream text:', output)
 
     async def test_run_step_fast_then_strong_retries_clean_failed_attempt(self) -> None:
         with TemporaryDirectory() as tmpdir:
