@@ -3,7 +3,7 @@ title: Brandshop purchase smoke
 host: brandshop.ru
 enabled: false
 disabled_reason: "Отключено до появления domain-specific SberPay verifier для brandshop.ru."
-start_url_template: "https://brandshop.ru/search/?q={{ search_query }}"
+start_url_template: "https://brandshop.ru/search/?st={{ search_query }}"
 task_template: "На brandshop.ru найди товар категории {{ product_category }} бренда {{ brand }} в размере {{ size }} и доведи покупку до шага SberPay без выполнения оплаты."
 default_metadata:
   city: Москва

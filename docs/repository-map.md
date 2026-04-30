@@ -361,7 +361,7 @@ HTTP-клиент доставки callback-событий.
 
 Входы: задача, start URL, CDP endpoint, preflight summary, metadata, redacted auth payload, auth context, user profile, memory, последний reply.
 
-Выход: outcome-first текст prompt с правилами управления `cdp_tool.py`, циклом `observe -> act -> verify`, SberPay-boundary, Litres-specific payment evidence, prompt-injection boundary для динамического контекста и schema-only ответом. Prompt фиксирует канонический формат CDP-команд: глобальный `--timeout-ms` до подкоманды, `text --max-chars`, `wait --seconds`, а также запрещает объявлять CDP/browser-sidecar недоступным при OK preflight без фактической неуспешной команды `cdp_tool.py`.
+Выход: outcome-first текст prompt с правилами управления `cdp_tool.py`, циклом `observe -> act -> verify`, SberPay-boundary, Litres-specific payment evidence, prompt-injection boundary для динамического контекста и schema-only ответом. Prompt фиксирует канонический формат CDP-команд: глобальный `--timeout-ms` до подкоманды, `text --max-chars`, `wait --seconds`, а также запрещает объявлять CDP/browser-sidecar недоступным при OK preflight без фактической неуспешной команды `cdp_tool.py`. В правилах `needs_user_input` поиск и открытие товара считаются обратимыми действиями: агент не должен спрашивать адрес до поиска и выбора товара; адрес или вариант доставки можно запрашивать только после найденного/выбранного товара, когда сайт реально требует эти данные для продолжения checkout.
 
 Ошибки явно не выбрасывает; риски связаны с устаревшими инструкциями, если меняется доменный контракт.
 
@@ -682,7 +682,7 @@ Runtime auth-профили берутся из host-директории `EVAL_
 Поведение:
 
 - файл с `enabled: false` полностью пропускается registry и не попадает в selectable eval cases;
-- `brandshop_purchase_smoke.yaml` временно отключен до появления domain-specific SberPay verifier для `brandshop.ru`;
+- `brandshop_purchase_smoke.yaml` временно отключен до появления domain-specific SberPay verifier для `brandshop.ru`; его стартовый search URL использует Brandshop-параметр `st`, например `https://brandshop.ru/search/?st={{ search_query }}`;
 - активные executable smoke-case сейчас: `litres_purchase_book_001`, `litres_purchase_book_002`, `litres_purchase_book_003`.
 
 ### `eval_service/app/callback_urls.py`
@@ -931,7 +931,8 @@ Runtime flow:
 | `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout; purchase runner stale output, уникальный output path и non-zero diagnostics behavior. |
 | `buyer/tests/test_knowledge_analyzer.py` | Sanitization, safe paths, trace refs, analysis payload/output. |
 | `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior и payment-boundary regression для Litres/unsupported domains. |
-| `buyer/tests/test_observability_and_cdp_tool.py` | Trace/browser action metrics, CDP tool output limits, observability и нейтральный выбор CDP-страницы. |
+| `buyer/tests/test_observability_and_cdp_tool.py` | Trace/browser action metrics, CDP tool output limits, observability, нейтральный выбор CDP-страницы и prompt guardrails для автономного поиска товара до запроса адреса доставки. |
+| `eval_service/tests/test_case_registry.py` | Загрузка YAML eval templates, repository smoke cases и regression на Brandshop search template `?st={{ search_query }}`. |
 | `eval_service/tests/test_callbacks.py` | Eval callback receiver, operator reply flow, malformed terminal callbacks, manifest redaction на диске. |
 | `eval_service/tests/test_run_store.py` | File manifest lifecycle, callback event redaction/deduplication, atomic summary writes. |
 | `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
