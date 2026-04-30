@@ -1,4 +1,4 @@
 interface:
   display_name: "Openclaw Buyer"
   short_description: "Запуск buyer-задач из openclaw"
-  default_prompt: "Use $openclaw-buyer to launch a buyer task through the HTTP API from openclaw."
+  default_prompt: "Сформулируй конечную цель покупки, ограничения и платежную границу, затем используй $openclaw-buyer для запуска buyer-задачи через HTTP API из openclaw."
