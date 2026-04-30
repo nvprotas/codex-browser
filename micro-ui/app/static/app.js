@@ -35,6 +35,9 @@ const agentQuestionTsNode = document.getElementById('agent-question-ts');
 const agentQuestionOptionsNode = document.getElementById('agent-question-options');
 const replyEmptyNode = document.getElementById('reply-empty');
 const replyStateBadgeNode = document.getElementById('reply-state-badge');
+const replyMetaNode = document.getElementById('reply-meta');
+const replySessionDisplayNode = document.getElementById('reply-session-display');
+const replyIdDisplayNode = document.getElementById('reply-id-display');
 
 const KNOWN_EVENT_TYPES = [
   'session_started',
@@ -633,7 +636,11 @@ function renderEvents(events) {
 
   const last = events.length ? events[events.length - 1] : null;
   if (last && last.event_type === 'ask_user') {
-    replyIdInput.value = last.payload?.reply_id || '';
+    const rid = last.payload?.reply_id || '';
+    replyIdInput.value = rid;
+    if (replyIdDisplayNode) {
+      replyIdDisplayNode.textContent = rid ? shortId(rid) : '—';
+    }
   }
 }
 
@@ -729,6 +736,13 @@ function renderAgentQuestion(session) {
 function hydrateReplyForm() {
   replySessionIdInput.value = selectedSessionId || '';
   replyIdInput.value = selectedSession?.waiting_reply_id || '';
+  if (replyMetaNode) {
+    replyMetaNode.hidden = !selectedSessionId;
+    replySessionDisplayNode.textContent = selectedSessionId ? shortId(selectedSessionId) : '';
+    replyIdDisplayNode.textContent = selectedSession?.waiting_reply_id
+      ? shortId(selectedSession.waiting_reply_id)
+      : '—';
+  }
   renderAgentQuestion(selectedSession);
 }
 
