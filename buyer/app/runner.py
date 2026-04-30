@@ -716,9 +716,20 @@ class AgentRunner:
             **actions_metrics,
         }
         _write_json_safely(trace['step_trace_path'], payload)
-        payload['trace_file'] = str(trace['step_trace_path'])
-        return {'trace': payload}
-
+        return {
+            'trace': _build_callback_trace_summary(
+                trace=trace,
+                prompt_hash=prompt_hash,
+                codex_returncode=codex_returncode,
+                duration_ms=duration_ms,
+                codex_model=codex_model,
+                codex_tokens_used=codex_tokens_used,
+                codex_attempts=codex_attempts or [],
+                model_strategy=model_strategy,
+                fallback_reason=fallback_reason,
+                browser_actions_total=actions_total,
+            )
+        }
 
 
 def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
@@ -757,6 +768,52 @@ def _preview_text(text: str, *, limit: int) -> str:
 
 def _merge_artifacts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
     return {**base, **extra}
+
+
+def _build_callback_trace_summary(
+    *,
+    trace: dict[str, Any],
+    prompt_hash: str | None,
+    codex_returncode: int | None,
+    duration_ms: int | None,
+    codex_model: str | None,
+    codex_tokens_used: int | None,
+    codex_attempts: list[dict[str, Any]],
+    model_strategy: str | None,
+    fallback_reason: str | None,
+    browser_actions_total: int,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        'step': trace['step_index'],
+        'trace_date': trace['trace_date'],
+        'trace_time': trace['trace_time'],
+        'prompt_sha256': prompt_hash,
+        'trace_file': str(trace['step_trace_path']),
+        'browser_actions_total': browser_actions_total,
+        'duration_ms': duration_ms,
+        'codex_returncode': codex_returncode,
+        'codex_model': codex_model,
+        'codex_tokens_used': codex_tokens_used,
+        'model_strategy': model_strategy,
+        'model_fallback_reason': fallback_reason,
+        'codex_attempts': _slim_codex_attempts(codex_attempts),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _slim_codex_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    slim_attempts: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        slim: dict[str, Any] = {}
+        for field in ('role', 'model', 'status', 'failure_reason'):
+            value = attempt.get(field)
+            if value is not None:
+                slim[field] = value
+        if slim:
+            slim_attempts.append(slim)
+    return slim_attempts
 
 
 def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]]]:

@@ -516,6 +516,38 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
+    const existingAuth = await verifyCurrentOrProfilePage(page, startUrl, tracePath);
+    if (existingAuth.verified) {
+      const currentUrl = page.url();
+      const currentHost = hostFromUrl(currentUrl);
+      save(outputPath, {
+        status: 'completed',
+        reason_code: 'auth_ok',
+        message: 'SberId-сессия Litres уже активна; повторный вход пропущен.',
+        artifacts: {
+          script: 'litres',
+          final_url: currentUrl,
+          final_host: currentHost,
+          auth_entry_url: entryUrl,
+          cookies_loaded: cookiesLoaded,
+          trace_path: tracePath,
+          sber_loops: sberLoops,
+          already_authenticated: true,
+          already_authenticated_diagnostic: {
+            callback_seen: existingAuth.callback_seen,
+            markers: existingAuth.markers,
+            login_form_seen: existingAuth.login_form_seen,
+          },
+          auth_verified: true,
+          auth_verified_url: currentUrl,
+          auth_markers: existingAuth.markers,
+          context_prepared_for_reuse: true,
+        },
+      });
+      keepAuthContext = true;
+      return;
+    }
+
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'goto_auth_entry',

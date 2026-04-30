@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+from buyer.app.auth_scripts import parse_allowlist
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
 from buyer.app.purchase_scripts import PurchaseScriptResult
 from buyer.app.runner import AgentRunner, _AgentStreamPublisher, _read_process_stream, _trace_date_dir_name
@@ -125,8 +126,12 @@ class _NoopAuthScriptRunner:
         return None
 
 
-class _CompletedPurchaseScriptRunner:
+class _RecordingCompletedPurchaseScriptRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def run(self, **_: Any) -> PurchaseScriptResult:
+        self.calls += 1
         return PurchaseScriptResult(
             status='completed',
             reason_code='purchase_ready',
@@ -137,57 +142,6 @@ class _CompletedPurchaseScriptRunner:
                 'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-456',
             },
         )
-
-
-class _InvalidCompletedPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт ошибочно принял оплату',
-            order_id='order-456',
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': 'https://www.litres.ru/purchase/ppd/?order=order-456&method=sbp&system=sbersbp',
-            },
-        )
-
-
-class _UnavailableSberPayPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='failed',
-            reason_code='purchase_script_sberpay_unavailable',
-            message='SberPay не найден, доступен только СБП.',
-            order_id=None,
-            artifacts={
-                'source': 'purchase-script-test',
-                'observed_payment_methods': ['СБП', 'Российская карта'],
-            },
-        )
-
-
-class _CompletedPurchaseScriptRunnerWithFrame:
-    def __init__(self, frame_src: str, *, order_id: str = 'order-456') -> None:
-        self.frame_src = frame_src
-        self.order_id = order_id
-
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт дошел до оплаты',
-            order_id=self.order_id,
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': self.frame_src,
-            },
-        )
-
-
-class _ThrowingPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        raise OSError('purchase runtime unavailable')
 
 
 class _RecordingKnowledgeAnalyzer:
@@ -948,16 +902,22 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
-    async def test_purchase_script_completion_skips_generic_runner(self) -> None:
+    async def test_litres_uses_generic_runner_with_default_purchase_settings(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
             AgentOutput(
-                status='failed',
-                message='generic runner should not be called',
-                order_id=None,
-                artifacts={},
+                status='completed',
+                message='Generic runner дошел до Litres SberPay iframe',
+                order_id='order-789',
+                payment_evidence={
+                    'source': 'litres_payecom_iframe',
+                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+                },
+                artifacts={'source': 'generic'},
             ),
         ])
+        purchase_runner = _RecordingCompletedPurchaseScriptRunner()
+        settings = Settings(_env_file=None)
         store = SessionStore(max_active_sessions=1)
         service = BuyerService(
             store=store,
@@ -970,8 +930,8 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             sberid_allowlist=set(),
             sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_CompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
+            purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
+            purchase_script_runner=purchase_runner,  # type: ignore[arg-type]
         )
 
         state = await service.create_session(
@@ -985,13 +945,14 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 0)
+        self.assertEqual(purchase_runner.calls, 0)
+        self.assertEqual(runner.calls, 1)
 
         payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']
         self.assertEqual(len(payment_ready_events), 1)
-        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-456')
+        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-789')
 
-    async def test_litres_rejects_non_exact_payecom_payment_evidence(self) -> None:
+    async def test_litres_generic_runner_rejects_non_exact_payecom_payment_evidence(self) -> None:
         cases = [
             'http://payecom.ru/pay_ru?orderId=order-456',
             'https://evil.payecom.ru/pay_ru?orderId=order-456',
@@ -1004,10 +965,14 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 callback_client = _RecordingCallbackClient()
                 runner = _SequenceRunner([
                     AgentOutput(
-                        status='failed',
-                        message='generic runner did not recover payment boundary',
-                        order_id=None,
-                        artifacts={},
+                        status='completed',
+                        message='Generic runner дошел до Litres payment boundary',
+                        order_id='order-456',
+                        payment_evidence={
+                            'source': 'litres_payecom_iframe',
+                            'url': frame_src,
+                        },
+                        artifacts={'source': 'generic'},
                     ),
                 ])
                 store = SessionStore(max_active_sessions=1)
@@ -1022,8 +987,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     sberid_allowlist=set(),
                     sberid_auth_retry_budget=1,
                     auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-                    purchase_script_allowlist={'litres.ru'},
-                    purchase_script_runner=_CompletedPurchaseScriptRunnerWithFrame(frame_src),  # type: ignore[arg-type]
                 )
 
                 state = await service.create_session(
@@ -1083,7 +1046,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
         self.assertIn('order_id', scenario_finished_events[0].payload.get('message', ''))
 
-    async def test_unsupported_domain_completed_with_order_id_is_not_success(self) -> None:
+    async def test_brandshop_completed_with_order_id_without_valid_evidence_is_not_success(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
             AgentOutput(
@@ -1122,140 +1085,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
-        self.assertIn('не поддерживается verifier', scenario_finished_events[0].payload.get('message', ''))
-
-    async def test_invalid_completed_purchase_script_falls_back_to_generic_runner(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='completed',
-                message='Generic runner дошел до Litres SberPay iframe',
-                order_id='order-789',
-                payment_evidence={
-                    'source': 'litres_payecom_iframe',
-                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                },
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_InvalidCompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 1)
-
-        payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']
-        self.assertEqual(len(payment_ready_events), 1)
-        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-789')
-
-    async def test_unavailable_sberpay_purchase_script_falls_back_without_payment_ready(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='failed',
-                message='Generic runner тоже не нашел SberPay.',
-                order_id=None,
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_UnavailableSberPayPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.FAILED)
-        self.assertEqual(runner.calls, 1)
-        self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
-
-    async def test_purchase_script_exception_falls_back_to_generic_runner(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='completed',
-                message='Generic runner completed',
-                order_id='order-789',
-                payment_evidence={
-                    'source': 'litres_payecom_iframe',
-                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                },
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_ThrowingPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 1)
-
-        memory = await store.get_agent_memory(state.session_id)
-        self.assertTrue(any('[PURCHASE_SCRIPT_FALLBACK]' in item['text'] for item in memory))
+        self.assertIn('Brandshop completed result rejected', scenario_finished_events[0].payload.get('message', ''))
 
     async def test_profile_updates_are_appended_to_user_info_file(self) -> None:
         callback_client = _RecordingCallbackClient()

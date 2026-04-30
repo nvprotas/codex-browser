@@ -345,6 +345,7 @@ def _payload_status(envelope: BuyerCallbackEnvelope) -> str | None:
 def _validate_callback_payload(envelope: BuyerCallbackEnvelope) -> None:
     if envelope.event_type == CallbackEventType.PAYMENT_READY:
         _payload_string(envelope, 'order_id')
+        _payload_string(envelope, 'order_id_host')
         _payload_string(envelope, 'message')
         return
     if envelope.event_type == CallbackEventType.SCENARIO_FINISHED:

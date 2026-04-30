@@ -21,6 +21,13 @@ type TraceEvent = {
   details?: Record<string, unknown>;
 };
 
+type AuthVerification = {
+  verified: boolean;
+  markers: string[];
+  login_form_seen: boolean;
+  account_url_seen: boolean;
+};
+
 type ClickTarget = {
   label: string;
   timeoutMs?: number;
@@ -62,6 +69,66 @@ export function isSameOrSubdomain(host: string, expected: string): boolean {
 
 function isSberIdHost(host: string): boolean {
   return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
+}
+
+function authVerificationUrl(startUrl: string): string {
+  const url = new URL(startUrl);
+  if (isSameOrSubdomain(normalizeHost(url.hostname), BRANDSHOP_DOMAIN)) {
+    url.hostname = BRANDSHOP_DOMAIN;
+  }
+  url.pathname = '/account/';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+export function verifyBrandshopAuthSnapshot(rawUrl: string, bodyText: string | null | undefined): AuthVerification {
+  const text = String(bodyText || '').replace(/\s+/g, ' ').trim();
+  const markers: string[] = [];
+  if (/Личный кабинет/iu.test(text)) {
+    markers.push('Личный кабинет');
+  }
+  if (/Профиль/iu.test(text)) {
+    markers.push('Профиль');
+  }
+  if (/Мои заказы|История заказов|Заказы/iu.test(text)) {
+    markers.push('Мои заказы');
+  }
+  if (/Личные данные|Персональные данные|Мои данные|Контактные данные|Адреса доставки|Мои адреса/iu.test(text)) {
+    markers.push('Личные данные');
+  }
+  if (/Выйти/iu.test(text)) {
+    markers.push('Выйти');
+  }
+  if (/Logout|Log out|Sign out/iu.test(text)) {
+    markers.push('Logout');
+  }
+
+  let accountUrlSeen = false;
+  try {
+    const url = new URL(rawUrl);
+    accountUrlSeen = /\/(account|profile|personal|cabinet)(\/|$)/iu.test(url.pathname);
+  } catch {
+    accountUrlSeen = false;
+  }
+
+  const loginFormSeen =
+    /Войти с\s+Сбер\s*ID|Войти через\s+Сбер\s*ID|Номер телефона|Получить код|Регистрация|Зарегистрироваться/iu.test(
+      text,
+    ) ||
+    /(^|[\s,.;:!?()«»"'`-])(?:Войти|Вход|Авторизация)(?=$|[\s,.;:!?()«»"'`-])/iu.test(text) ||
+    /\b(?:Login|Log in|Sign in|Sign up|Register)\b/iu.test(text);
+  const hasLogout = markers.includes('Выйти') || markers.includes('Logout');
+  const hasProfile = markers.includes('Профиль') || markers.includes('Личный кабинет');
+  const hasOrders = markers.includes('Мои заказы');
+  const hasAccountUserInfo = markers.includes('Личные данные');
+  const hasStrongAuthenticatedMarker = hasOrders || hasLogout || hasAccountUserInfo;
+  return {
+    verified: !loginFormSeen && hasStrongAuthenticatedMarker && (hasProfile || hasLogout || hasAccountUserInfo),
+    markers,
+    login_form_seen: loginFormSeen,
+    account_url_seen: accountUrlSeen,
+  };
 }
 
 export function authEntryUrl(startUrl: string): string {
@@ -155,6 +222,48 @@ async function tracePage(
       body_text_head: bodyText,
     },
   });
+}
+
+async function pageBodyText(page: Page): Promise<string> {
+  return page
+    .locator('body')
+    .innerText({ timeout: 1500 })
+    .then((text) => text.slice(0, 3000))
+    .catch(() => '');
+}
+
+async function verifyAuthPage(page: Page, tracePath: string, event: string): Promise<AuthVerification> {
+  const bodyText = await pageBodyText(page);
+  const verification = verifyBrandshopAuthSnapshot(page.url(), bodyText);
+  appendTrace(tracePath, {
+    ts: new Date().toISOString(),
+    event,
+    url: page.url(),
+    host: hostFromUrl(page.url()),
+    details: {
+      ...verification,
+      body_text_head: bodyText.slice(0, 500),
+    },
+  });
+  return verification;
+}
+
+async function verifyCurrentOrAccountPage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
+  let verification = await verifyAuthPage(page, tracePath, 'auth_verify_current');
+  if (verification.verified) {
+    return verification;
+  }
+
+  await page.goto(authVerificationUrl(startUrl), { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
+  verification = await verifyAuthPage(page, tracePath, 'auth_verify_account');
+  if (verification.verified) {
+    return verification;
+  }
+
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
+  return verifyAuthPage(page, tracePath, 'auth_verify_start_url');
 }
 
 async function clickFirstVisible(
@@ -420,6 +529,39 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
+    const existingAuth = await verifyCurrentOrAccountPage(page, startUrl, tracePath);
+    if (existingAuth.verified) {
+      const currentUrl = page.url();
+      const currentHost = hostFromUrl(currentUrl);
+      save(outputPath, {
+        status: 'completed',
+        reason_code: 'auth_ok',
+        message: 'SberId-сессия Brandshop уже активна; повторный вход пропущен.',
+        artifacts: {
+          script: SCRIPT_NAME,
+          final_url: currentUrl,
+          final_host: currentHost,
+          expected_host: expectedHost,
+          auth_entry_url: entryUrl,
+          cookies_loaded: cookiesLoaded,
+          trace_path: tracePath,
+          sber_loops: sberLoops,
+          already_authenticated: true,
+          already_authenticated_diagnostic: {
+            markers: existingAuth.markers,
+            login_form_seen: existingAuth.login_form_seen,
+            account_url_seen: existingAuth.account_url_seen,
+          },
+          auth_verified: true,
+          auth_verified_url: currentUrl,
+          auth_markers: existingAuth.markers,
+          context_prepared_for_reuse: true,
+        },
+      });
+      keepAuthContext = true;
+      return;
+    }
+
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'goto_auth_entry',
@@ -580,12 +722,22 @@ async function main(): Promise<void> {
     const deadline = Date.now() + 45000;
     let finalUrl = authPage.url();
     let finalHost = hostFromUrl(finalUrl);
+    let lastAuthVerification: AuthVerification | null = null;
     while (Date.now() < deadline) {
       await authPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => undefined);
       finalUrl = authPage.url();
       finalHost = hostFromUrl(finalUrl);
 
       if (isSameOrSubdomain(finalHost, expectedHost) && (sberLoops > 0 || finalUrl !== entryUrl)) {
+        const verification = await verifyCurrentOrAccountPage(authPage, startUrl, tracePath);
+        finalUrl = authPage.url();
+        finalHost = hostFromUrl(finalUrl);
+        lastAuthVerification = verification;
+        if (!verification.verified) {
+          await authPage.waitForTimeout(800);
+          continue;
+        }
+
         save(outputPath, {
           status: 'completed',
           reason_code: 'auth_ok',
@@ -601,6 +753,9 @@ async function main(): Promise<void> {
             sber_id_click: sberClick.label,
             trace_path: tracePath,
             sber_loops: sberLoops,
+            auth_verified: true,
+            auth_verified_url: finalUrl,
+            auth_markers: verification.markers,
             context_prepared_for_reuse: true,
           },
         });
@@ -648,6 +803,10 @@ async function main(): Promise<void> {
         sber_id_click: sberClick.label,
         trace_path: tracePath,
         sber_loops: sberLoops,
+        auth_verified: false,
+        auth_verified_url: finalUrl,
+        auth_markers: lastAuthVerification?.markers ?? [],
+        login_form_seen: lastAuthVerification?.login_form_seen ?? false,
         context_prepared_for_reuse: false,
       },
     });

@@ -75,6 +75,7 @@ class CallbackStore:
                 ask_options: list[str] = []
                 ask_asked_at = None
                 order_id = None
+                order_id_host = None
                 status = None
                 novnc_url = None
 
@@ -97,7 +98,14 @@ class CallbackStore:
                         ask_options = []
                         ask_asked_at = None
                     if event.event_type == 'payment_ready':
-                        order_id = event.payload.get('order_id')
+                        raw_order_id = event.payload.get('order_id')
+                        raw_order_id_host = event.payload.get('order_id_host')
+                        order_id = raw_order_id if isinstance(raw_order_id, str) and raw_order_id else None
+                        order_id_host = (
+                            raw_order_id_host
+                            if isinstance(raw_order_id_host, str) and raw_order_id_host
+                            else None
+                        )
                     if event.event_type == 'scenario_finished':
                         status = event.payload.get('status')
                         waiting_reply_id = None
@@ -120,6 +128,7 @@ class CallbackStore:
                         ask_options=ask_options,
                         ask_asked_at=ask_asked_at,
                         order_id=order_id,
+                        order_id_host=order_id_host,
                         status=status,
                         novnc_url=novnc_url,
                         updated_at=last_event.occurred_at,

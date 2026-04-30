@@ -64,7 +64,12 @@ def test_run_and_callback_contracts_validate_known_states() -> None:
         event_type=CallbackEventType.PAYMENT_READY,
         occurred_at=occurred_at,
         idempotency_key='idem-1',
-        payload={'payment_method': 'sberpay'},
+        payload={
+            'payment_method': 'sberpay',
+            'order_id': 'order-1',
+            'order_id_host': 'payecom.ru',
+            'message': 'Открыт SberPay.',
+        },
         eval_run_id='eval-20260428-120000',
         eval_case_id='litres_book_odyssey_001',
     )

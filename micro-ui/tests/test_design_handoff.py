@@ -103,3 +103,26 @@ class CallbackStoreAskUserSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(summary.ask_question)
         self.assertEqual(summary.ask_options, [])
         self.assertIsNone(summary.ask_asked_at)
+
+    async def test_list_sessions_exposes_payment_ready_order_host(self) -> None:
+        store = CallbackStore()
+
+        await store.add(
+            _session_event(
+                event_id='evt-payment-ready',
+                event_type='payment_ready',
+                occurred_at=datetime(2026, 4, 28, 11, 20, 12, tzinfo=timezone.utc),
+                payload={
+                    'order_id': 'brandshop-order-123',
+                    'order_id_host': 'yoomoney.ru',
+                    'message': 'Платежный шаг готов.',
+                },
+            )
+        )
+        summaries = await store.list_sessions()
+
+        summary = summaries[0]
+        self.assertEqual(summary.status, 'running')
+        self.assertEqual(summary.order_id, 'brandshop-order-123')
+        self.assertEqual(summary.order_id_host, 'yoomoney.ru')
+        self.assertEqual(summary.last_message, 'Платежный шаг готов.')

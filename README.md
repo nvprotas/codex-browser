@@ -25,8 +25,8 @@ OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.
 - Трассировка шагов `codex`: сохраняются prompt, stdout/stderr tail, итог шага и лог браузерных команд.
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
-- Быстрый `purchase scripts-first` и строгий SberPay verifier для `litres.ru`: если скрипт надежно доходит до подтвержденного `orderId`, generic `codex exec` не запускается.
-- Non-Litres `payment_ready` временно запрещен до появления domain-specific verifier, чтобы не показывать непроверенный платежный шаг.
+- Инфраструктура быстрых purchase-скриптов сохранена для будущих доменов, но текущий registry и default allowlist пустые.
+- Litres и Brandshop покупаются через generic Codex-agent после SberId-подготовки; `payment_ready` разрешен только после domain-specific verifier.
 - Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
@@ -82,8 +82,9 @@ USER_BUYER_INFO_PATH=
 # AUTH_SCRIPTS_DIR=/app/scripts
 # AUTH_SCRIPT_TIMEOUT_SEC=90
 
-# Быстрые purchase-скрипты до generic codex-flow
-# PURCHASE_SCRIPT_ALLOWLIST=litres.ru
+# Быстрые purchase-скрипты до generic codex-flow.
+# По умолчанию registry/default allowlist пустые; Litres и Brandshop идут через generic-agent.
+# PURCHASE_SCRIPT_ALLOWLIST=
 # PURCHASE_SCRIPT_TIMEOUT_SEC=120
 
 # Долговременное состояние buyer
@@ -100,12 +101,13 @@ USER_BUYER_INFO_PATH=
 Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
 Auth-профили для `eval_service` монтируются из host-директории `EVAL_AUTH_PROFILES_HOST_DIR` в `/run/eval/auth-profiles`.
-Имя файла совпадает с `auth_profile` в `eval/cases/*.yaml` плюс расширение `.json`: для текущего Litres-кейса нужен `litres_sberid.json`.
+Имя файла совпадает с `auth_profile` в `eval/cases/*.yaml` плюс расширение `.json`: для текущих Litres/Brandshop-кейсов нужны `litres_sberid.json` и `brandshop_sberid.json`.
 Например:
 
 ```bash
 mkdir -p /Users/nikolay/Desktop/eval-auth-profiles
 cp /Users/nikolay/Desktop/sber-cookies.json /Users/nikolay/Desktop/eval-auth-profiles/litres_sberid.json
+cp /Users/nikolay/Desktop/sber-cookies.json /Users/nikolay/Desktop/eval-auth-profiles/brandshop_sberid.json
 ```
 
 ```bash
@@ -236,9 +238,9 @@ Post-session анализ не отправляет дополнительный
 
 ## Быстрые purchase-скрипты
 
-После SberId-подготовки `buyer` проверяет `PURCHASE_SCRIPT_ALLOWLIST`. Для `litres.ru` он запускает `buyer/scripts/purchase/litres.ts` до generic `codex exec`.
+После SberId-подготовки `buyer` проверяет `PURCHASE_SCRIPT_ALLOWLIST`, но текущий purchase script registry пустой и default allowlist тоже пустой. Это означает, что ни один домен не получает scripts-first покупку по умолчанию.
 
-Скрипт принимает `--endpoint`, `--start-url`, `--task`, `--output-path`, извлекает запрос из формата `Ищи книгу <query>`, открывает поиск Litres, выбирает релевантную книгу, добавляет ее в корзину и переходит только до страницы оплаты. Финальную оплату скрипт не выполняет. Если скрипт не нашел запрос, товар, кнопку корзины или `orderId`, он возвращает failed-результат, а `buyer` продолжает текущим generic browser-flow.
+Litres и Brandshop сейчас проходят покупку через generic Codex-agent. Для успешного `payment_ready` результат generic-agent должен пройти доменный verifier: Litres принимает только PayEcom iframe с `orderId`, Brandshop принимает только YooMoney SberPay contract URL с `orderId`.
 
 Чтобы смотреть это в реальном времени в логах контейнера:
 

@@ -1,16 +1,15 @@
 template_id: brandshop_purchase_smoke
 title: Brandshop purchase smoke
 host: brandshop.ru
-enabled: false
-disabled_reason: "Отключено до появления domain-specific SberPay verifier для brandshop.ru."
-start_url_template: "https://brandshop.ru/search/?q={{ search_query }}"
-task_template: "На brandshop.ru найди товар категории {{ product_category }} бренда {{ brand }} в размере {{ size }} и доведи покупку до шага SberPay без выполнения оплаты."
+enabled: true
+start_url_template: "https://brandshop.ru/"
+task_template: "На brandshop.ru найди {{ color_preference }} товар категории {{ product_category }} бренда {{ brand }} модели {{ model }} в размере {{ size }} и доведи покупку до шага SberPay без выполнения оплаты."
 default_metadata:
   city: Москва
   market: fashion
 auth_profile: brandshop_sberid
 expected_outcome:
-  target: "Товар категории {{ product_category }} бренда {{ brand }} в размере {{ size }}"
+  target: "{{ color_preference }} товар категории {{ product_category }} бренда {{ brand }} модели {{ model }} в размере {{ size }}"
   stop_condition: "Открыт платежный шаг SberPay/payment-ready, реальный платеж не выполнен"
   acceptable_variants:
     - "Страница checkout с выбранным или доступным SberPay"
@@ -31,12 +30,16 @@ rubric:
 variants:
   - eval_case_id: brandshop_purchase_smoke_001
     case_version: "1"
-    variant_id: carhartt_wip_tshirt_m
+    variant_id: jordan_air_high_light_45_eu
     variables:
-      product_category: футболка
-      brand: Carhartt WIP
-      size: M
-      search_query: "carhartt%20wip%20%D1%84%D1%83%D1%82%D0%B1%D0%BE%D0%BB%D0%BA%D0%B0"
+      product_category: кроссовки
+      brand: Jordan
+      model: Air High
+      color_preference: светлые
+      size: 45 EU
+      search_query: "Jordan%20Air%20High"
     metadata:
-      budget_rub: 15000
-      desired_size: M
+      budget_rub: 30000
+      desired_size: 45 EU
+      desired_color: светлые
+      desired_model: Air High

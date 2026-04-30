@@ -71,6 +71,7 @@ components:
         idempotency_key: 8b69d854-2d5d-4fb3-9946-d09736c8a461:payment_ready:payment-ready
         payload:
           order_id: '1585051118'
+          order_id_host: payecom.ru
           message: Получен orderId, шаг оплаты готов.
 
   schemas:
@@ -335,10 +336,15 @@ components:
       type: object
       required:
         - order_id
+        - order_id_host
         - message
       properties:
         order_id:
           type: string
+        order_id_host:
+          type: string
+          minLength: 1
+          description: Verifier-approved host страницы или iframe, где найден `order_id`.
         message:
           type: string
       additionalProperties:
@@ -373,32 +379,22 @@ components:
       type: object
       description: Усеченный trace, который buyer прикладывает к `agent_step_finished`.
       properties:
+        step:
+          type: integer
+          minimum: 1
         trace_date:
           type: string
         trace_time:
-          type: string
-        prompt_path:
           type: string
         prompt_sha256:
           type: string
         trace_file:
           type: string
-        browser_actions_log_path:
-          type: string
+          description: Локальная ссылка на полный trace-файл для eval/debug-инструментов.
         browser_actions_total:
           type: integer
         duration_ms:
           type: number
-        command_duration_ms:
-          type: number
-        inter_command_idle_ms:
-          type: number
-        browser_busy_union_ms:
-          type: number
-        post_browser_idle_ms:
-          type: number
-        command_errors:
-          type: integer
         codex_tokens_used:
           type: integer
         codex_model:
@@ -409,22 +405,9 @@ components:
           type: string
         codex_returncode:
           type: integer
-        prompt_preview:
-          type: string
-        stdout_tail:
-          type: string
-        stderr_tail:
-          type: string
-        browser_actions_tail:
-          type: array
-          items:
-            $ref: '#/components/schemas/JsonObject'
-        top_idle_gaps:
-          type: array
-          items:
-            $ref: '#/components/schemas/JsonObject'
         codex_attempts:
           type: array
+          description: Усеченные attempts без stdout/stderr, output paths и timing arrays.
           items:
             $ref: '#/components/schemas/JsonObject'
       additionalProperties:

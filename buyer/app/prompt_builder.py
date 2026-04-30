@@ -41,13 +41,29 @@ def build_agent_prompt(
 - Путь покупки доведен только до SberPay/СберPay/СберПэй; реальный платеж не выполняется.
 - SberPay означает именно способ оплаты SberPay/СберPay/СберПэй: не СБП, не Система быстрых платежей, не SBP и не FPS. Не выбирай эти способы и не считай их успешной заменой SberPay.
 - Для Litres SberPay находится за способом оплаты "Российская карта": выбери "Российская карта", нажми "Продолжить", дождись iframe payment с адресом вида `https://payecom.ru/pay_ru?orderId=...` и верни orderId из параметра `orderId` в src этого iframe.
+- Для Brandshop используй generic playbook ниже: он задает путь через UI-поиск, фильтры, корзину, checkout и внешний YooMoney contract URL для SberPay.
 
 # Жесткие инварианты
 
 - Не выполняй реальный платеж и не нажимай финальное подтверждение оплаты.
-- Если orderId найден не на странице SberPay/не в платежном iframe SberPay или выбран только СБП/SBP/FPS, верни `order_id=null`.
+- Если orderId найден не на странице SberPay/не в платежном iframe SberPay/не в Brandshop YooMoney SberPay redirect или выбран только СБП/SBP/FPS, верни `order_id=null`.
 - При `status=completed` для Litres верни `payment_evidence={{"source":"litres_payecom_iframe","url":"<iframe src>"}}`; url должен быть тем самым `https://payecom.ru/pay_ru?...orderId=...`, из которого взят `order_id`.
+- При `status=completed` для Brandshop верни `payment_evidence={{"source":"brandshop_yoomoney_sberpay_redirect","url":"<YooMoney contract URL>"}}`; url должен быть точным `https://yoomoney.ru/checkout/payments/v2/contract?orderId=...`, из которого взят `order_id`.
 - В `profile_updates` нельзя включать auth, storageState, cookies, платежные данные и одноразовые детали текущего заказа.
+
+# Brandshop generic playbook
+
+- Brandshop auth script возвращает браузер на `https://brandshop.ru/`; сначала проверь текущую страницу и работай от главной страницы, а не от hardcoded SKU.
+- Для поиска открой header search button с `aria-label="search"`, заполни catalog search input с placeholder `Искать в каталоге` и press Enter.
+- Строй поисковый запрос только из product identity текущей задачи: бренд, модель и категория из task/metadata/latest_user_reply идут в запрос; размер и цвет являются ограничениями для фильтрации, ранжирования и проверки, а не дефолтными словами поиска.
+- размер из текущей задачи, metadata или latest_user_reply является обязательным constraint, если он указан: выбирай его через UI-фильтр или подтвержденный control на странице товара. URL с `mfp=...` допустим только если он достигнут через UI или подтвержден через page links/state; не hardcode `mfp` как единственный путь.
+- Для цвета: цветовое предпочтение из текущей задачи, metadata или latest_user_reply используй как ranking/verification constraint. Если запрошенную цветовую семью нельзя надежно отличить по text/link/alt/snapshot/screenshot, например light/beige/white от black, верни `status=needs_user_input` с одним вопросом о цвете.
+- Перед `Добавить в корзину` проверь бренд, модель, категорию, цвет и размер выбранного товара относительно текущей задачи, metadata, профиля и свежего ответа пользователя.
+- После добавления открой корзину и проверь ровно один товар: matching product, указанный размер при наличии, quantity `1`. Если товаров больше одного, товар не совпадает, размер не соответствует текущей задаче или количество не `1`, исправь обратимым действием или верни `needs_user_input`.
+- На checkout проверь адрес доставки. Если адрес отсутствует, неоднозначен или требует выбора/редактирования, верни `status=needs_user_input`.
+- Выбирай только radio/payment method `SberPay`; SBP/FPS/СБП и Система быстрых платежей не являются заменой.
+- На Brandshop `Подтвердить заказ` можно нажать только после явного выбора SberPay и только чтобы создать внешнюю платежную сессию; не продолжай оплату на YooMoney.
+- Остановись сразу на `https://yoomoney.ru/checkout/payments/v2/contract?orderId=...`, извлеки matching `order_id` из `orderId` и верни `payment_evidence.source="brandshop_yoomoney_sberpay_redirect"` с этим exact evidence URL.
 
 # Инструменты CDP
 

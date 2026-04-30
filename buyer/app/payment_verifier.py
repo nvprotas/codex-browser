@@ -8,17 +8,27 @@ from .auth_scripts import domain_from_url, is_domain_in_allowlist
 from .models import AgentOutput, PaymentEvidence
 
 LITRES_PAYMENT_EVIDENCE_SOURCE = 'litres_payecom_iframe'
+BRANDSHOP_PAYMENT_EVIDENCE_SOURCE = 'brandshop_yoomoney_sberpay_redirect'
+PAYECOM_PAYMENT_HOST = 'payecom.ru'
+YOOMONEY_PAYMENT_HOST = 'yoomoney.ru'
+YOOMONEY_PAYMENT_PATH = '/checkout/payments/v2/contract'
 LITRES_DOMAINS = {'litres.ru'}
+BRANDSHOP_DOMAINS = {'brandshop.ru'}
 
 
 @dataclass(frozen=True)
 class PaymentVerificationResult:
     accepted: bool
     failure_reason: str | None = None
+    order_id_host: str | None = None
 
 
 def is_litres_url(raw_url: str) -> bool:
     return is_domain_in_allowlist(domain_from_url(raw_url), LITRES_DOMAINS)
+
+
+def is_brandshop_url(raw_url: str) -> bool:
+    return is_domain_in_allowlist(domain_from_url(raw_url), BRANDSHOP_DOMAINS)
 
 
 def payecom_order_id_from_url(raw_url: str) -> str | None:
@@ -28,11 +38,33 @@ def payecom_order_id_from_url(raw_url: str) -> str | None:
         return None
     if parsed.scheme != 'https':
         return None
-    if (parsed.hostname or '').lower() != 'payecom.ru':
+    if parsed.netloc != PAYECOM_PAYMENT_HOST:
         return None
     if parsed.path != '/pay_ru':
         return None
-    order_values = parse_qs(parsed.query).get('orderId') or []
+    if parsed.params:
+        return None
+    order_values = parse_qs(parsed.query, keep_blank_values=True).get('orderId') or []
+    if len(order_values) != 1:
+        return None
+    order_id = str(order_values[0]).strip()
+    return order_id or None
+
+
+def yoomoney_order_id_from_url(raw_url: str) -> str | None:
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+    if parsed.scheme != 'https':
+        return None
+    if parsed.netloc != YOOMONEY_PAYMENT_HOST:
+        return None
+    if parsed.path != YOOMONEY_PAYMENT_PATH:
+        return None
+    if parsed.params:
+        return None
+    order_values = parse_qs(parsed.query, keep_blank_values=True).get('orderId') or []
     if len(order_values) != 1:
         return None
     order_id = str(order_values[0]).strip()
@@ -51,6 +83,8 @@ def payment_evidence_from_purchase_script(script_result: Any) -> PaymentEvidence
 def verify_completed_payment(start_url: str, result: AgentOutput) -> PaymentVerificationResult:
     if is_litres_url(start_url):
         return _verify_litres_payment(result)
+    if is_brandshop_url(start_url):
+        return _verify_brandshop_payment(result)
 
     domain = domain_from_url(start_url) or '<unknown>'
     return PaymentVerificationResult(
@@ -69,7 +103,8 @@ def _verify_litres_payment(result: AgentOutput) -> PaymentVerificationResult:
             accepted=False,
             failure_reason='Litres completed result rejected: order_id обязателен для подтвержденного шага SberPay.',
         )
-    if not _has_valid_litres_payment_evidence(result, order_id):
+    order_id_host = _litres_payment_order_id_host(result, order_id)
+    if order_id_host is None:
         return PaymentVerificationResult(
             accepted=False,
             failure_reason=(
@@ -77,11 +112,46 @@ def _verify_litres_payment(result: AgentOutput) -> PaymentVerificationResult:
                 'payment_evidence из iframe https://payecom.ru/pay_ru?...orderId=...'
             ),
         )
-    return PaymentVerificationResult(accepted=True)
+    return PaymentVerificationResult(accepted=True, order_id_host=order_id_host)
 
 
-def _has_valid_litres_payment_evidence(result: AgentOutput, order_id: str) -> bool:
-    return any(payecom_order_id_from_url(url) == order_id for url in _iter_litres_payment_evidence_urls(result))
+def _verify_brandshop_payment(result: AgentOutput) -> PaymentVerificationResult:
+    order_id = str(result.order_id or '').strip()
+    if not order_id:
+        return PaymentVerificationResult(
+            accepted=False,
+            failure_reason='Brandshop completed result rejected: order_id обязателен для подтвержденного шага SberPay.',
+        )
+
+    evidence = _payment_evidence_to_dict(result.payment_evidence)
+    if evidence is None or evidence.get('source') != BRANDSHOP_PAYMENT_EVIDENCE_SOURCE:
+        return PaymentVerificationResult(
+            accepted=False,
+            failure_reason=(
+                'Brandshop completed result rejected: order_id должен быть подтвержден '
+                'payment_evidence.source=brandshop_yoomoney_sberpay_redirect.'
+            ),
+        )
+
+    url = evidence.get('url')
+    evidence_order_id = yoomoney_order_id_from_url(url) if isinstance(url, str) else None
+    if evidence_order_id != order_id:
+        return PaymentVerificationResult(
+            accepted=False,
+            failure_reason=(
+                'Brandshop completed result rejected: order_id должен совпадать с единственным непустым '
+                'orderId из https://yoomoney.ru/checkout/payments/v2/contract?...'
+            ),
+        )
+
+    return PaymentVerificationResult(accepted=True, order_id_host=YOOMONEY_PAYMENT_HOST)
+
+
+def _litres_payment_order_id_host(result: AgentOutput, order_id: str) -> str | None:
+    for url in _iter_litres_payment_evidence_urls(result):
+        if payecom_order_id_from_url(url) == order_id:
+            return PAYECOM_PAYMENT_HOST
+    return None
 
 
 def _iter_litres_payment_evidence_urls(result: AgentOutput) -> list[str]:

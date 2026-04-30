@@ -27,7 +27,21 @@ LINKS_DEFAULT_LIMIT = 50
 SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
 SNAPSHOT_OPTION_TAGS = ('div', 'span', 'li')
-SNAPSHOT_OPTION_CLASS_HINTS = ('product-plate', 'size', 'variant', 'option', 'sku', 'swatch')
+SNAPSHOT_OPTION_CLASS_HINTS = (
+    'product-plate',
+    'size',
+    'variant',
+    'option',
+    'sku',
+    'swatch',
+    'search',
+    'filter',
+    'product-card',
+    'cart-item',
+    'cart-product',
+    'checkout-address',
+    'radio-list',
+)
 SNAPSHOT_OPTION_DATA_ATTRIBUTES = ('data-size', 'data-value', 'data-variant', 'data-sku', 'data-color', 'data-option')
 SNAPSHOT_OPTION_STATE_ATTRIBUTES = ('aria-selected', 'aria-checked', 'aria-disabled', 'disabled')
 REQUEST_GUARD_ROUTE_PATTERN = '**/*'

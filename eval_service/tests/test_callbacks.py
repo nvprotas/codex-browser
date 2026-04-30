@@ -180,7 +180,12 @@ def test_buyer_callback_without_eval_ids_resolves_case_by_session_id_for_payment
         '/callbacks/buyer',
         json=_callback_payload_without_eval_ids(
             'payment_ready',
-            {'payment_method': 'sberpay', 'order_id': 'order-1', 'message': 'Открыт SberPay.'},
+            {
+                'payment_method': 'sberpay',
+                'order_id': 'order-1',
+                'order_id_host': 'payecom.ru',
+                'message': 'Открыт SberPay.',
+            },
         ),
     )
 
@@ -246,7 +251,12 @@ def test_buyer_callback_payment_ready_and_scenario_finished_update_case_state(tm
         '/callbacks/buyer',
         json=_callback_payload(
             'payment_ready',
-            {'payment_method': 'sberpay', 'order_id': 'order-1', 'message': 'Открыт SberPay.'},
+            {
+                'payment_method': 'sberpay',
+                'order_id': 'order-1',
+                'order_id_host': 'payecom.ru',
+                'message': 'Открыт SberPay.',
+            },
         ),
     )
     assert payment_response.status_code == 200
@@ -272,6 +282,13 @@ def test_buyer_callback_payment_ready_and_scenario_finished_update_case_state(tm
         {'payment_method': 'sberpay'},
         {'payment_method': 'sberpay', 'order_id': 'order-1'},
         {'payment_method': 'sberpay', 'message': 'Открыт SberPay.'},
+        {'payment_method': 'sberpay', 'order_id': 'order-1', 'message': 'Открыт SberPay.'},
+        {
+            'payment_method': 'sberpay',
+            'order_id': 'order-1',
+            'order_id_host': '',
+            'message': 'Открыт SberPay.',
+        },
     ],
 )
 def test_buyer_callback_rejects_malformed_payment_ready_without_state_change(
@@ -324,6 +341,7 @@ def test_buyer_callback_redacts_manifest_callback_event_on_disk(tmp_path: Path) 
             {
                 'payment_method': 'sberpay',
                 'order_id': 'ORDER-12345',
+                'order_id_host': 'payecom.ru',
                 'message': (
                     'Payment token=payment-token-secret order_id=ORDER-12345 '
                     'url=https://pay.example/sberpay/order/ORDER-12345?token=payment-token-secret'
@@ -379,7 +397,10 @@ def test_callback_with_eval_ids_rejects_mismatched_session_id(tmp_path: Path) ->
     )
 
     payload = {
-        **_callback_payload('payment_ready', {'order_id': 'order-1', 'message': 'Открыт SberPay.'}),
+        **_callback_payload(
+            'payment_ready',
+            {'order_id': 'order-1', 'order_id_host': 'payecom.ru', 'message': 'Открыт SberPay.'},
+        ),
         'session_id': 'session-other',
     }
 
@@ -440,7 +461,12 @@ def test_buyer_callback_appends_late_terminal_events_without_mutating_terminal_c
     payment_payload = {
         **_callback_payload(
             'payment_ready',
-            {'payment_method': 'sberpay', 'order_id': 'order-late', 'message': 'Открыт SberPay.'},
+            {
+                'payment_method': 'sberpay',
+                'order_id': 'order-late',
+                'order_id_host': 'payecom.ru',
+                'message': 'Открыт SberPay.',
+            },
         ),
         'event_id': 'event-payment_ready-late',
         'session_id': 'session-456',

@@ -851,7 +851,11 @@ def _append_payment_ready(store: RunStore, call: dict[str, Any]) -> None:
         event_type=CallbackEventType.PAYMENT_READY,
         occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
         idempotency_key=f'idem-payment-{call["session_id"]}',
-        payload={'order_id': f'order-{call["session_id"]}'},
+        payload={
+            'order_id': f'order-{call["session_id"]}',
+            'order_id_host': 'payecom.ru',
+            'message': 'Открыт SberPay.',
+        },
         eval_run_id=metadata['eval_run_id'],
         eval_case_id=metadata['eval_case_id'],
     )

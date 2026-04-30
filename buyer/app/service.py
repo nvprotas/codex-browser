@@ -19,7 +19,7 @@ from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .persistence import _sanitize_persistent_metadata
-from .payment_verifier import payment_evidence_from_purchase_script, verify_completed_payment
+from .payment_verifier import PaymentVerificationResult, payment_evidence_from_purchase_script, verify_completed_payment
 from .purchase_scripts import PurchaseScriptRunner
 from .runner import AgentRunner
 from .state import (
@@ -242,7 +242,20 @@ class BuyerService:
                             auth_summary=auth_summary,
                         )
                         return
-                    await self._handle_completed(state, result, auth_summary=auth_summary)
+                    if not payment_verification.order_id_host:
+                        await self._handle_failed(
+                            state,
+                            'Completed result rejected: accepted payment verification did not provide order_id_host.',
+                            _artifacts_with_payment_evidence(result),
+                            auth_summary=auth_summary,
+                        )
+                        return
+                    await self._handle_completed(
+                        state,
+                        result,
+                        auth_summary=auth_summary,
+                        payment_verification=payment_verification,
+                    )
                     return
 
                 if _looks_like_transient_cdp_failure(result.message, result.artifacts):
@@ -335,7 +348,27 @@ class BuyerService:
         result: AgentOutput,
         *,
         auth_summary: dict[str, Any] | None,
+        payment_verification: PaymentVerificationResult | None = None,
     ) -> None:
+        payment_verification = payment_verification or verify_completed_payment(state.start_url, result)
+        if not payment_verification.accepted:
+            await self._handle_failed(
+                state,
+                payment_verification.failure_reason or 'Completed result rejected: payment verification failed.',
+                _artifacts_with_payment_evidence(result),
+                auth_summary=auth_summary,
+            )
+            return
+        order_id_host = str(payment_verification.order_id_host or '').strip()
+        if not order_id_host:
+            await self._handle_failed(
+                state,
+                'Completed result rejected: accepted payment verification did not provide order_id_host.',
+                _artifacts_with_payment_evidence(result),
+                auth_summary=auth_summary,
+            )
+            return
+
         artifacts = dict(result.artifacts)
         if result.payment_evidence is not None:
             artifacts['payment_evidence'] = result.payment_evidence.model_dump(mode='json')
@@ -347,11 +380,17 @@ class BuyerService:
                 event_type='payment_ready',
                 payload={
                     'order_id': result.order_id,
+                    'order_id_host': order_id_host,
                     'message': 'Получен orderId, шаг оплаты готов.',
                 },
                 idempotency_suffix='payment-ready',
             )
-            logger.info('payment_ready session_id=%s order_id=%s', state.session_id, result.order_id)
+            logger.info(
+                'payment_ready session_id=%s order_id=%s order_id_host=%s',
+                state.session_id,
+                result.order_id,
+                order_id_host,
+            )
             _log_buyer_progress(
                 session_id=state.session_id,
                 stage='payment',
@@ -367,7 +406,7 @@ class BuyerService:
                 'status': 'completed',
                 'message': result.message,
                 'order_id': result.order_id,
-                'artifacts': artifacts,
+                'artifacts': _sanitize_terminal_callback_artifacts(artifacts),
             },
             idempotency_suffix='scenario-finished',
         )
@@ -406,7 +445,7 @@ class BuyerService:
             payload={
                 'status': 'failed',
                 'message': reason,
-                'artifacts': merged_artifacts,
+                'artifacts': _sanitize_terminal_callback_artifacts(merged_artifacts),
             },
             idempotency_suffix='scenario-failed',
         )
@@ -624,14 +663,18 @@ class BuyerService:
                 artifacts={'purchase_script': script_result.artifacts},
             )
             payment_verification = verify_completed_payment(state.start_url, candidate)
-            if not payment_verification.accepted:
+            if not payment_verification.accepted or not payment_verification.order_id_host:
+                verification_failure = (
+                    payment_verification.failure_reason
+                    or 'accepted payment verification did not provide order_id_host.'
+                )
                 await self._store.add_agent_memory(
                     state.session_id,
                     'system',
                     (
                         '[PURCHASE_SCRIPT_FALLBACK] '
                         f'Быстрый purchase-скрипт для {domain} вернул completed/order_id, '
-                        f'но не прошел verifier SberPay: {payment_verification.failure_reason}. '
+                        f'но не прошел verifier SberPay: {verification_failure}. '
                         'Продолжай через generic browser-flow.'
                     ),
                 )
@@ -939,6 +982,13 @@ def _artifacts_with_payment_evidence(result: AgentOutput) -> dict[str, Any]:
     return artifacts
 
 
+def _sanitize_terminal_callback_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
+    callback_artifacts = dict(artifacts)
+    if isinstance(callback_artifacts.get('trace'), dict):
+        callback_artifacts['trace'] = _extract_trace_for_event(callback_artifacts)
+    return callback_artifacts
+
+
 def _build_agent_step_payload(*, step_index: int, result: AgentOutput) -> dict[str, Any]:
     payload: dict[str, Any] = {
         'step': step_index,
@@ -1202,19 +1252,13 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     fields = (
+        'step',
         'trace_date',
         'trace_time',
-        'prompt_path',
         'prompt_sha256',
         'trace_file',
-        'browser_actions_log_path',
         'browser_actions_total',
         'duration_ms',
-        'command_duration_ms',
-        'inter_command_idle_ms',
-        'browser_busy_union_ms',
-        'post_browser_idle_ms',
-        'command_errors',
         'codex_tokens_used',
         'codex_model',
         'model_strategy',
@@ -1227,28 +1271,23 @@ def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             trace[field] = value
 
-    prompt_preview = raw_trace.get('prompt_preview')
-    if isinstance(prompt_preview, str) and prompt_preview.strip():
-        trace['prompt_preview'] = _head_text(prompt_preview, limit=1200)
-
-    stdout_tail = raw_trace.get('stdout_tail')
-    if isinstance(stdout_tail, str) and stdout_tail.strip():
-        trace['stdout_tail'] = _tail_text(stdout_tail, limit=1000)
-
-    stderr_tail = raw_trace.get('stderr_tail')
-    if isinstance(stderr_tail, str) and stderr_tail.strip():
-        trace['stderr_tail'] = _tail_text(stderr_tail, limit=1000)
-
-    browser_actions_tail = raw_trace.get('browser_actions_tail')
-    if isinstance(browser_actions_tail, list):
-        trace['browser_actions_tail'] = browser_actions_tail[-10:]
-
-    top_idle_gaps = raw_trace.get('top_idle_gaps')
-    if isinstance(top_idle_gaps, list):
-        trace['top_idle_gaps'] = top_idle_gaps[:5]
-
     codex_attempts = raw_trace.get('codex_attempts')
     if isinstance(codex_attempts, list):
-        trace['codex_attempts'] = codex_attempts[-3:]
+        trace['codex_attempts'] = _slim_codex_attempts_for_event(codex_attempts)
 
     return trace
+
+
+def _slim_codex_attempts_for_event(attempts: list[Any]) -> list[dict[str, Any]]:
+    slim_attempts: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        slim: dict[str, Any] = {}
+        for field in ('role', 'model', 'status', 'failure_reason'):
+            value = attempt.get(field)
+            if value is not None:
+                slim[field] = value
+        if slim:
+            slim_attempts.append(slim)
+    return slim_attempts

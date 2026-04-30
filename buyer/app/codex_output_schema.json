@@ -23,7 +23,7 @@
       "properties": {
         "source": {
           "type": "string",
-          "const": "litres_payecom_iframe"
+          "enum": ["litres_payecom_iframe", "brandshop_yoomoney_sberpay_redirect"]
         },
         "url": {
           "type": "string",

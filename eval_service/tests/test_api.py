@@ -85,7 +85,12 @@ class FinishingBuyerClient:
             event_type=CallbackEventType.PAYMENT_READY,
             occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
             idempotency_key='idem-payment-post-runs-1',
-            payload={'payment_method': 'sberpay'},
+            payload={
+                'payment_method': 'sberpay',
+                'order_id': 'order-post-runs-1',
+                'order_id_host': 'payecom.ru',
+                'message': 'Открыт SberPay.',
+            },
             eval_run_id=call['metadata']['eval_run_id'],
             eval_case_id=call['metadata']['eval_case_id'],
         )
@@ -714,6 +719,7 @@ def test_get_run_detail_sanitizes_callbacks_and_artifact_paths(tmp_path: Path) -
             idempotency_key='secret-idempotency-key',
             payload={
                 'order_id': 'ORDER-1',
+                'order_id_host': 'payecom.ru',
                 'message': 'Payment token=secret-token',
                 'safe': 'visible',
             },

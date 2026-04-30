@@ -344,7 +344,7 @@
 **Value:** 5  
 **Effort:** 3  
 **V/E:** 1.67  
-**Статус:** partial implementation for `litres.ru`
+**Статус:** implemented for `litres.ru` and `brandshop.ru` narrow SberPay verifiers
 **Зависимости:** задача 5.
 
 **Что сделать:**
@@ -378,7 +378,7 @@
 - Добавить отдельный контейнер `eval_service` на Python + FastAPI.
 - Хранить eval cases в `eval/cases/*.yaml`: один template и явный список variants без matrix.
 - Для каждого variant задавать стабильный `eval_case_id` и явный `case_version`.
-- Стартовый executable MVP-case: `litres.ru`; `brandshop.ru` template хранится в registry как `enabled: false` до появления domain-specific SberPay verifier, чтобы eval не запускал заведомо непроходимый сценарий.
+- Стартовые executable MVP-cases: `litres.ru` и `brandshop.ru`; Brandshop case включен после появления domain-specific YooMoney/SberPay verifier и покрывает generic-agent путь до `payment_ready`.
 - Запускать selected cases из отдельного таба `micro-ui` чекбоксами и выполнять их последовательно.
 - Создавать `eval_run_id` и передавать в task metadata `eval_run_id`, `eval_case_id`, `case_version`, `host`, `case_title`, `variant_id`.
 - Не добавлять специальные eval-ветки в `buyer`; `expected_outcome`, `forbidden_actions` и rubric остаются внутри eval-контура.

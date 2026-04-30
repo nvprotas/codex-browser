@@ -455,6 +455,7 @@ function createSessionItem(session, sessions) {
   metaGrid.append(
     meta('reply_id', session.waiting_reply_id),
     meta('order_id', session.order_id),
+    meta('order_id_host', session.order_id_host),
     meta('Обновлено', fmtDate(session.updated_at)),
   );
 

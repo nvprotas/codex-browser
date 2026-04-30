@@ -97,7 +97,7 @@ class SessionDetail(SessionView):
 class PaymentEvidence(BaseModel):
     model_config = ConfigDict(extra='ignore')
 
-    source: Literal['litres_payecom_iframe']
+    source: Literal['litres_payecom_iframe', 'brandshop_yoomoney_sberpay_redirect']
     url: str = Field(min_length=1)
 
 

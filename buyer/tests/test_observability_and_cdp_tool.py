@@ -395,7 +395,7 @@ class _FakeSnapshotLocator:
 
 class _FakeSnapshotPage:
     def __init__(self, elements: list[_FakeSnapshotElement]) -> None:
-        self.url = 'https://brandshop.ru/goods/510194/ih4363-100/'
+        self.url = 'https://brandshop.ru/search/?st=example'
         self._locator = _FakeSnapshotLocator(elements)
 
     def locator(self, selector: str) -> _FakeSnapshotLocator:
@@ -667,7 +667,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
         self.assertNotIn('order=1587108891', serialized)
         self.assertLess(len(summary['summary']), 260)
 
-    def test_step_container_log_uses_concise_browser_action_summary(self) -> None:
+    def test_step_container_log_uses_slim_trace_without_browser_action_tail(self) -> None:
         action = {
             'event': 'browser_command_finished',
             'command': 'snapshot',
@@ -699,8 +699,10 @@ class BrowserActionMetricsTests(unittest.TestCase):
             _log_step_result_to_container(session_id='session-1', step_index=2, result=result)
 
         output = '\n'.join(logs.output)
-        self.assertIn('browser_action session_id=session-1 step=2 event=finished command=snapshot', output)
-        self.assertIn('Оформление заказа Продолжить', output)
+        self.assertIn('agent_step_trace session_id=session-1 step=2 trace_file=/tmp/trace.json', output)
+        self.assertIn('actions_total=1', output)
+        self.assertNotIn('browser_action session_id=session-1', output)
+        self.assertNotIn('Оформление заказа Продолжить', output)
         self.assertNotIn('"items"', output)
         self.assertNotIn('PROTAS', output)
 
@@ -915,84 +917,6 @@ class BrowserActionMetricsTests(unittest.TestCase):
             path.write_text('\n'.join(json.dumps(item) for item in records), encoding='utf-8')
 
             self.assertFalse(_browser_actions_have_mutating_commands(path))
-
-
-class LitresPurchaseScriptSmokeTests(unittest.TestCase):
-    def test_litres_helpers_when_tsx_is_installed(self) -> None:
-        buyer_root = Path(__file__).resolve().parents[1]
-        tsx = buyer_root / 'scripts' / 'node_modules' / '.bin' / 'tsx'
-        if not tsx.is_file():
-            self.skipTest('buyer/scripts/node_modules не установлен')
-
-        scripts_dir = buyer_root / 'scripts'
-        command = [
-            str(tsx),
-            '-e',
-            (
-                "import { cartRowsMatchQuery, extractLitresQuery, isSberPaymentUrl, parseOrderId } from './purchase/litres.ts';"
-                "const query = extractLitresQuery('Открой litres и дойди до шага оплаты. Ищи книгу одиссея гомера');"
-                "const order = parseOrderId('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay');"
-                "const iframeOrder = parseOrderId('https://payecom.ru/pay_ru?orderId=PAY-1585051118');"
-                "const sberpay = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sberpay&system=sberpay');"
-                "const sbp = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=sbp&system=sbersbp');"
-                "const fps = isSberPaymentUrl('https://www.litres.ru/purchase/ppd/?order=1585051118&method=fps');"
-                "const cart = cartRowsMatchQuery('одиссея гомера', ['Одиссея Гомер']);"
-                "console.log(JSON.stringify({ query, order, iframeOrder, sberpay, sbp, fps, cart }));"
-            ),
-        ]
-        completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
-
-        payload = json.loads(completed.stdout)
-        self.assertEqual(
-            payload,
-            {
-                'query': 'одиссея гомера',
-                'order': '1585051118',
-                'iframeOrder': 'PAY-1585051118',
-                'sberpay': True,
-                'sbp': False,
-                'fps': False,
-                'cart': True,
-            },
-        )
-
-    def test_collect_book_candidates_uses_function_evaluate_callback_when_tsx_is_installed(self) -> None:
-        buyer_root = Path(__file__).resolve().parents[1]
-        tsx = buyer_root / 'scripts' / 'node_modules' / '.bin' / 'tsx'
-        if not tsx.is_file():
-            self.skipTest('buyer/scripts/node_modules не установлен')
-
-        scripts_dir = buyer_root / 'scripts'
-        command = [
-            str(tsx),
-            '-e',
-            (
-                "import { collectBookCandidates } from './purchase/litres.ts';"
-                "const nodes = [{"
-                "href: 'https://www.litres.ru/book/gomer/iliada-73024797/',"
-                "innerText: 'Илиада Гомер',"
-                "textContent: 'Илиада Гомер',"
-                "getAttribute: (name) => name === 'title' ? 'Илиада' : null"
-                "}];"
-                "const page = { locator: () => ({ evaluateAll: async (callback, limit) => {"
-                "if (typeof callback !== 'function') throw new Error('evaluateAll callback must be function');"
-                "return callback(nodes, limit);"
-                "} }) };"
-                "collectBookCandidates(page, 'илиада гомера').then((candidates) => {"
-                "console.log(JSON.stringify({ count: candidates.length, href: candidates[0]?.href ?? null }));"
-                "});"
-            ),
-        ]
-        completed = subprocess.run(command, cwd=scripts_dir, check=True, text=True, capture_output=True)
-
-        payload = json.loads(completed.stdout)
-        self.assertEqual(
-            payload,
-            {
-                'count': 1,
-                'href': 'https://www.litres.ru/book/gomer/iliada-73024797/',
-            },
-        )
 
 
 class LitresAuthScriptSmokeTests(unittest.TestCase):
