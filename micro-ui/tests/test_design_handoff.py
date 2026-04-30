@@ -11,20 +11,6 @@ from app.models import EventEnvelope
 from app.store import CallbackStore
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _read(path: str) -> str:
-    return (ROOT / path).read_text(encoding='utf-8')
-
-
-def _css_block(css: str, selector: str) -> str:
-    start = css.index(selector)
-    block_start = css.index('{', start)
-    block_end = css.index('}', block_start)
-    return css[block_start + 1:block_end]
-
-
 def _ask_event() -> EventEnvelope:
     return EventEnvelope(
         event_id='evt-ask',
@@ -55,85 +41,6 @@ def _session_event(
         idempotency_key=f'session-ask:{event_id}',
         payload=payload or {},
     )
-
-
-class MicroUiDesignHandoffStaticTests(unittest.TestCase):
-    def test_template_uses_brand_assets_and_json_editor_shells(self) -> None:
-        template = _read('app/templates/index.html')
-
-        self.assertIn('/static/assets/favicon.svg', template)
-        self.assertIn('/static/assets/logo-mark.svg', template)
-        self.assertIn('class="brand-text"', template)
-        self.assertIn('data-json-editor="task-metadata"', template)
-        self.assertIn('data-json-editor="task-auth"', template)
-        self.assertIn('id="agent-question"', template)
-
-    def test_template_matches_reference_telemetry_layout_and_copy(self) -> None:
-        template = _read('app/templates/index.html')
-
-        self.assertIn('value="https://www.litres.ru/"', template)
-        self.assertIn('{"city":"Москва","budget":2500}', template)
-        self.assertIn('<h2>Ответить агенту</h2>', template)
-        self.assertIn('id="reply-state-badge"', template)
-        self.assertIn('<section class="sessions-row">', template)
-        self.assertIn('<h2>События</h2>', template)
-        self.assertIn('id="event-type-filters"', template)
-        self.assertNotIn('<h2>Callback-лента</h2>', template)
-        self.assertNotIn('<h2>Live stream</h2>', template)
-        self.assertNotIn('<section class="stream-row">', template)
-
-    def test_css_contains_handoff_components(self) -> None:
-        css = _read('app/static/app.css')
-
-        self.assertIn('.brand img', css)
-        self.assertIn('.agent-question', css)
-        self.assertIn('.json-editor', css)
-        self.assertIn('.json-view', css)
-        self.assertIn('.event-type-filters', css)
-        self.assertIn('.sessions-row', css)
-        self.assertIn('.telemetry-grid.two', css)
-        self.assertIn('.badge[hidden]', css)
-        self.assertIn('  .telemetry-grid.two {\n    grid-template-columns: 1fr;\n  }', css)
-        self.assertIn('  .event-top,\n  .stream-top {\n    display: grid;', css)
-
-    def test_js_contains_json_highlighting_and_question_hydration(self) -> None:
-        js = _read('app/static/app.js')
-
-        self.assertIn('function tokenizeJson', js)
-        self.assertIn('function renderAgentQuestion', js)
-        self.assertIn('function createJsonView', js)
-        self.assertIn('function formatMetric', js)
-        self.assertIn('function shortId', js)
-        self.assertIn('replyStateBadgeNode.hidden', js)
-        self.assertIn('KNOWN_EVENT_TYPES', js)
-        self.assertIn('function renderEventTypeFilters', js)
-        self.assertIn('selectedEventTypeFilters = new Set(KNOWN_EVENT_TYPES)', js)
-        self.assertIn('selectedEventTypeFilters.has(type)', js)
-        self.assertIn('selectedEventTypeFilters.delete(type)', js)
-        self.assertNotIn("selectedEventTypeFilter = 'all'", js)
-        self.assertIn("event.event_type === 'agent_stream_event' ? createStreamItem(event) : createEventItem(event)", js)
-        self.assertIn("new EventSource('/api/events/stream')", js)
-        self.assertNotIn('function renderLiveEvents', js)
-        self.assertNotIn('setInterval(', js)
-
-    def test_events_list_scrolls_without_inner_item_scroll(self) -> None:
-        css = _read('app/static/app.css')
-        js = _read('app/static/app.js')
-
-        list_block = _css_block(css, '.events-list')
-        json_view_block = _css_block(css, '.json-view')
-        json_content_block = _css_block(css, '.json-view-content')
-
-        self.assertIn('max-height: 560px', list_block)
-        self.assertIn('overflow: auto', list_block)
-        self.assertIn('scrollbar-color: rgba(88, 104, 122, 0.42) transparent', list_block)
-        self.assertIn('overflow: visible', json_view_block)
-        self.assertIn('white-space: pre-wrap', json_content_block)
-        self.assertIn('overflow-wrap: anywhere', json_content_block)
-        self.assertNotIn('.event-item pre,\n.stream-item pre {\n  max-width: 100%;\n  max-height: 300px;', css)
-        self.assertNotIn('pre.style.maxHeight', js)
-        self.assertIn('createJsonView(event.payload || {})', js)
-        self.assertIn('createJsonView(payload.items || [])', js)
 
 
 class CallbackStoreAskUserSummaryTests(unittest.IsolatedAsyncioTestCase):

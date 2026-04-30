@@ -923,8 +923,8 @@ Runtime flow:
 | `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
 | `eval_service/tests/test_orchestrator.py` | Eval run orchestration, payment_ready grace, waiting/reply resume progression. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
-| `micro-ui/tests/test_design_handoff.py` | UI/handoff design expectations и session summary для `ask_user`/waiting progression. |
-| `micro-ui/tests/test_eval_shell_static.py` | Eval shell static contracts, proxy timeout и reply payload shape. |
+| `micro-ui/tests/test_design_handoff.py` | Session summary для `ask_user`/waiting progression в `CallbackStore`. |
+| `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.
 
