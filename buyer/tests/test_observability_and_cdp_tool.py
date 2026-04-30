@@ -133,6 +133,7 @@ class CdpToolOutputTests(unittest.TestCase):
 
         text = cli.parse_args(['text', '--selector', 'body'])
         text_limited = cli.parse_args(['text', '--selector', 'body', '--max-chars', '8000'])
+        text_limit_alias = cli.parse_args(['text', '--selector', 'body', '--limit', '2000'])
         text_full = cli.parse_args(['text', '--selector', 'body', '--full'])
         exists = cli.parse_args(['exists', '--selector', '[data-testid="x"]'])
         attr = cli.parse_args(['attr', '--selector', 'a', '--name', 'href'])
@@ -141,10 +142,23 @@ class CdpToolOutputTests(unittest.TestCase):
         snapshot = cli.parse_args(['snapshot', '--selector', 'body', '--limit', '20'])
         snapshot_default = cli.parse_args(['snapshot'])
         html = cli.parse_args(['html', '--full'])
+        click_timeout = cli.parse_args(['click', '--selector', 'button', '--timeout-ms', '3000'])
+        fill_timeout = cli.parse_args(['fill', '--selector', 'input', '--value', '1984', '--timeout-ms', '3000'])
+        press_timeout = cli.parse_args(['press', '--key', 'Enter', '--timeout-ms', '3000'])
+        exists_timeout = cli.parse_args(['exists', '--selector', 'button', '--timeout-ms', '3000'])
+        attr_timeout = cli.parse_args(['attr', '--selector', 'a', '--name', 'href', '--timeout-ms', '3000'])
+        links_timeout = cli.parse_args(['links', '--timeout-ms', '3000'])
+        snapshot_timeout = cli.parse_args(['snapshot', '--timeout-ms', '3000'])
+        text_timeout = cli.parse_args(['text', '--selector', 'body', '--timeout-ms', '3000'])
+        html_timeout = cli.parse_args(['html', '--timeout-ms', '3000'])
+        screenshot_timeout = cli.parse_args(['screenshot', '--path', '/tmp/page.png', '--timeout-ms', '3000'])
+        goto_timeout = cli.parse_args(['goto', '--url', 'https://example.com', '--timeout-ms', '3000'])
+        wait_timeout = cli.parse_args(['wait', '--timeout-ms', '2000'])
 
         self.assertEqual(text.command, 'text')
         self.assertEqual(text.max_chars, TEXT_STDOUT_LIMIT)
         self.assertEqual(text_limited.max_chars, 8000)
+        self.assertEqual(text_limit_alias.max_chars, 2000)
         self.assertTrue(text_full.full)
         self.assertEqual(exists.command, 'exists')
         self.assertEqual(attr.name, 'href')
@@ -153,6 +167,22 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertEqual(snapshot.limit, 20)
         self.assertEqual(snapshot_default.limit, SNAPSHOT_DEFAULT_LIMIT)
         self.assertTrue(html.full)
+        for parsed in (
+            click_timeout,
+            fill_timeout,
+            press_timeout,
+            exists_timeout,
+            attr_timeout,
+            links_timeout,
+            snapshot_timeout,
+            text_timeout,
+            html_timeout,
+            screenshot_timeout,
+            goto_timeout,
+        ):
+            self.assertEqual(parsed.timeout_ms, 3000)
+        self.assertEqual(wait_timeout.timeout_ms, 2000)
+        self.assertEqual(wait_timeout.seconds, 2.0)
 
     def test_prompt_discourages_full_html_stdout(self) -> None:
         prompt = build_agent_prompt(
@@ -173,11 +203,20 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('links', prompt)
         self.assertIn('snapshot --limit 60', prompt)
         self.assertIn('links --limit 50', prompt)
-        self.assertIn('--timeout-ms 3000', prompt)
+        self.assertIn(
+            'python /app/tools/cdp_tool.py --endpoint http://browser:9223 --timeout-ms 3000 click --selector',
+            prompt,
+        )
+        self.assertIn('text --selector body --max-chars 2000', prompt)
+        self.assertIn('wait --seconds N', prompt)
+        self.assertNotIn('text --selector body --limit', prompt)
         self.assertIn('`text` используй только точечно', prompt)
         self.assertIn('`text --selector body` допускается только как fallback и с лимитом', prompt)
         self.assertIn('Не печатай полный HTML в stdout', prompt)
         self.assertIn('`html --path <file>` и `screenshot` используй только как fallback', prompt)
+        self.assertIn('если `<cdp_preflight>` содержит OK', prompt)
+        self.assertIn('нельзя возвращать failed с причиной', prompt)
+        self.assertIn('без фактической неуспешной команды `cdp_tool.py`', prompt)
         self.assertIn('html --path', prompt)
         self.assertIn('profile_updates', prompt)
         self.assertIn('только новые факты', prompt)

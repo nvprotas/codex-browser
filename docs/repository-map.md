@@ -338,11 +338,11 @@ HTTP-клиент доставки callback-событий.
 2. Делает CDP preflight через `/app/tools/cdp_tool.py url`.
 3. Загружает user profile и строит prompt.
 4. Проверяет `OPENAI_API_KEY` или `/root/.codex/auth.json`.
-5. Формирует попытки модели: `single` или `fast_then_strong`.
+5. Формирует попытки модели: `single` или `fast_then_strong`; если стратегия схлопнулась до одной модели, structured `failed` без browser mutation получает один дополнительный retry той же моделью.
 6. Запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
 7. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage.
 8. Парсит output JSON в `AgentOutput`.
-9. При fallback на strong модель сбрасывает браузер на `start_url`, если до этого не было mutating-команд.
+9. При fallback на strong модель или same-model retry сбрасывает браузер на `start_url`, если до этого не было mutating-команд.
 
 Основные ошибки и failure reasons:
 
@@ -361,7 +361,7 @@ HTTP-клиент доставки callback-событий.
 
 Входы: задача, start URL, CDP endpoint, preflight summary, metadata, redacted auth payload, auth context, user profile, memory, последний reply.
 
-Выход: outcome-first текст prompt с правилами управления `cdp_tool.py`, циклом `observe -> act -> verify`, SberPay-boundary, Litres-specific payment evidence, prompt-injection boundary для динамического контекста и schema-only ответом.
+Выход: outcome-first текст prompt с правилами управления `cdp_tool.py`, циклом `observe -> act -> verify`, SberPay-boundary, Litres-specific payment evidence, prompt-injection boundary для динамического контекста и schema-only ответом. Prompt фиксирует канонический формат CDP-команд: глобальный `--timeout-ms` до подкоманды, `text --max-chars`, `wait --seconds`, а также запрещает объявлять CDP/browser-sidecar недоступным при OK preflight без фактической неуспешной команды `cdp_tool.py`.
 
 Ошибки явно не выбрасывает; риски связаны с устаревшими инструкциями, если меняется доменный контракт.
 
@@ -568,6 +568,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - `--recovery-window-sec`;
 - `--recovery-interval-ms`;
 - command-specific arguments.
+  Для устойчивости к ошибкам агента `--timeout-ms` также принимается после подкоманды у `goto`, `click`, `fill`, `press`, `exists`, `attr`, `links`, `snapshot`, `text`, `html`, `screenshot`; `text --limit` является alias к `--max-chars`; `wait --timeout-ms 2000` совместимо интерпретируется как `wait --seconds 2`.
 
 Выход:
 

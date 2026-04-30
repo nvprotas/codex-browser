@@ -34,8 +34,34 @@ REQUEST_GUARD_ROUTE_PATTERN = '**/*'
 NAVIGATION_RESOURCE_TYPES = {'document'}
 
 
+class _WaitTimeoutMsAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | int | None,
+        option_string: str | None = None,
+    ) -> None:
+        _ = option_string
+        timeout_ms = int(values)
+        setattr(namespace, self.dest, timeout_ms)
+        setattr(namespace, 'seconds', timeout_ms / 1000.0)
+
+
+class _CdpArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if getattr(parsed, 'command', None) == 'wait' and getattr(parsed, 'seconds', None) is None:
+            self.error('wait requires --seconds or compatibility alias --timeout-ms')
+        return parsed
+
+
+def _add_timeout_alias(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument('--timeout-ms', type=int, default=argparse.SUPPRESS)
+
+
 def parser() -> argparse.ArgumentParser:
-    cli = argparse.ArgumentParser(description='Утилита управления browser-sidecar через Playwright CDP')
+    cli = _CdpArgumentParser(description='Утилита управления browser-sidecar через Playwright CDP')
     cli.add_argument('--endpoint', default=os.getenv('BROWSER_CDP_ENDPOINT', 'http://browser:9223'))
     cli.add_argument('--timeout-ms', type=int, default=15000)
     cli.add_argument('--recovery-window-sec', type=float, default=float(os.getenv('CDP_RECOVERY_WINDOW_SEC', '20')))
@@ -45,39 +71,49 @@ def parser() -> argparse.ArgumentParser:
 
     goto = sub.add_parser('goto')
     goto.add_argument('--url', required=True)
+    _add_timeout_alias(goto)
 
     click = sub.add_parser('click')
     click.add_argument('--selector', required=True)
+    _add_timeout_alias(click)
 
     fill = sub.add_parser('fill')
     fill.add_argument('--selector', required=True)
     fill.add_argument('--value', required=True)
+    _add_timeout_alias(fill)
 
     press = sub.add_parser('press')
     press.add_argument('--key', required=True)
+    _add_timeout_alias(press)
 
     wait_cmd = sub.add_parser('wait')
-    wait_cmd.add_argument('--seconds', type=float, required=True)
+    wait_cmd.add_argument('--seconds', type=float, required=False)
+    wait_cmd.add_argument('--timeout-ms', dest='timeout_ms', type=int, action=_WaitTimeoutMsAction, default=argparse.SUPPRESS)
 
     text = sub.add_parser('text')
     text.add_argument('--selector', required=True)
-    text.add_argument('--max-chars', type=int, default=TEXT_STDOUT_LIMIT)
+    text.add_argument('--max-chars', '--limit', dest='max_chars', type=int, default=TEXT_STDOUT_LIMIT)
     text.add_argument('--full', action='store_true')
+    _add_timeout_alias(text)
 
     exists = sub.add_parser('exists')
     exists.add_argument('--selector', required=True)
+    _add_timeout_alias(exists)
 
     attr = sub.add_parser('attr')
     attr.add_argument('--selector', required=True)
     attr.add_argument('--name', required=True)
+    _add_timeout_alias(attr)
 
     links = sub.add_parser('links')
     links.add_argument('--selector', default='body')
     links.add_argument('--limit', type=int, default=LINKS_DEFAULT_LIMIT)
+    _add_timeout_alias(links)
 
     snapshot = sub.add_parser('snapshot')
     snapshot.add_argument('--selector', default='body')
     snapshot.add_argument('--limit', type=int, default=SNAPSHOT_DEFAULT_LIMIT)
+    _add_timeout_alias(snapshot)
 
     title = sub.add_parser('title')
 
@@ -85,11 +121,13 @@ def parser() -> argparse.ArgumentParser:
 
     screenshot = sub.add_parser('screenshot')
     screenshot.add_argument('--path', required=True)
+    _add_timeout_alias(screenshot)
 
     html = sub.add_parser('html')
     html.add_argument('--path', required=False)
     html.add_argument('--max-chars', type=int, default=HTML_STDOUT_LIMIT)
     html.add_argument('--full', action='store_true')
+    _add_timeout_alias(html)
 
     return cli
 
