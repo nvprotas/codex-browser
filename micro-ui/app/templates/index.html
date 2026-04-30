@@ -88,16 +88,19 @@
                   Задача
                   <textarea
                     id="task-text"
-                    rows="3"
+                    rows="2"
                     placeholder="Открой сайт и подготовь путь до шага оплаты без реального платежа"
                     required
                   >Открой litres.ru, найди книгу «Война и мир» (любое издание) и подготовь путь до шага оплаты без реального платежа.</textarea>
                 </label>
 
-                <label class="full">
-                  Start URL
-                  <input type="url" id="task-start-url" value="https://www.litres.ru/" required />
-                </label>
+                <div class="task-url-row full">
+                  <label>
+                    Start URL
+                    <input type="url" id="task-start-url" value="https://www.litres.ru/" required />
+                  </label>
+                  <button type="submit" class="primary-action">Запустить сессию</button>
+                </div>
 
                 <div class="full json-field">
                   <div class="json-field-label">metadata (JSON)</div>
@@ -107,7 +110,7 @@
                       <textarea
                         id="task-metadata"
                         class="json-textarea"
-                        rows="4"
+                        rows="3"
                         spellcheck="false"
                         placeholder='{"city":"Москва","budget":2500}'
                       >{"city":"Москва","budget":2500}</textarea>
@@ -129,7 +132,7 @@
                         <textarea
                           id="task-auth"
                           class="json-textarea"
-                          rows="5"
+                          rows="4"
                           spellcheck="false"
                           placeholder='{"provider":"sberid","storageState":{"cookies":[],"origins":[]}}'
                         ></textarea>
@@ -141,8 +144,6 @@
                     </div>
                   </div>
                 </details>
-
-                <button type="submit" class="primary-action full">Запустить сессию</button>
               </form>
               <pre id="task-result" class="result" aria-live="polite"></pre>
             </section>
@@ -167,17 +168,18 @@
               <div id="reply-empty" class="empty">Сессия не ждёт ответа. Появится после <span class="code">ask_user</span>.</div>
 
               <form id="reply-form">
-                <label>
-                  session_id
-                  <input type="text" id="reply-session-id" readonly />
-                </label>
-                <label>
-                  reply_id
-                  <input type="text" id="reply-id" placeholder="Появится после ask_user" />
-                </label>
+                <div id="reply-meta" class="reply-meta" hidden>
+                  <span class="reply-meta-label">session</span>
+                  <span class="code" id="reply-session-display"></span>
+                  <span class="reply-meta-sep">·</span>
+                  <span class="reply-meta-label">reply_id</span>
+                  <span class="code" id="reply-id-display">—</span>
+                </div>
+                <input type="hidden" id="reply-session-id" />
+                <input type="hidden" id="reply-id" />
                 <label>
                   Ответ
-                  <textarea id="reply-message" rows="4" placeholder="Введите ответ агенту"></textarea>
+                  <textarea id="reply-message" rows="3" placeholder="Введите ответ агенту"></textarea>
                 </label>
                 <button type="submit" class="primary-action">Отправить в buyer</button>
               </form>
