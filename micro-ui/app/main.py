@@ -32,7 +32,9 @@ app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='stat
 
 
 def eval_proxy_timeout(path: str, method: str) -> httpx.Timeout:
-    if method.upper() == 'POST' and path.strip('/') == 'runs':
+    parts = [part for part in path.strip('/').split('/') if part]
+    is_long_eval_operation = parts == ['runs'] or (len(parts) == 3 and parts[0] == 'runs' and parts[2] == 'judge')
+    if method.upper() == 'POST' and is_long_eval_operation:
         return httpx.Timeout(650.0)
     return httpx.Timeout(60.0)
 

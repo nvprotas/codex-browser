@@ -94,7 +94,8 @@ USER_BUYER_INFO_PATH=
 # POSTGRES_PASSWORD=buyer
 ```
 
-`CODEX_AUTH_JSON_PATH` и `USER_BUYER_INFO_PATH` монтируются в `buyer` только на этапе runtime и не попадают в image.
+`CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` только на этапе runtime и не попадает в image.
+`USER_BUYER_INFO_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
 `buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
 Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
@@ -283,6 +284,6 @@ MVP `micro-ui` не добавляет отдельную аутентифика
 - Playwright `storageState`, cookies, tokens и localStorage не сохраняются в Postgres; auth-пакет остается session-bound и живет только в памяти текущего процесса.
 - noVNC поднят всегда и без пароля (только для MVP), поэтому compose публикует его только на `127.0.0.1`; удаленный доступ должен идти через VPN/SSH tunnel/authenticated reverse proxy.
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).
-- `buyer` требует авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.
+- `buyer` и LLM-judge в `eval_service` требуют авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.
 - Режим sandbox для `codex` в `buyer` управляется `CODEX_SANDBOX_MODE` (по умолчанию `danger-full-access` для стабильного CDP-доступа к `browser-sidecar`).
 - Полноценный `middle` не поднимается, его роль выполняет `micro-ui`.

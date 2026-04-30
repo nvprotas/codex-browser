@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы, external cookies env и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` как `/run/codex/host-auth`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
 | `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и временного `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
@@ -607,6 +607,11 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - `knowledge-analysis-trace.json`;
 - return status dict: `completed`, `failed` или `skipped`.
 
+Особенности запуска Codex:
+
+- prompt записывается в `knowledge-analysis-prompt.txt` и передается в `codex exec` через stdin, чтобы большой snapshot не попадал в argv процесса;
+- перед запуском пишется `knowledge_analysis_prompt_prepared` с размерами prompt и основных секций входного JSON без логирования полного содержимого.
+
 Security boundaries:
 
 - analyzer работает в sandbox `read-only`;
@@ -668,7 +673,7 @@ Runtime auth-профили берутся из host-директории `EVAL_
 
 - файл с `enabled: false` полностью пропускается registry и не попадает в selectable eval cases;
 - `brandshop_purchase_smoke.yaml` временно отключен до появления domain-specific SberPay verifier для `brandshop.ru`;
-- активный executable smoke-case сейчас только `litres_purchase_book_001`.
+- активные executable smoke-case сейчас: `litres_purchase_book_001`, `litres_purchase_book_002`, `litres_purchase_book_003`.
 
 ### `eval_service/app/callback_urls.py`
 
@@ -716,6 +721,8 @@ Judge flow:
 - `write_judge_input()` записывает полный redacted `judge-input.json` без дополнительной фильтрации/обрезки evidence; дополнительно добавляет `evidence_files` с путями к `manifest.json`, самому judge input, будущему evaluation output, trace JSON, browser actions JSONL и screenshots;
 - `JudgeRunner` вызывает `codex exec --output-schema ... -o <evaluation.json>` без передачи prompt в argv;
 - judge prompt передается в `codex exec` через stdin, остается коротким и содержит инструкции, краткое описание структуры evidence-файлов, идентификаторы case и пути к ним; содержимое `judge-input.json`, callbacks и traces не инлайнится в prompt;
+- `evaluation_schema.json` совместима со strict response_format: все object `properties` перечислены в `required`; логически optional поля `evidence_ref` передаются как nullable значения;
+- после успешной schema/identity validation `JudgeRunner` перезаписывает `judge_metadata` серверными значениями `backend=codex_exec` и `model=EVAL_JUDGE_MODEL`, чтобы metadata не зависела от сгенерированного model output;
 - при timeout, non-zero exit, невалидном JSON/schema mismatch или identity mismatch пишется fallback evaluation со skipped/failed checks.
 
 ## `micro-ui`
@@ -734,6 +741,7 @@ FastAPI endpoints:
 | `GET /api/events` | optional `session_id`. | Список events. | Нет явных. |
 | `GET /api/events/stream` | optional `session_id`, SSE request. | SSE `data: <EventEnvelope>` и keepalive. | Disconnect завершает generator; queue overflow управляется store. |
 | `GET /api/sessions` | Нет. | Сводки сессий. | Нет явных. |
+| `/api/eval/{path}` | GET/POST proxy к `eval_service`. | Ответ `eval_service`. | HTTP status от `eval_service` пробрасывается; network/timeout ошибки -> `502`. Для `POST /runs` и `POST /runs/{eval_run_id}/judge` используется длинный timeout 650s, так как запуск eval и LLM-judge могут занимать минуты. |
 | `POST /api/tasks` | `TaskCreateRequest`. | Ответ `buyer /v1/tasks`. | HTTP status от buyer пробрасывается; любые другие ошибки -> `502`. |
 | `POST /api/reply` | `ReplySubmitRequest`. | `{forwarded: true, buyer_response}`. | HTTP status от buyer пробрасывается; любые другие ошибки -> `502`. |
 
@@ -807,6 +815,7 @@ Runtime flow:
 | --- | --- | --- |
 | `buyer/Dockerfile` | Python 3.12 image для `buyer`. | Ставит Python deps, Node/npm, пробует `npm install -g @openai/codex`, делает `npm ci` в `/app/scripts`, копирует `buyer`. |
 | `buyer/docker/entrypoint.sh` | Подготовка OAuth auth.json и запуск uvicorn. | Копирует mounted `/run/codex/host-auth` в `/root/.codex/auth.json`, валидирует непустой файл. |
+| `eval_service/docker/entrypoint.sh` | Подготовка OAuth auth.json и запуск команды контейнера. | Копирует mounted `/run/codex/host-auth` в `/root/.codex/auth.json`, чтобы LLM-judge мог запускать `codex exec` через OAuth auth.json. |
 | `micro-ui/Dockerfile` | Python 3.12 image для `micro-ui`. | Ставит deps и запускает uvicorn на `8080`. |
 | `browser/Dockerfile` | Browser sidecar image. | См. раздел `browser`. |
 

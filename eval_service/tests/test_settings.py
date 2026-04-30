@@ -49,3 +49,12 @@ def test_docker_compose_binds_eval_service_to_loopback_and_sets_callback_contrac
     assert 'TRUSTED_CALLBACK_URLS: ${TRUSTED_CALLBACK_URLS:-http://eval_service:8090/callbacks/buyer}' in compose
     assert 'EVAL_CALLBACK_BASE_URL: ${EVAL_CALLBACK_BASE_URL:-http://eval_service:8090}' in compose
     assert 'EVAL_CALLBACK_SECRET: ${EVAL_CALLBACK_SECRET:?set EVAL_CALLBACK_SECRET}' in compose
+
+
+def test_docker_compose_mounts_codex_auth_into_eval_service() -> None:
+    compose = Path('docker-compose.yml').read_text(encoding='utf-8')
+    eval_service_block = compose.split('  eval_service:', maxsplit=1)[1]
+
+    assert 'CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}' in eval_service_block
+    assert 'source: ${CODEX_AUTH_JSON_PATH:-./buyer/docker/codex-auth.placeholder.json}' in eval_service_block
+    assert 'target: /run/codex/host-auth' in eval_service_block

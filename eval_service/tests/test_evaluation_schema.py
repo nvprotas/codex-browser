@@ -51,9 +51,52 @@ def test_evaluation_schema_accepts_documented_payload() -> None:
     Draft202012Validator(schema).validate(_valid_evaluation_payload())
 
 
+def test_evaluation_schema_accepts_nullable_evidence_ref_fields() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
+    payload = _valid_evaluation_payload()
+    evidence_ref = {
+        'event_id': 'event-1',
+        'trace_file': 'trace.json',
+        'browser_actions_file': None,
+        'step_index': 1,
+        'record_index': None,
+        'screenshot_path': None,
+    }
+    payload['evidence_refs'] = [evidence_ref]
+    payload['checks']['outcome_ok']['evidence_refs'] = [evidence_ref]
+
+    Draft202012Validator(schema).validate(payload)
+
+
 def test_evaluation_schema_rejects_unknown_top_level_fields() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
     payload = {**_valid_evaluation_payload(), 'unexpected': True}
 
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate(payload)
+
+
+def test_evaluation_schema_is_strict_response_format_compatible() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
+    missing_required: list[str] = []
+
+    def visit(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            properties = node.get('properties')
+            if isinstance(properties, dict):
+                required = node.get('required')
+                property_keys = set(properties)
+                required_keys = set(required) if isinstance(required, list) else set()
+                if required_keys != property_keys:
+                    missing = sorted(property_keys - required_keys)
+                    extra = sorted(required_keys - property_keys)
+                    missing_required.append(f'{path}: missing={missing} extra={extra}')
+            for key, value in node.items():
+                visit(value, f'{path}/{key}')
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                visit(value, f'{path}/{index}')
+
+    visit(schema, '#')
+
+    assert missing_required == []

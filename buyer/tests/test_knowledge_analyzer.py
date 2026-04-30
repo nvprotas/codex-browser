@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
@@ -25,7 +26,8 @@ from buyer.app.settings import Settings
 class _FakeCodexProcess:
     returncode = 0
 
-    async def communicate(self) -> tuple[bytes, bytes]:
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+        _ = input
         return b'ok', b''
 
     def kill(self) -> None:
@@ -618,3 +620,134 @@ class KnowledgeAnalyzerAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(kwargs['cwd'], '/workspace')
             self.assertTrue(output_path.is_absolute())
             self.assertEqual(output_path.parent.resolve(strict=False), artifact_dir)
+
+    async def test_analyzer_logs_prompt_diagnostics_before_subprocess(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeCodexProcess:
+                _ = kwargs
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            'site_domain': 'brandshop.ru',
+                            'session_outcome': 'completed',
+                            'summary': 'Каталог найден.',
+                            'knowledge_candidates': [],
+                            'pitfalls': [],
+                            'playbook_candidate': None,
+                            'evidence_refs': [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding='utf-8',
+                )
+                return _FakeCodexProcess()
+
+            analyzer = PostSessionKnowledgeAnalyzer(
+                Settings(
+                    buyer_trace_dir=tmpdir,
+                    codex_workdir='/workspace',
+                    codex_timeout_sec=5,
+                )
+            )
+            snapshot = PostSessionAnalysisSnapshot(
+                session_id='session-1',
+                task='buy sneakers',
+                start_url='https://brandshop.ru/',
+                metadata={'city': 'Москва'},
+                outcome='completed',
+                message='done',
+                order_id=None,
+                artifacts={'trace': {'stdout_tail': 'x' * 300}},
+                events=[
+                    {
+                        'event_id': 'event-1',
+                        'event_type': 'agent_stream_event',
+                        'payload': {'items': [{'text': 'y' * 400}]},
+                    }
+                ],
+            )
+            env = dict(os.environ)
+            env['OPENAI_API_KEY'] = 'test-key'
+            with patch.dict(os.environ, env, clear=True):
+                with patch('buyer.app.knowledge_analyzer.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec):
+                    with self.assertLogs('uvicorn.error', level='INFO') as logs:
+                        status = await analyzer.analyze(snapshot)
+
+            self.assertEqual(status['status'], 'completed')
+            output = '\n'.join(logs.output)
+            self.assertIn('knowledge_analysis_prompt_prepared', output)
+            self.assertIn('session_id=session-1', output)
+            self.assertRegex(output, r'prompt_bytes=\d+')
+            self.assertRegex(output, r'prompt_chars=\d+')
+            self.assertRegex(output, r'events_bytes=\d+')
+            self.assertIn('events_count=1', output)
+            self.assertRegex(output, r'artifacts_bytes=\d+')
+            self.assertIn('trace_summaries_count=0', output)
+
+    async def test_analyzer_passes_prompt_via_stdin_not_argv(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            captured: dict[str, Any] = {}
+
+            class CapturingProcess:
+                returncode = 0
+
+                async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+                    captured['stdin_payload'] = input
+                    return b'ok', b''
+
+                def kill(self) -> None:
+                    return
+
+            async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> CapturingProcess:
+                captured['cmd'] = cmd
+                captured['kwargs'] = kwargs
+                output_path = Path(cmd[cmd.index('-o') + 1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            'site_domain': 'brandshop.ru',
+                            'session_outcome': 'completed',
+                            'summary': 'Каталог найден.',
+                            'knowledge_candidates': [],
+                            'pitfalls': [],
+                            'playbook_candidate': None,
+                            'evidence_refs': [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding='utf-8',
+                )
+                return CapturingProcess()
+
+            analyzer = PostSessionKnowledgeAnalyzer(
+                Settings(
+                    buyer_trace_dir=tmpdir,
+                    codex_workdir='/workspace',
+                    codex_timeout_sec=5,
+                )
+            )
+            snapshot = PostSessionAnalysisSnapshot(
+                session_id='session-1',
+                task='buy sneakers with prompt marker',
+                start_url='https://brandshop.ru/',
+                metadata={},
+                outcome='completed',
+                message='done',
+                order_id=None,
+                artifacts={},
+                events=[],
+            )
+            env = dict(os.environ)
+            env['OPENAI_API_KEY'] = 'test-key'
+            with patch.dict(os.environ, env, clear=True):
+                with patch('buyer.app.knowledge_analyzer.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec):
+                    status = await analyzer.analyze(snapshot)
+
+            self.assertEqual(status['status'], 'completed')
+            cmd_text = '\n'.join(str(part) for part in captured['cmd'])
+            self.assertNotIn('buy sneakers with prompt marker', cmd_text)
+            self.assertEqual(captured['kwargs']['stdin'], asyncio.subprocess.PIPE)
+            stdin_payload = captured['stdin_payload']
+            self.assertIsInstance(stdin_payload, bytes)
+            self.assertIn('buy sneakers with prompt marker', stdin_payload.decode('utf-8'))

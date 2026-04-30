@@ -85,18 +85,27 @@
     "evidence_ref": {
       "type": "object",
       "additionalProperties": false,
+      "required": [
+        "event_id",
+        "trace_file",
+        "browser_actions_file",
+        "step_index",
+        "record_index",
+        "screenshot_path"
+      ],
       "properties": {
-        "event_id": {"type": "string", "minLength": 1},
-        "trace_file": {"type": "string", "minLength": 1},
-        "browser_actions_file": {"type": "string", "minLength": 1},
-        "step_index": {"type": "integer", "minimum": 0},
+        "event_id": {"type": ["string", "null"], "minLength": 1},
+        "trace_file": {"type": ["string", "null"], "minLength": 1},
+        "browser_actions_file": {"type": ["string", "null"], "minLength": 1},
+        "step_index": {"type": ["integer", "null"], "minimum": 0},
         "record_index": {
           "anyOf": [
             {"type": "integer", "minimum": 0},
-            {"type": "string", "minLength": 1}
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
           ]
         },
-        "screenshot_path": {"type": "string", "minLength": 1}
+        "screenshot_path": {"type": ["string", "null"], "minLength": 1}
       }
     },
     "recommendation": {

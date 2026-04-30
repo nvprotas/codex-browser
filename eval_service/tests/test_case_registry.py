@@ -136,5 +136,7 @@ def test_repository_smoke_cases_are_loadable() -> None:
 
     assert {case.eval_case_id for case in cases} == {
         'litres_purchase_book_001',
+        'litres_purchase_book_002',
+        'litres_purchase_book_003',
     }
     assert {case.host for case in cases} == {'litres.ru'}
