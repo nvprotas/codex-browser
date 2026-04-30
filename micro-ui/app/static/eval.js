@@ -711,6 +711,11 @@
   }
 
   function renderRunDetail() {
+    const openCaseIds = new Set(
+      [...nodes.runDetail.querySelectorAll('details.eval-callbacks-details[open]')]
+        .map((el) => el.closest('[data-case-id]')?.dataset.caseId)
+        .filter(Boolean),
+    );
     nodes.runDetail.replaceChildren();
     nodes.runJudge.disabled = !state.activeRun || hasJudgePending(state.activeRun);
 
@@ -733,6 +738,7 @@
     for (const item of cases) {
       const isWaiting = item.runtime_status === 'waiting_user';
       const card = node('div', `eval-run-case${isWaiting ? ' waiting' : ''}`);
+      card.dataset.caseId = item.eval_case_id;
 
       // Compact single row: status badge | title | host chip | N events chip
       const row = node('div', 'eval-run-case-row');
@@ -760,6 +766,7 @@
       if (cbCount > 0) {
         const details = document.createElement('details');
         details.className = 'eval-callbacks-details';
+        if (openCaseIds.has(item.eval_case_id)) details.open = true;
         details.appendChild(node('summary', 'eval-callbacks-summary', `${cbCount} callbacks`));
         const cbList = node('div', 'eval-callbacks');
         for (const group of groupRunCallbacks(asArray(item.callbacks))) {
