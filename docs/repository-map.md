@@ -584,6 +584,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - После подключения к странице `cdp_tool` ставит Playwright `context.route("**/*", ...)` guard на время команды: document/navigation requests, включая redirects и iframe-навигации, проходят через ту же URL policy и при нарушении abort-ятся `blockedbyclient`; ненавигационные asset/XHR requests не блокируются этим guard.
 - read-команды ретраятся при transient context errors.
 - `text` и `html` ограничивают stdout по умолчанию.
+- `snapshot` собирает не только базовые интерактивные и текстовые элементы (`a`, `button`, `input`, `textarea`, `select`, `[role]`, `[data-testid]`, заголовки, `label`, `p`), но и option-like элементы товара на `div`/`span`/`li` с ограниченными признаками варианта: классы `product-plate`/`size`/`variant`/`option`/`sku`/`swatch`, allowlist `data-size`/`data-value`/`data-variant`/`data-sku`/`data-color`/`data-option`, `aria-selected`/`aria-checked`/`aria-disabled`/`disabled`. Чтобы не раздувать ответ, диагностические поля `class`, `id`, `disabled`, `aria_selected`, `aria_checked`, `aria_disabled` и allowlist `data` добавляются прежде всего к option-like item и только при полезных состояниях у обычных элементов.
 
 Основные ошибки:
 

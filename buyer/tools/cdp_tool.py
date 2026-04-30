@@ -26,6 +26,10 @@ TEXT_STDOUT_LIMIT = 4_000
 LINKS_DEFAULT_LIMIT = 50
 SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
+SNAPSHOT_OPTION_TAGS = ('div', 'span', 'li')
+SNAPSHOT_OPTION_CLASS_HINTS = ('product-plate', 'size', 'variant', 'option', 'sku', 'swatch')
+SNAPSHOT_OPTION_DATA_ATTRIBUTES = ('data-size', 'data-value', 'data-variant', 'data-sku', 'data-color', 'data-option')
+SNAPSHOT_OPTION_STATE_ATTRIBUTES = ('aria-selected', 'aria-checked', 'aria-disabled', 'disabled')
 REQUEST_GUARD_ROUTE_PATTERN = '**/*'
 NAVIGATION_RESOURCE_TYPES = {'document'}
 
@@ -523,7 +527,13 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
         """(root, options) => {
             const limit = options.limit;
             const textLimit = options.textLimit;
+            const optionTags = options.optionTags;
+            const optionClassHints = options.optionClassHints;
+            const optionDataAttributes = options.optionDataAttributes;
+            const optionStateAttributes = options.optionStateAttributes;
             const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const escapeAttrValue = (value) => String(value).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"');
+            const hasAttribute = (node, name) => typeof node.hasAttribute === 'function' && node.hasAttribute(name);
             const selector = [
                 'a',
                 'button',
@@ -538,9 +548,44 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
                 'label',
                 'p'
             ].join(',');
-            const nodes = root.matches && root.matches(selector)
-                ? [root, ...root.querySelectorAll(selector)]
-                : [...root.querySelectorAll(selector)];
+            const optionSelector = [
+                ...optionTags.flatMap((tag) => optionClassHints.map((hint) => `${tag}[class*="${escapeAttrValue(hint)}"]`)),
+                ...optionTags.flatMap((tag) => optionDataAttributes.map((name) => `${tag}[${name}]`)),
+                ...optionTags.flatMap((tag) => optionStateAttributes.map((name) => `${tag}[${name}]`)),
+            ].join(',');
+            const nodes = [];
+            const seen = new Set();
+            const addNode = (node) => {
+                if (seen.has(node)) return;
+                seen.add(node);
+                nodes.push(node);
+            };
+            const addMatchingNodes = (currentSelector) => {
+                if (!currentSelector) return;
+                if (root.matches && root.matches(currentSelector)) addNode(root);
+                root.querySelectorAll(currentSelector).forEach(addNode);
+            };
+            const hasOptionLikeClass = (node) => {
+                const className = compact(node.getAttribute('class') || '').toLowerCase();
+                return optionClassHints.some((hint) => className.includes(hint));
+            };
+            const hasOptionLikeAttribute = (node) => {
+                return [...optionDataAttributes, ...optionStateAttributes].some((name) => hasAttribute(node, name));
+            };
+            const isOptionLikeNode = (node) => {
+                const tag = node.tagName.toLowerCase();
+                return optionTags.includes(tag) && (hasOptionLikeClass(node) || hasOptionLikeAttribute(node));
+            };
+            const collectDataAttributes = (node) => {
+                const data = {};
+                for (const name of optionDataAttributes) {
+                    const value = node.getAttribute(name);
+                    if (value !== null) data[name] = compact(value).slice(0, textLimit);
+                }
+                return data;
+            };
+            addMatchingNodes(selector);
+            addMatchingNodes(optionSelector);
             const result = [];
             for (const node of nodes) {
                 if (result.length >= limit) break;
@@ -548,6 +593,14 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
                 const style = window.getComputedStyle(node);
                 const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
                 const tag = node.tagName.toLowerCase();
+                const data = collectDataAttributes(node);
+                const optionLike = isOptionLikeNode(node);
+                const className = compact(node.getAttribute('class') || '').slice(0, textLimit);
+                const id = compact(node.getAttribute('id') || '').slice(0, textLimit);
+                const disabled = Boolean(node.disabled) || hasAttribute(node, 'disabled');
+                const ariaSelected = node.getAttribute('aria-selected');
+                const ariaChecked = node.getAttribute('aria-checked');
+                const ariaDisabled = node.getAttribute('aria-disabled');
                 const item = {
                     tag,
                     role: node.getAttribute('role') || null,
@@ -560,14 +613,36 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
                     placeholder: compact(node.getAttribute('placeholder') || '').slice(0, textLimit) || null,
                     visible,
                 };
-                if (!item.text && !item.href && !item.aria_label && !item.testid && !item.role && !item.placeholder) {
+                const hasData = Object.keys(data).length > 0;
+                const hasState = disabled || ariaSelected !== null || ariaChecked !== null || ariaDisabled !== null;
+                if (optionLike) {
+                    if (className) item.class = className;
+                    if (id) item.id = id;
+                    item.disabled = disabled;
+                    if (ariaSelected !== null) item.aria_selected = ariaSelected;
+                    if (ariaChecked !== null) item.aria_checked = ariaChecked;
+                    if (ariaDisabled !== null) item.aria_disabled = ariaDisabled;
+                    if (hasData) item.data = data;
+                } else {
+                    if (disabled) item.disabled = true;
+                    if (ariaDisabled !== null) item.aria_disabled = ariaDisabled;
+                }
+                const usefulOption = optionLike && (item.text || item.aria_label || hasData || hasState);
+                if (!item.text && !item.href && !item.aria_label && !item.testid && !item.role && !item.placeholder && !usefulOption) {
                     continue;
                 }
                 result.push(item);
             }
             return result;
         }""",
-        {'limit': limit, 'textLimit': SNAPSHOT_TEXT_LIMIT},
+        {
+            'limit': limit,
+            'textLimit': SNAPSHOT_TEXT_LIMIT,
+            'optionTags': list(SNAPSHOT_OPTION_TAGS),
+            'optionClassHints': list(SNAPSHOT_OPTION_CLASS_HINTS),
+            'optionDataAttributes': list(SNAPSHOT_OPTION_DATA_ATTRIBUTES),
+            'optionStateAttributes': list(SNAPSHOT_OPTION_STATE_ATTRIBUTES),
+        },
     )
     return {'ok': True, 'selector': args.selector, 'limit': limit, 'items': items, 'url': page.url}
 

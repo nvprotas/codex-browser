@@ -25,6 +25,7 @@ from buyer.tools.cdp_tool import (
     LINKS_DEFAULT_LIMIT,
     SNAPSHOT_DEFAULT_LIMIT,
     TEXT_STDOUT_LIMIT,
+    _collect_snapshot,
     connect_page_with_retry,
     ensure_page,
     _format_html_result,
@@ -205,6 +206,205 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('странице SberPay', prompt)
         self.assertIn('payment_evidence', prompt)
         self.assertIn('litres_payecom_iframe', prompt)
+
+    def test_prompt_requires_exact_variant_guardrails_before_add_to_cart(self) -> None:
+        prompt = build_agent_prompt(
+            task='Открой Brandshop. Нужны кроссовки размера 45 EU',
+            start_url='https://brandshop.ru/',
+            browser_cdp_endpoint='http://browser:9223',
+            cdp_preflight_summary='OK',
+            metadata={'size': '45 EU', 'color': 'светлый'},
+            auth_payload=None,
+            auth_context=None,
+            user_profile_text=None,
+            user_profile_truncated=False,
+            memory=[],
+            latest_user_reply='Нужен именно 45 EU.',
+        )
+
+        lowered_prompt = prompt.lower()
+        self.assertIn('если в task, metadata или последнем ответе пользователя указан размер, цвет или вариант', lowered_prompt)
+        self.assertIn('перед `Добавить в корзину` найди, выбери и проверь точный вариант', prompt)
+        self.assertIn('кнопка `Добавить в корзину` показывает другой выбранный размер', prompt)
+        self.assertIn('клик запрещен до выбора нужного варианта', prompt)
+        self.assertIn('после `html --path <file>` обязательно выполни локальный поиск', lowered_prompt)
+        self.assertIn('`размера нет`', prompt)
+        self.assertIn('snapshot/text/exists', prompt)
+
+
+class _FakeSnapshotElement:
+    def __init__(
+        self,
+        *,
+        tag: str,
+        text: str,
+        attrs: dict[str, str] | None = None,
+        visible: bool = True,
+    ) -> None:
+        self.tag = tag
+        self.text = text
+        self.attrs = attrs or {}
+        self.visible = visible
+
+
+class _FakeSnapshotLocator:
+    def __init__(self, elements: list[_FakeSnapshotElement]) -> None:
+        self.elements = elements
+
+    async def evaluate(self, script: str, options: dict[str, object]) -> list[dict[str, object]]:
+        limit = int(options['limit'])
+        text_limit = int(options['textLimit'])
+        option_tags = set(options.get('optionTags', []))
+        option_class_hints = [str(item) for item in options.get('optionClassHints', [])]
+        option_data_attributes = [str(item) for item in options.get('optionDataAttributes', [])]
+        option_state_attributes = [str(item) for item in options.get('optionStateAttributes', [])]
+        script_supports_option_like = 'optionClassHints' in script and 'optionDataAttributes' in script
+
+        result: list[dict[str, object]] = []
+        for element in self.elements:
+            if len(result) >= limit:
+                break
+            class_name = element.attrs.get('class', '')
+            attrs = element.attrs
+            is_base = element.tag in {'a', 'button', 'input', 'textarea', 'select', 'h1', 'h2', 'h3', 'label', 'p'}
+            has_base_marker = any(name in attrs for name in ('role', 'data-testid'))
+            has_option_marker = (
+                script_supports_option_like
+                and element.tag in option_tags
+                and (
+                    any(hint in class_name.lower() for hint in option_class_hints)
+                    or any(name in attrs for name in option_data_attributes)
+                    or any(name in attrs for name in option_state_attributes)
+                )
+            )
+            if not is_base and not has_base_marker and not has_option_marker:
+                continue
+
+            data = {
+                name: attrs[name][:text_limit]
+                for name in option_data_attributes
+                if name in attrs
+            }
+            disabled = 'disabled' in attrs
+            aria_selected = attrs.get('aria-selected')
+            aria_checked = attrs.get('aria-checked')
+            aria_disabled = attrs.get('aria-disabled')
+            item = {
+                'tag': element.tag,
+                'role': attrs.get('role'),
+                'testid': attrs.get('data-testid'),
+                'text': element.text[:text_limit],
+                'href': attrs.get('href'),
+                'aria_label': attrs.get('aria-label'),
+                'name': attrs.get('name'),
+                'type': attrs.get('type'),
+                'placeholder': attrs.get('placeholder'),
+                'visible': element.visible,
+            }
+            has_state = disabled or aria_selected is not None or aria_checked is not None or aria_disabled is not None
+            if has_option_marker:
+                if class_name:
+                    item['class'] = class_name
+                if attrs.get('id'):
+                    item['id'] = attrs.get('id')
+                item['disabled'] = disabled
+                if aria_selected is not None:
+                    item['aria_selected'] = aria_selected
+                if aria_checked is not None:
+                    item['aria_checked'] = aria_checked
+                if aria_disabled is not None:
+                    item['aria_disabled'] = aria_disabled
+                if data:
+                    item['data'] = data
+            else:
+                if disabled:
+                    item['disabled'] = True
+                if aria_disabled is not None:
+                    item['aria_disabled'] = aria_disabled
+            useful_option = has_option_marker and (
+                bool(item['text']) or bool(item['aria_label']) or bool(data) or has_state
+            )
+            if not item['text'] and not item['href'] and not item['aria_label'] and not item['testid'] and not item['role']:
+                if not useful_option:
+                    continue
+            result.append(item)
+        return result
+
+
+class _FakeSnapshotPage:
+    def __init__(self, elements: list[_FakeSnapshotElement]) -> None:
+        self.url = 'https://brandshop.ru/goods/510194/ih4363-100/'
+        self._locator = _FakeSnapshotLocator(elements)
+
+    def locator(self, selector: str) -> _FakeSnapshotLocator:
+        self.selector = selector
+        return self._locator
+
+
+class CdpSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_includes_brandshop_product_plate_option_item(self) -> None:
+        page = _FakeSnapshotPage(
+            [
+                _FakeSnapshotElement(tag='div', text='layout text', attrs={'class': 'product-layout'}),
+                _FakeSnapshotElement(
+                    tag='div',
+                    text='45 EU',
+                    attrs={'class': 'product-plate__item', 'data-size': '45 EU'},
+                ),
+                _FakeSnapshotElement(tag='button', text='Добавить в корзину 38 EU'),
+            ]
+        )
+        args = parser().parse_args(['snapshot', '--selector', 'main', '--limit', '20'])
+
+        result = await _collect_snapshot(page, args)
+
+        items = result['items']
+        product_plate = next(item for item in items if item['text'] == '45 EU')
+        self.assertEqual(product_plate['tag'], 'div')
+        self.assertEqual(product_plate['class'], 'product-plate__item')
+        self.assertEqual(product_plate['data'], {'data-size': '45 EU'})
+
+    async def test_snapshot_keeps_selected_and_disabled_state_for_option_like_elements(self) -> None:
+        page = _FakeSnapshotPage(
+            [
+                _FakeSnapshotElement(
+                    tag='li',
+                    text='45 EU',
+                    attrs={'class': 'size-option', 'aria-selected': 'true'},
+                ),
+                _FakeSnapshotElement(
+                    tag='span',
+                    text='46 EU',
+                    attrs={'class': 'swatch', 'aria-disabled': 'true', 'disabled': ''},
+                ),
+            ]
+        )
+        args = parser().parse_args(['snapshot', '--selector', 'main', '--limit', '20'])
+
+        result = await _collect_snapshot(page, args)
+
+        selected = next(item for item in result['items'] if item['text'] == '45 EU')
+        disabled = next(item for item in result['items'] if item['text'] == '46 EU')
+        self.assertEqual(selected['aria_selected'], 'true')
+        self.assertTrue(disabled['disabled'])
+        self.assertEqual(disabled['aria_disabled'], 'true')
+
+    async def test_snapshot_ignores_plain_layout_divs(self) -> None:
+        page = _FakeSnapshotPage(
+            [
+                _FakeSnapshotElement(tag='div', text='grid wrapper', attrs={'class': 'product-layout'}),
+                _FakeSnapshotElement(tag='span', text='decorative label', attrs={'class': 'caption'}),
+                _FakeSnapshotElement(tag='p', text='Описание товара'),
+            ]
+        )
+        args = parser().parse_args(['snapshot', '--selector', 'main', '--limit', '20'])
+
+        result = await _collect_snapshot(page, args)
+
+        texts = [item['text'] for item in result['items']]
+        self.assertEqual(texts, ['Описание товара'])
+        self.assertNotIn('class', result['items'][0])
+        self.assertNotIn('data', result['items'][0])
 
 
 class _FakePage:
