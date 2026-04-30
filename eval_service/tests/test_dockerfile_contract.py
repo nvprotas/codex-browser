@@ -28,6 +28,19 @@ def test_eval_service_dockerfile_uses_entrypoint_for_codex_oauth() -> None:
 
     assert 'RUN chmod +x /workspace/eval_service/docker/entrypoint.sh' in dockerfile
     assert 'ENTRYPOINT ["/workspace/eval_service/docker/entrypoint.sh"]' in dockerfile
-    assert 'CMD ["uvicorn", "eval_service.app.main:app", "--host", "0.0.0.0", "--port", "8090"]' in dockerfile
+    assert (
+        'CMD ["uvicorn", "eval_service.app.main:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]'
+        in dockerfile
+    )
     assert '/run/codex/host-auth' in entrypoint
     assert '/root/.codex/auth.json' in entrypoint
+
+
+def test_app_containers_disable_uvicorn_access_log_noise() -> None:
+    buyer_entrypoint = (ROOT / 'buyer' / 'docker' / 'entrypoint.sh').read_text(encoding='utf-8')
+    eval_dockerfile = (ROOT / 'eval_service' / 'Dockerfile').read_text(encoding='utf-8')
+    micro_ui_dockerfile = (ROOT / 'micro-ui' / 'Dockerfile').read_text(encoding='utf-8')
+
+    assert 'uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log' in buyer_entrypoint
+    assert '"--no-access-log"' in eval_dockerfile
+    assert '"--no-access-log"' in micro_ui_dockerfile
