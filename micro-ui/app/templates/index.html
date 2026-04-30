@@ -286,35 +286,6 @@
             <pre id="eval-judge-result" class="result" aria-live="polite"></pre>
           </article>
 
-          <article class="panel eval-ask-panel">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">ask_user</p>
-                <h2>Ответ оператора</h2>
-              </div>
-            </div>
-            <div id="eval-ask-user-question" class="eval-question">Нет ожидающего вопроса.</div>
-            <form id="eval-ask-user-form" class="eval-reply-form">
-              <label>
-                eval_case_id
-                <input type="text" id="eval-reply-case-id" readonly />
-              </label>
-              <label>
-                session_id
-                <input type="text" id="eval-reply-session-id" readonly />
-              </label>
-              <label>
-                reply_id
-                <input type="text" id="eval-reply-id" readonly />
-              </label>
-              <label>
-                Сообщение
-                <textarea id="eval-reply-message" rows="4" placeholder="Ответ для buyer"></textarea>
-              </label>
-              <button type="submit" class="primary-action">Отправить ответ</button>
-            </form>
-            <pre id="eval-reply-result" class="result" aria-live="polite"></pre>
-          </article>
         </section>
 
         <section class="panel eval-evaluations-panel">
@@ -328,13 +299,13 @@
             <table class="eval-table">
               <thead>
                 <tr>
+                  <th>Status</th>
                   <th>Case</th>
                   <th>Host</th>
-                  <th>Status</th>
-                  <th>Checks</th>
                   <th>Duration</th>
                   <th>Tokens</th>
-                  <th>Рекомендации</th>
+                  <th>Checks</th>
+                  <th>Рек.</th>
                   <th>Artifacts</th>
                 </tr>
               </thead>

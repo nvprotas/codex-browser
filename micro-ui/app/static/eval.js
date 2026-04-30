@@ -92,13 +92,6 @@
     runDetail: document.getElementById('eval-run-detail'),
     runJudge: document.getElementById('eval-run-judge'),
     judgeResult: document.getElementById('eval-judge-result'),
-    askQuestion: document.getElementById('eval-ask-user-question'),
-    askForm: document.getElementById('eval-ask-user-form'),
-    replyCaseId: document.getElementById('eval-reply-case-id'),
-    replySessionId: document.getElementById('eval-reply-session-id'),
-    replyId: document.getElementById('eval-reply-id'),
-    replyMessage: document.getElementById('eval-reply-message'),
-    replyResult: document.getElementById('eval-reply-result'),
     evaluationsBody: document.getElementById('eval-evaluations-body'),
     evaluationsEmpty: document.getElementById('eval-evaluations-empty'),
     caseDashboard: document.getElementById('eval-case-dashboard'),
@@ -685,6 +678,38 @@
     return wrapper;
   }
 
+  async function submitReply(evalRunId, evalCaseId, replyId, message, resultEl) {
+    try {
+      const data = await evalRequest(CONTRACT_PATHS.reply, {
+        evalRunId,
+        evalCaseId,
+        payload: { reply_id: replyId, message },
+      });
+      if (resultEl) resultEl.textContent = JSON.stringify(data, null, 2);
+      if (!window.EVAL_SERVICE_BASE_URL) {
+        const caseItem = asArray(state.activeRun?.cases).find((c) => c.eval_case_id === evalCaseId);
+        if (caseItem) {
+          caseItem.runtime_status = 'running';
+          caseItem.callbacks.push({
+            event_id: `${evalRunId}-operator-reply`,
+            event_type: 'operator_reply',
+            occurred_at: nowIso(),
+            session_id: caseItem.session_id,
+            reply_id: replyId,
+          });
+          caseItem.waiting_reply_id = null;
+          caseItem.waiting_question = null;
+        }
+      } else if (state.activeRun?.eval_run_id) {
+        await loadRunDetail(state.activeRun.eval_run_id);
+      }
+      renderAll();
+      scheduleRunRefresh();
+    } catch (error) {
+      if (resultEl) resultEl.textContent = String(error.message || error);
+    }
+  }
+
   function renderRunDetail() {
     nodes.runDetail.replaceChildren();
     nodes.runJudge.disabled = !state.activeRun || hasJudgePending(state.activeRun);
@@ -706,46 +731,91 @@
     nodes.runDetail.appendChild(summary);
 
     for (const item of cases) {
-      const card = node('div', 'eval-run-case');
-      const top = node('div', 'eval-run-case-top');
-      top.append(
-        node('strong', null, item.title),
+      const isWaiting = item.runtime_status === 'waiting_user';
+      const card = node('div', `eval-run-case${isWaiting ? ' waiting' : ''}`);
+
+      // Compact single row: status badge | title | host chip | N events chip
+      const row = node('div', 'eval-run-case-row');
+      const titleSpan = node('span', 'eval-run-case-title', item.title);
+      row.append(
         node('span', `eval-status ${statusClass(item.runtime_status)}`, statusLabel(item.runtime_status)),
+        titleSpan,
+        node('span', 'eval-chip', item.host),
       );
-
-      const meta = node('div', 'eval-run-case-meta');
-      meta.append(
-        node('span', 'code', item.eval_case_id),
-        node('span', null, item.host),
-        node('span', 'code', item.session_id || 'session_id: -'),
-        node('span', null, `callbacks: ${asArray(item.callbacks).length}`),
-      );
-
-      const callbacks = node('div', 'eval-callbacks');
-      const caseCallbacks = asArray(item.callbacks);
-      if (!caseCallbacks.length) {
-        callbacks.appendChild(node('div', 'eval-callback-item', 'callbacks пока нет'));
+      const cbCount = asArray(item.callbacks).length;
+      if (cbCount > 0) {
+        row.appendChild(node('span', 'eval-chip code', `${cbCount} ev`));
       }
-      for (const group of groupRunCallbacks(caseCallbacks)) {
-        callbacks.appendChild(
-          group.kind === 'agent_stream_event' ? renderAgentStreamGroup(group) : renderCallbackItem(group.callbacks[0]),
-        );
+      card.appendChild(row);
+
+      // IDs row
+      const idsRow = node('div', 'eval-run-case-ids');
+      idsRow.appendChild(node('span', 'code', item.eval_case_id));
+      if (item.session_id) {
+        idsRow.appendChild(node('span', 'code', item.session_id));
+      }
+      card.appendChild(idsRow);
+
+      // Callbacks as collapsible details
+      if (cbCount > 0) {
+        const details = document.createElement('details');
+        details.className = 'eval-callbacks-details';
+        details.appendChild(node('summary', 'eval-callbacks-summary', `${cbCount} callbacks`));
+        const cbList = node('div', 'eval-callbacks');
+        for (const group of groupRunCallbacks(asArray(item.callbacks))) {
+          cbList.appendChild(
+            group.kind === 'agent_stream_event' ? renderAgentStreamGroup(group) : renderCallbackItem(group.callbacks[0]),
+          );
+        }
+        details.appendChild(cbList);
+        card.appendChild(details);
       }
 
-      card.append(top, meta, callbacks);
+      // Inline reply for waiting_user
+      if (isWaiting && item.waiting_reply_id) {
+        const replyBlock = node('div', 'eval-inline-reply');
+        if (item.waiting_question) {
+          replyBlock.appendChild(node('p', 'eval-inline-reply-question', item.waiting_question));
+        }
+        const textarea = document.createElement('textarea');
+        textarea.rows = 2;
+        textarea.className = 'eval-inline-reply-textarea';
+        textarea.placeholder = 'Ответ оператора…';
+        const submitBtn = node('button', 'primary-action eval-inline-reply-submit', 'Ответить');
+        const resultPre = node('pre', 'result');
+        const controls = node('div', 'eval-inline-reply-controls');
+        controls.append(textarea, submitBtn);
+        replyBlock.append(controls, resultPre);
+        submitBtn.addEventListener('click', async () => {
+          const message = textarea.value.trim();
+          if (!message || !state.activeRun) return;
+          submitBtn.disabled = true;
+          await submitReply(state.activeRun.eval_run_id, item.eval_case_id, item.waiting_reply_id, message, resultPre);
+          submitBtn.disabled = false;
+        });
+        card.appendChild(replyBlock);
+      }
+
       nodes.runDetail.appendChild(card);
     }
   }
 
-  function renderAskUser() {
-    const waiting = selectedWaitingCase();
-    const disabled = !waiting;
-    nodes.askQuestion.textContent = waiting?.waiting_question || 'Нет ожидающего вопроса.';
-    nodes.replyCaseId.value = waiting?.eval_case_id || '';
-    nodes.replySessionId.value = waiting?.session_id || '';
-    nodes.replyId.value = waiting?.waiting_reply_id || '';
-    nodes.replyMessage.disabled = disabled;
-    nodes.askForm.querySelector('button[type="submit"]').disabled = disabled;
+  function makeTags(value, separator = ',') {
+    const items = Array.isArray(value)
+      ? value.map(String)
+      : String(value || '')
+          .split(separator)
+          .map((s) => s.trim())
+          .filter(Boolean);
+    const wrap = document.createElement('span');
+    if (!items.length) {
+      wrap.textContent = '-';
+      return wrap;
+    }
+    for (const text of items) {
+      wrap.appendChild(node('span', 'eval-tag', text));
+    }
+    return wrap;
   }
 
   function renderEvaluations() {
@@ -754,28 +824,59 @@
 
     for (const item of state.evaluations) {
       const row = document.createElement('tr');
-      const cells = [
-        item.eval_case_id,
-        item.host,
-        statusLabel(item.runtime_status),
-        formatList(item.checks),
-        formatMs(item.duration_ms),
-        formatNumber(item.buyer_tokens_used),
-        formatNumber(item.recommendations_count),
-        formatList(item.artifacts),
-      ];
-      for (const cell of cells) {
-        const td = document.createElement('td');
-        td.textContent = cell;
-        row.appendChild(td);
-      }
+
+      // Status badge
+      const statusTd = document.createElement('td');
+      statusTd.appendChild(
+        node('span', `eval-status ${statusClass(item.runtime_status)}`, statusLabel(item.runtime_status)),
+      );
+
+      // Case ID
+      const caseTd = document.createElement('td');
+      caseTd.appendChild(node('span', 'code', item.eval_case_id));
+
+      // Host
+      const hostTd = document.createElement('td');
+      hostTd.textContent = item.host || '-';
+
+      // Duration with color
+      const durMs = Number(item.duration_ms || 0);
+      const durClass = durMs > 0 && durMs < 100000 ? 'eval-dur-ok' : durMs < 150000 ? 'eval-dur-warn' : 'eval-dur-slow';
+      const durTd = document.createElement('td');
+      durTd.className = durClass;
+      durTd.textContent = formatMs(item.duration_ms);
+
+      // Tokens
+      const tokensTd = document.createElement('td');
+      tokensTd.textContent = formatNumber(item.buyer_tokens_used);
+
+      // Checks as tags
+      const checksTd = document.createElement('td');
+      checksTd.appendChild(makeTags(item.checks));
+
+      // Recommendations
+      const recCount = Number(item.recommendations_count || 0);
+      const recTd = document.createElement('td');
+      recTd.className = recCount > 0 ? 'eval-rec-warn' : '';
+      recTd.textContent = String(recCount || '-');
+
+      // Artifacts as tags
+      const artifactsTd = document.createElement('td');
+      artifactsTd.appendChild(makeTags(item.artifacts));
+
+      row.append(statusTd, caseTd, hostTd, durTd, tokensTd, checksTd, recTd, artifactsTd);
       nodes.evaluationsBody.appendChild(row);
     }
   }
 
-  function lineChart(values) {
+  function lineChart(values, formatFn) {
     const normalized = seriesValues(values);
-    const chart = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const fmt = typeof formatFn === 'function' ? formatFn : String;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'eval-chart-wrap';
+
+    const chart = document.createElementNS(SVG_NS, 'svg');
     chart.classList.add('eval-line-chart');
     chart.setAttribute('viewBox', '0 0 120 48');
     chart.setAttribute('preserveAspectRatio', 'none');
@@ -794,27 +895,83 @@
     chart.appendChild(grid);
 
     if (!normalized.length) {
-      return chart;
+      wrapper.appendChild(chart);
+      return wrapper;
     }
 
     const min = Math.min(...normalized);
     const max = Math.max(...normalized);
     const spread = max - min || 1;
     const step = normalized.length > 1 ? 120 / (normalized.length - 1) : 120;
-    const points = normalized
-      .map((value, index) => {
-        const x = normalized.length === 1 ? 60 : index * step;
-        const y = 42 - ((value - min) / spread) * 36;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
+
+    const pts = normalized.map((v, i) => ({
+      x: normalized.length === 1 ? 60 : i * step,
+      y: 42 - ((v - min) / spread) * 36,
+      value: v,
+    }));
 
     const polyline = document.createElementNS(SVG_NS, 'polyline');
     polyline.classList.add('eval-line-path');
-    polyline.setAttribute('points', points);
+    polyline.setAttribute('points', pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
     chart.appendChild(polyline);
 
-    return chart;
+    // Hover dot
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('r', '3.5');
+    dot.classList.add('eval-chart-dot');
+    dot.style.display = 'none';
+    chart.appendChild(dot);
+
+    // Tooltip
+    const tooltip = document.createElement('div');
+    tooltip.className = 'eval-chart-tooltip';
+    tooltip.style.display = 'none';
+
+    chart.addEventListener('mousemove', (e) => {
+      const svgRect = chart.getBoundingClientRect();
+      if (!svgRect.width) return;
+      const mouseX = ((e.clientX - svgRect.left) / svgRect.width) * 120;
+      let closest = pts[0];
+      let closestDist = Infinity;
+      for (const p of pts) {
+        const dist = Math.abs(mouseX - p.x);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closest = p;
+        }
+      }
+      dot.setAttribute('cx', closest.x.toFixed(1));
+      dot.setAttribute('cy', closest.y.toFixed(1));
+      dot.style.display = '';
+      tooltip.textContent = fmt(closest.value);
+      tooltip.style.display = '';
+      const wrapperRect = wrapper.getBoundingClientRect();
+      const dotScreenX = (closest.x / 120) * svgRect.width + svgRect.left - wrapperRect.left;
+      const dotScreenY = (closest.y / 48) * svgRect.height + svgRect.top - wrapperRect.top;
+      const tw = tooltip.offsetWidth || 52;
+      const tipLeft = Math.max(0, Math.min(dotScreenX - tw / 2, wrapperRect.width - tw));
+      tooltip.style.left = `${tipLeft}px`;
+      tooltip.style.top = `${Math.max(0, dotScreenY - 28)}px`;
+    });
+
+    chart.addEventListener('mouseleave', () => {
+      dot.style.display = 'none';
+      tooltip.style.display = 'none';
+    });
+
+    // Y-axis min/max labels
+    if (normalized.length >= 2 && min !== max) {
+      const axMax = document.createElement('span');
+      axMax.className = 'eval-chart-axis-max';
+      axMax.textContent = fmt(max);
+      const axMin = document.createElement('span');
+      axMin.className = 'eval-chart-axis-min';
+      axMin.textContent = fmt(min);
+      wrapper.append(axMax, axMin);
+    }
+
+    wrapper.append(chart, tooltip);
+    return wrapper;
   }
 
   function dashboardItem(item, titleKey) {
@@ -834,9 +991,9 @@
 
     const charts = node('div', 'eval-dashboard-charts');
     const duration = node('div', 'eval-chart-block');
-    duration.append(node('span', null, 'duration_ms'), lineChart(item.duration_ms));
+    duration.append(node('span', null, 'duration'), lineChart(item.duration_ms, formatMs));
     const tokens = node('div', 'eval-chart-block');
-    tokens.append(node('span', null, 'buyer_tokens_used'), lineChart(item.buyer_tokens_used));
+    tokens.append(node('span', null, 'tokens'), lineChart(item.buyer_tokens_used, formatNumber));
     charts.append(duration, tokens);
 
     card.append(top, metrics, charts);
@@ -867,7 +1024,6 @@
   function renderAll() {
     renderMetrics();
     renderRunDetail();
-    renderAskUser();
     renderEvaluations();
   }
 
@@ -900,46 +1056,6 @@
       scheduleRunRefresh();
     } catch (error) {
       nodes.startResult.textContent = String(error.message || error);
-    }
-  });
-
-  nodes.askForm.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const waiting = selectedWaitingCase();
-    const message = nodes.replyMessage.value.trim();
-    if (!waiting || !message) {
-      return;
-    }
-
-    try {
-      const data = await evalRequest(CONTRACT_PATHS.reply, {
-        evalRunId: state.activeRun.eval_run_id,
-        evalCaseId: waiting.eval_case_id,
-        payload: {
-          reply_id: waiting.waiting_reply_id,
-          message,
-        },
-      });
-      nodes.replyResult.textContent = JSON.stringify(data, null, 2);
-      nodes.replyMessage.value = '';
-      if (state.activeRun?.eval_run_id && window.EVAL_SERVICE_BASE_URL) {
-        await loadRunDetail(state.activeRun.eval_run_id);
-      } else {
-        waiting.runtime_status = 'running';
-        waiting.callbacks.push({
-          event_id: `${state.activeRun.eval_run_id}-operator-reply`,
-          event_type: 'operator_reply',
-          occurred_at: nowIso(),
-          session_id: waiting.session_id,
-          reply_id: waiting.waiting_reply_id,
-        });
-        waiting.waiting_reply_id = null;
-        waiting.waiting_question = null;
-      }
-      renderAll();
-      scheduleRunRefresh();
-    } catch (error) {
-      nodes.replyResult.textContent = String(error.message || error);
     }
   });
 
