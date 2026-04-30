@@ -38,7 +38,7 @@
 | `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и временного `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
-| `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
+| `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; task-шаблон с целью, критериями, ограничениями и платежной границей; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
 | `extensions/openclaw-buyer/` | Минимальная metadata/runtime-обвязка OpenClaw plugin для skill-only extension. | `openclaw.plugin.json`, `package.json`, `index.js`. | Дает OpenClaw plugin discovery распознать `openclaw-buyer` и загрузить skill-директорию `skills`. | Без package entrypoint или `configSchema` OpenClaw считает config entry stale или помечает plugin ошибочным. |
 | `scripts/install-openclaw-buyer-skill.sh` | Копирует repo-local skill `skills/openclaw-buyer` и plugin metadata в extension-директорию `openclaw`. | Аргумент `<openclaw-buyer-extension-dir>` или `OPENCLAW_BUYER_EXTENSION_DIR`; по умолчанию `~/.openclaw/extensions/openclaw-buyer`; исходные `skills/openclaw-buyer` и `extensions/openclaw-buyer`. | Создает/обновляет `<target>/package.json`, `<target>/openclaw.plugin.json`, `<target>/index.js`, `<target>/skills/openclaw-buyer/SKILL.md` и `<target>/agents/openai.yaml`. | Не удаляет устаревшие файлы в целевой директории; неверный target может установить extension не туда. |
 
@@ -361,7 +361,7 @@ HTTP-клиент доставки callback-событий.
 
 Входы: задача, start URL, CDP endpoint, preflight summary, metadata, redacted auth payload, auth context, user profile, memory, последний reply.
 
-Выход: текст prompt с правилами управления `cdp_tool.py`, SberPay-boundary, Litres-specific payment evidence и schema-only ответом.
+Выход: outcome-first текст prompt с правилами управления `cdp_tool.py`, циклом `observe -> act -> verify`, SberPay-boundary, Litres-specific payment evidence, prompt-injection boundary для динамического контекста и schema-only ответом.
 
 Ошибки явно не выбрасывает; риски связаны с устаревшими инструкциями, если меняется доменный контракт.
 
@@ -618,6 +618,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 
 - prompt записывается в `knowledge-analysis-prompt.txt` и передается в `codex exec` через stdin, чтобы большой snapshot не попадал в argv процесса;
 - `knowledge_analysis_schema.json` использует строгие object schemas без произвольных дополнительных полей для совместимости со Structured Outputs;
+- prompt помечает входной JSON как данные, задает evidence budget для чтения trace/browser-actions и калибрует confidence по силе evidence;
 - перед запуском пишется `knowledge_analysis_prompt_prepared` с размерами prompt и основных секций входного JSON без логирования полного содержимого.
 
 Security boundaries:
@@ -728,7 +729,7 @@ Judge flow:
 - `POST /runs/{eval_run_id}/judge` по умолчанию синхронно собирает judge input из case, callbacks и trace summary; при payload/query `async=true` помечает еще не оцененные terminal cases как `judge_pending`, планирует фоновый judge-job и сразу возвращает `202`;
 - `write_judge_input()` записывает полный redacted `judge-input.json` без дополнительной фильтрации/обрезки evidence; дополнительно добавляет `evidence_files` с путями к `manifest.json`, самому judge input, будущему evaluation output, trace JSON, browser actions JSONL и screenshots;
 - `JudgeRunner` вызывает `codex exec --output-schema ... -o <evaluation.json>` без передачи prompt в argv;
-- judge prompt передается в `codex exec` через stdin, остается коротким и содержит инструкции, краткое описание структуры evidence-файлов, идентификаторы case и пути к ним; содержимое `judge-input.json`, callbacks и traces не инлайнится в prompt;
+- judge prompt передается в `codex exec` через stdin, остается коротким и содержит инструкции, краткое описание структуры evidence-файлов, идентификаторы case и пути к ним; содержимое `judge-input.json`, callbacks и traces не инлайнится в prompt; trace/prompt/stdout/stderr трактуются как evidence, а не инструкции;
 - `evaluation_schema.json` совместима со strict response_format: все object `properties` перечислены в `required`; логически optional поля `evidence_ref` передаются как nullable значения;
 - после успешной schema/identity validation `JudgeRunner` перезаписывает `judge_metadata` серверными значениями `backend=codex_exec` и `model=EVAL_JUDGE_MODEL`, чтобы metadata не зависела от сгенерированного model output;
 - при timeout, non-zero exit, невалидном JSON/schema mismatch или identity mismatch пишется fallback evaluation со skipped/failed checks.
