@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ._utils import head_text as _head_text, tail_text as _tail_text
@@ -140,6 +141,11 @@ class BuyerService:
                 idempotency_suffix='start',
             )
             logger.info('session_started session_id=%s start_url=%s', session_id, state.start_url)
+            _log_buyer_progress(
+                session_id=session_id,
+                stage='session',
+                message=f'Сессия запущена, стартовая страница: {_compact_url_for_container_log(state.start_url)}',
+            )
 
             await self._store.add_agent_memory(session_id, 'system', f'Start URL: {state.start_url}')
             await self._store.add_agent_memory(session_id, 'user', state.task)
@@ -147,6 +153,12 @@ class BuyerService:
             if auth_summary:
                 auth_summary = _sanitize_auth_summary_for_runtime(auth_summary)
                 await self._store.set_auth_context(session_id, auth_summary)
+                _log_buyer_progress(
+                    session_id=session_id,
+                    stage='auth',
+                    status=str(auth_summary.get('reason_code') or auth_summary.get('path') or 'unknown'),
+                    message=_describe_auth_summary(auth_summary),
+                )
                 await self._store.add_agent_memory(
                     session_id,
                     'system',
@@ -172,6 +184,12 @@ class BuyerService:
                     idempotency_suffix=f'step-{step_index}-started',
                 )
                 logger.info('agent_step_started session_id=%s step=%s', session_id, step_index)
+                _log_buyer_progress(
+                    session_id=session_id,
+                    stage='agent_step',
+                    step_index=step_index,
+                    message='Запускаю generic шаг агента через codex.',
+                )
                 result = await self._runner.run_step(
                     session_id=session_id,
                     step_index=step_index,
@@ -243,6 +261,16 @@ class BuyerService:
                                 f'Попытка восстановления {recovery_attempts}. '
                                 f'Обнаружен transient CDP-сбой: {last_recovery_error_tail}. '
                                 f'Начни шаг заново с `goto --url {state.start_url}`.'
+                            ),
+                        )
+                        _log_buyer_progress(
+                            session_id=session_id,
+                            stage='cdp_recovery',
+                            step_index=step_index,
+                            status='retrying',
+                            message=(
+                                f'Временный CDP-сбой, пробую восстановиться: попытка {recovery_attempts}, '
+                                f'последняя ошибка: {last_recovery_error_tail}'
                             ),
                         )
                         await asyncio.sleep(self._cdp_recovery_interval_sec)
@@ -324,6 +352,13 @@ class BuyerService:
                 idempotency_suffix='payment-ready',
             )
             logger.info('payment_ready session_id=%s order_id=%s', state.session_id, result.order_id)
+            _log_buyer_progress(
+                session_id=state.session_id,
+                stage='payment',
+                status='ready',
+                order_id=result.order_id,
+                message='Платежный шаг готов, orderId получен и отправлен в callback.',
+            )
 
         await self._emit_event(
             state,
@@ -339,6 +374,13 @@ class BuyerService:
         await self._store.record_artifacts(state.session_id, [artifacts])
         await self._store.set_status(state.session_id, SessionStatus.COMPLETED)
         logger.info('session_completed session_id=%s', state.session_id)
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='session',
+            status='completed',
+            order_id=result.order_id,
+            message='Сценарий покупки завершен успешно.',
+        )
         await self._schedule_post_session_analysis(
             state,
             outcome='completed',
@@ -371,6 +413,12 @@ class BuyerService:
         await self._store.record_artifacts(state.session_id, [merged_artifacts])
         await self._store.set_status(state.session_id, SessionStatus.FAILED, error=reason)
         logger.error('session_failed session_id=%s reason=%s', state.session_id, _tail_text(reason, limit=700))
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='session',
+            status='failed',
+            message=f'Сценарий завершился ошибкой: {_tail_text(reason, limit=300)}',
+        )
         await self._schedule_post_session_analysis(
             state,
             outcome='failed',
@@ -530,6 +578,11 @@ class BuyerService:
         if not is_domain_in_allowlist(domain, self._purchase_script_allowlist):
             return None
 
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='purchase_script',
+            message=f'Пробую быстрый purchase-скрипт для домена {domain}.',
+        )
         try:
             script_result = await self._purchase_script_runner.run(
                 session_id=state.session_id,
@@ -552,6 +605,12 @@ class BuyerService:
                 state.session_id,
                 domain,
                 _tail_text(str(exc), limit=700),
+            )
+            _log_buyer_progress(
+                session_id=state.session_id,
+                stage='purchase_script',
+                status='fallback',
+                message=f'Быстрый purchase-скрипт упал, перехожу к generic flow: {_tail_text(str(exc), limit=250)}',
             )
             return None
 
@@ -583,6 +642,16 @@ class BuyerService:
                     script_result.order_id,
                     _tail_text(json.dumps(script_result.artifacts, ensure_ascii=False, default=str), limit=700),
                 )
+                _log_buyer_progress(
+                    session_id=state.session_id,
+                    stage='purchase_script',
+                    status='fallback',
+                    order_id=script_result.order_id,
+                    message=(
+                        'Быстрый purchase-скрипт дошел до orderId, но verifier отклонил evidence; '
+                        'перехожу к generic flow.'
+                    ),
+                )
                 return None
 
             logger.info(
@@ -590,6 +659,13 @@ class BuyerService:
                 state.session_id,
                 domain,
                 script_result.order_id,
+            )
+            _log_buyer_progress(
+                session_id=state.session_id,
+                stage='purchase_script',
+                status='completed',
+                order_id=script_result.order_id,
+                message='Быстрый purchase-скрипт довел сценарий до платежного шага.',
             )
             return candidate
 
@@ -609,6 +685,15 @@ class BuyerService:
             domain,
             script_result.reason_code,
             _tail_text(script_result.message, limit=500),
+        )
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='purchase_script',
+            status='fallback',
+            message=(
+                f'Быстрый purchase-скрипт не завершил сценарий ({script_result.reason_code}); '
+                'перехожу к generic flow.'
+            ),
         )
         return None
 
@@ -638,6 +723,12 @@ class BuyerService:
             idempotency_suffix=reply_id,
         )
         logger.info('session_waiting_user session_id=%s reply_id=%s reason=%s', state.session_id, reply_id, reason_code or 'none')
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='waiting_user',
+            status=reason_code or 'needs_reply',
+            message=f'Ожидаю ответ оператора: {_head_text(message, limit=220)}',
+        )
 
         await refreshed_state.wake_event.wait()
         reply_text = await self._store.pop_reply(state.session_id)
@@ -870,6 +961,14 @@ def _log_step_result_to_container(*, session_id: str, step_index: int, result: A
         result.order_id,
         _head_text(result.message, limit=300),
     )
+    _log_buyer_progress(
+        session_id=session_id,
+        stage='agent_step',
+        step_index=step_index,
+        status=result.status,
+        order_id=result.order_id,
+        message=f'Шаг агента завершен: {_head_text(result.message, limit=260)}',
+    )
     trace = _extract_trace_for_event(result.artifacts)
     if not trace:
         return
@@ -888,12 +987,213 @@ def _log_step_result_to_container(*, session_id: str, step_index: int, result: A
         for item in actions_tail[-10:]:
             if not isinstance(item, dict):
                 continue
+            summary = _summarize_browser_action_for_container_log(item)
+            if summary is None:
+                continue
             logger.info(
-                'agent_step_action session_id=%s step=%s action=%s',
+                'browser_action session_id=%s step=%s event=%s command=%s ok=%s duration_ms=%s target=%s page=%s summary=%s',
                 session_id,
                 step_index,
-                json.dumps(item, ensure_ascii=False),
+                summary.get('event'),
+                summary.get('command'),
+                summary.get('ok'),
+                summary.get('duration_ms'),
+                summary.get('target') or 'none',
+                summary.get('page') or 'unknown',
+                summary.get('summary') or '',
             )
+
+
+def _log_buyer_progress(
+    *,
+    session_id: str,
+    stage: str,
+    message: str,
+    step_index: int | None = None,
+    status: str | None = None,
+    order_id: str | None = None,
+) -> None:
+    logger.info(
+        'buyer_progress session_id=%s stage=%s step=%s status=%s order_id=%s message=%s',
+        session_id,
+        stage,
+        step_index if step_index is not None else 'none',
+        status or 'none',
+        order_id or 'none',
+        _head_text(message, limit=500),
+    )
+
+
+def _summarize_browser_action_for_container_log(record: dict[str, Any]) -> dict[str, Any] | None:
+    raw_event = record.get('event')
+    command = record.get('command')
+    if not isinstance(raw_event, str) or not isinstance(command, str) or not command:
+        return None
+
+    event = _compact_browser_event(raw_event)
+    if event is None:
+        return None
+
+    details = record.get('details') if isinstance(record.get('details'), dict) else {}
+    result = record.get('result') if isinstance(record.get('result'), dict) else {}
+    failed = raw_event == 'browser_command_failed' or record.get('ok') is False
+    ok = None if event == 'started' else not failed
+    page = _compact_url_for_container_log(_first_string(result.get('url'), details.get('url')))
+    target = _browser_action_target(command=command, details=details, result=result)
+
+    return {
+        'event': event,
+        'command': command,
+        'ok': ok,
+        'duration_ms': record.get('duration_ms') if isinstance(record.get('duration_ms'), int) else None,
+        'target': target,
+        'page': page,
+        'summary': _browser_action_summary(
+            event=event,
+            command=command,
+            failed=failed,
+            details=details,
+            result=result,
+            error=record.get('error'),
+        ),
+    }
+
+
+def _compact_browser_event(raw_event: str) -> str | None:
+    if raw_event == 'browser_command_started':
+        return 'started'
+    if raw_event == 'browser_command_finished':
+        return 'finished'
+    if raw_event == 'browser_command_failed':
+        return 'failed'
+    return None
+
+
+def _browser_action_target(*, command: str, details: dict[str, Any], result: dict[str, Any]) -> str:
+    parts: list[str] = []
+    selector = _first_string(details.get('selector'), result.get('selector'))
+    if selector:
+        parts.append(f'selector={_head_text(selector, limit=120)}')
+
+    name = _first_string(details.get('name'), result.get('name'))
+    if name:
+        parts.append(f'name={_head_text(name, limit=80)}')
+
+    key = _first_string(details.get('key'), result.get('key'))
+    if key:
+        parts.append(f'key={_head_text(key, limit=80)}')
+
+    if command == 'wait':
+        seconds = details.get('seconds') or result.get('seconds')
+        if isinstance(seconds, int | float):
+            parts.append(f'seconds={seconds:g}')
+
+    target_url = _compact_url_for_container_log(_first_string(details.get('url'), result.get('url')))
+    if target_url:
+        parts.append(f'url={target_url}')
+
+    return ' '.join(parts) or 'none'
+
+
+def _browser_action_summary(
+    *,
+    event: str,
+    command: str,
+    failed: bool,
+    details: dict[str, Any],
+    result: dict[str, Any],
+    error: Any,
+) -> str:
+    if event == 'started':
+        return f'начата команда браузера: {command}'
+
+    if failed:
+        error_text = _tail_text(str(error), limit=220) if error is not None else 'без текста ошибки'
+        return f'команда браузера завершилась ошибкой: {command}; {error_text}'
+
+    if command == 'snapshot':
+        items = result.get('items') if isinstance(result.get('items'), list) else []
+        text_preview = _visible_snapshot_text_preview(items)
+        if text_preview:
+            return f'снимок страницы: элементов={len(items)}, текст="{text_preview}"'
+        return f'снимок страницы: элементов={len(items)}'
+
+    if command == 'attr':
+        exists = result.get('exists')
+        value = _first_string(result.get('value'))
+        value_summary = _compact_url_for_container_log(value) or (_head_text(value, limit=120) if value else 'empty')
+        return f'прочитан атрибут: exists={exists}, value={value_summary}'
+
+    if command == 'exists':
+        return f'проверено наличие элемента: exists={result.get("exists")}'
+
+    if command == 'text':
+        text = _first_string(result.get('text'))
+        size = result.get('text_size')
+        if text:
+            return f'прочитан текст: size={size}, preview="{_head_text(text, limit=180)}"'
+        return f'прочитан текст: size={size}'
+
+    if command == 'html':
+        size = result.get('html_size') or result.get('size')
+        path = _first_string(details.get('path'), result.get('path'))
+        return f'получен HTML: size={size}, path={path or "stdout"}'
+
+    if command == 'links':
+        links = result.get('links') if isinstance(result.get('links'), list) else []
+        return f'найдены ссылки: count={len(links)}'
+
+    return f'команда браузера выполнена: {command}'
+
+
+def _visible_snapshot_text_preview(items: list[Any]) -> str:
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get('visible') is False:
+            continue
+        text = item.get('text')
+        if not isinstance(text, str):
+            continue
+        compact = _head_text(text, limit=90)
+        if not compact or compact in seen:
+            continue
+        seen.add(compact)
+        chunks.append(compact)
+        if len(' '.join(chunks)) >= 180:
+            break
+    return _head_text(' | '.join(chunks), limit=220)
+
+
+def _compact_url_for_container_log(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return _head_text(value, limit=160)
+    if not parsed.scheme or not parsed.netloc:
+        return _head_text(value, limit=160)
+    path = parsed.path or '/'
+    return _head_text(f'{parsed.scheme}://{parsed.netloc}{path}', limit=220)
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _describe_auth_summary(summary: dict[str, Any]) -> str:
+    source = summary.get('source') or 'unknown'
+    mode = summary.get('mode') or 'guest'
+    path = summary.get('path') or 'none'
+    reason = summary.get('reason_code') or 'none'
+    attempts = summary.get('attempts') or 0
+    return f'Контекст авторизации подготовлен: source={source}, mode={mode}, path={path}, reason={reason}, attempts={attempts}.'
 
 
 def _extract_trace_for_event(artifacts: dict[str, Any]) -> dict[str, Any]:

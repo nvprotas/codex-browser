@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from buyer.app.auth_scripts import SberIdScriptRunner
+from buyer.app.models import AgentOutput
 from buyer.app.prompt_builder import build_agent_prompt
 from buyer.app.runner import (
     _browser_actions_have_mutating_commands,
@@ -17,6 +18,7 @@ from buyer.app.runner import (
     _extract_codex_tokens_used,
     _read_new_jsonl_records,
 )
+from buyer.app.service import _log_step_result_to_container, _summarize_browser_action_for_container_log
 from buyer.app.settings import Settings
 from buyer.tools.cdp_tool import (
     HTML_STDOUT_LIMIT,
@@ -366,6 +368,80 @@ class CdpToolPageSelectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserActionMetricsTests(unittest.TestCase):
+    def test_container_log_summary_trims_snapshot_payload_and_redacts_url_query(self) -> None:
+        record = {
+            'event': 'browser_command_finished',
+            'command': 'snapshot',
+            'ok': True,
+            'duration_ms': 450,
+            'details': {'selector': '[data-testid="ppd-checkout"]', 'limit': 80},
+            'result': {
+                'ok': True,
+                'url': (
+                    'https://www.litres.ru/purchase/ppd/?order=1587108891'
+                    '&email=PROTAS.NIKOLAY%40gmail.com&method=russian_card'
+                ),
+                'items': [
+                    {'text': 'Оформление заказа 1984 Джордж Оруэлл 144,90 ₽', 'visible': True},
+                    {'text': 'СБП Российская карта Бонусы Иностранная карта', 'visible': True},
+                    {'text': 'Продолжить', 'visible': True},
+                ],
+            },
+        }
+
+        summary = _summarize_browser_action_for_container_log(record)
+
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        serialized = json.dumps(summary, ensure_ascii=False)
+        self.assertEqual(summary['event'], 'finished')
+        self.assertEqual(summary['command'], 'snapshot')
+        self.assertEqual(summary['page'], 'https://www.litres.ru/purchase/ppd/')
+        self.assertIn('selector=[data-testid="ppd-checkout"]', summary['target'])
+        self.assertIn('снимок страницы', summary['summary'])
+        self.assertIn('Оформление заказа 1984', summary['summary'])
+        self.assertNotIn('items', serialized)
+        self.assertNotIn('PROTAS', serialized)
+        self.assertNotIn('order=1587108891', serialized)
+        self.assertLess(len(summary['summary']), 260)
+
+    def test_step_container_log_uses_concise_browser_action_summary(self) -> None:
+        action = {
+            'event': 'browser_command_finished',
+            'command': 'snapshot',
+            'ok': True,
+            'duration_ms': 450,
+            'details': {'selector': 'main'},
+            'result': {
+                'url': 'https://www.litres.ru/purchase/ppd/?email=PROTAS.NIKOLAY%40gmail.com',
+                'items': [{'text': 'Оформление заказа Продолжить', 'visible': True}],
+            },
+        }
+        result = AgentOutput(
+            status='completed',
+            message='Получен orderId.',
+            order_id='order-1',
+            payment_evidence=None,
+            profile_updates=[],
+            artifacts={
+                'trace': {
+                    'trace_file': '/tmp/trace.json',
+                    'prompt_path': '/tmp/prompt.txt',
+                    'browser_actions_total': 1,
+                    'browser_actions_tail': [action],
+                }
+            },
+        )
+
+        with self.assertLogs('uvicorn.error', level='INFO') as logs:
+            _log_step_result_to_container(session_id='session-1', step_index=2, result=result)
+
+        output = '\n'.join(logs.output)
+        self.assertIn('browser_action session_id=session-1 step=2 event=finished command=snapshot', output)
+        self.assertIn('Оформление заказа Продолжить', output)
+        self.assertNotIn('"items"', output)
+        self.assertNotIn('PROTAS', output)
+
     def test_trace_metrics_are_built_from_jsonl(self) -> None:
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / 'actions.jsonl'

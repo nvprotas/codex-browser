@@ -24,4 +24,4 @@ RUN chmod +x /workspace/eval_service/docker/entrypoint.sh
 EXPOSE 8090
 
 ENTRYPOINT ["/workspace/eval_service/docker/entrypoint.sh"]
-CMD ["uvicorn", "eval_service.app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["uvicorn", "eval_service.app.main:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]

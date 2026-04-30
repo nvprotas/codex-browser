@@ -31,4 +31,4 @@ setup_codex_oauth() {
 
 setup_codex_oauth
 
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log

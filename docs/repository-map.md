@@ -277,6 +277,12 @@ Callback-события:
 - `payment_ready`
 - `scenario_finished`
 
+Логи контейнера:
+
+- ключевые этапы сценария пишутся строками `buyer_progress` с `session_id`, `stage`, `step`, `status`, `order_id` и коротким русскоязычным описанием;
+- browser-actions из trace tail пишутся в stdout только как компактные строки `browser_action` с командой, длительностью, URL без query/fragment, селектором и коротким текстовым превью;
+- полные JSONL browser-actions и подробные результаты `snapshot`/`html` остаются в trace-артефактах, но не печатаются целиком в логи контейнера.
+
 Доменные проверки:
 
 - Для Litres `completed` принимается только с `order_id` и `payment_evidence` из точного `https://payecom.ru/pay_ru?...orderId=...`.
@@ -814,9 +820,10 @@ Runtime flow:
 | Путь | Ответственность | Важные детали |
 | --- | --- | --- |
 | `buyer/Dockerfile` | Python 3.12 image для `buyer`. | Ставит Python deps, Node/npm, пробует `npm install -g @openai/codex`, делает `npm ci` в `/app/scripts`, копирует `buyer`. |
-| `buyer/docker/entrypoint.sh` | Подготовка OAuth auth.json и запуск uvicorn. | Копирует mounted `/run/codex/host-auth` в `/root/.codex/auth.json`, валидирует непустой файл. |
+| `buyer/docker/entrypoint.sh` | Подготовка OAuth auth.json и запуск uvicorn. | Копирует mounted `/run/codex/host-auth` в `/root/.codex/auth.json`, валидирует непустой файл, запускает uvicorn с `--no-access-log`, чтобы healthcheck/access-log не забивал контейнерные логи. |
 | `eval_service/docker/entrypoint.sh` | Подготовка OAuth auth.json и запуск команды контейнера. | Копирует mounted `/run/codex/host-auth` в `/root/.codex/auth.json`, чтобы LLM-judge мог запускать `codex exec` через OAuth auth.json. |
-| `micro-ui/Dockerfile` | Python 3.12 image для `micro-ui`. | Ставит deps и запускает uvicorn на `8080`. |
+| `micro-ui/Dockerfile` | Python 3.12 image для `micro-ui`. | Ставит deps и запускает uvicorn на `8080` с `--no-access-log`. |
+| `eval_service/Dockerfile` | Python 3.12 image для `eval_service`. | Ставит deps, Node/npm и Codex CLI, запускает uvicorn на `8090` через entrypoint с `--no-access-log`. |
 | `browser/Dockerfile` | Browser sidecar image. | См. раздел `browser`. |
 
 ## Данные, состояние и артефакты
