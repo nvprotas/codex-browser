@@ -55,14 +55,9 @@ USER_BUYER_INFO_PATH=
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
-# Быстрый режим Codex CLI: no reasoning + отключенный image generation tool.
-# CODEX_REASONING_EFFORT=none
+# Режим Codex CLI для generic buyer-flow: low reasoning + отключенный image generation tool.
+# CODEX_REASONING_EFFORT=low
 # CODEX_IMAGE_GENERATION=disabled
-
-# Опционально: стратегия модели generic buyer-flow.
-# BUYER_MODEL_STRATEGY=single
-# BUYER_FAST_CODEX_MODEL=gpt-5.4-mini
-# BUYER_STRONG_CODEX_MODEL=
 
 # Опционально: окно/интервал CDP recovery (hotfix устойчивости)
 # CDP_RECOVERY_WINDOW_SEC=20
@@ -198,7 +193,7 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 
 С host-машины CDP `9223` по умолчанию недоступен. Для диагностики запускайте CDP-команды из контейнера `buyer` или используйте одноразовый override, который также привязывает порт только к `127.0.0.1`.
 
-Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
+Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `wait-url`, `wait-selector`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
 
 Для анализа DOM предпочтительны структурные команды:
 

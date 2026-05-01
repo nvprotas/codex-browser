@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from ._utils import (
     duration_ms_since as _duration_ms_since,
-    remove_file_quietly as _remove_file_quietly,
     tail_text as _tail_text,
     trace_date_dir_name as _trace_date_dir_name,
     trace_time_dir_name as _trace_time_dir_name,
@@ -29,7 +29,6 @@ from .user_profile import load_user_profile
 
 logger = logging.getLogger('uvicorn.error')
 
-MUTATING_BROWSER_COMMANDS = {'click', 'fill', 'press'}
 STREAM_BATCH_INTERVAL_SEC = 0.5
 STREAM_BATCH_SIZE = 20
 PROCESS_STREAM_READ_CHUNK_SIZE = 32768
@@ -49,6 +48,7 @@ class _CodexAttemptSpec:
 @dataclass
 class _CodexAttemptResult:
     spec: _CodexAttemptSpec
+    attempt_id: str
     command_for_log: list[str]
     output_path: str
     stdout_text: str = ''
@@ -179,21 +179,20 @@ class AgentRunner:
                     codex_started_at=None,
                     codex_model=None,
                     codex_attempts=[],
-                    model_strategy=self._settings.buyer_model_strategy,
+                    model_strategy='single',
                     fallback_reason='no_api_key_or_oauth',
                 ),
             )
 
         attempts = _build_model_attempt_specs(self._settings)
-        initial_attempt_count = len(attempts)
-        same_model_retry_added = False
         attempt_summaries: list[dict[str, Any]] = []
         attempt_results: list[_CodexAttemptResult] = []
         latest_attempt: _CodexAttemptResult | None = None
-        fallback_reason: str | None = None
         codex_phase_started_at = datetime.now(timezone.utc)
+        model_strategy = 'single'
 
         for attempt_index, attempt_spec in enumerate(attempts, start=1):
+            _ = attempt_index
             attempt = await self._run_codex_attempt(
                 trace=trace,
                 step_index=step_index,
@@ -204,13 +203,11 @@ class AgentRunner:
             )
             latest_attempt = attempt
             attempt_results.append(attempt)
-            attempt_summaries.append(_summarize_codex_attempt(attempt))
 
             normalized = attempt.result.status.strip().lower() if attempt.result is not None else None
             if normalized is not None and normalized not in {'needs_user_input', 'completed', 'failed'}:
                 attempt.failure_reason = 'invalid_status'
                 attempt.failure_message = f'codex вернул неподдерживаемый статус: {attempt.result.status}'
-                attempt_summaries[-1] = _summarize_codex_attempt(attempt)
                 logger.error(
                     'codex_step_invalid_status session_id=%s step=%s status=%s model=%s',
                     session_id,
@@ -218,103 +215,11 @@ class AgentRunner:
                     attempt.result.status,
                     attempt.spec.model or 'default',
                 )
+            elif normalized == 'failed':
+                attempt.failure_reason = 'agent_reported_failed'
+                attempt.failure_message = attempt.result.message or 'codex вернул статус failed.'
 
-            retryable_failed_status = normalized == 'failed'
-            retryable_attempt_failure = attempt.result is None or attempt.failure_reason == 'invalid_status'
-            if (
-                attempt_index < len(attempts)
-                and (retryable_failed_status or retryable_attempt_failure)
-            ):
-                if _browser_actions_have_mutating_commands(trace['browser_actions_log_path']):
-                    fallback_reason = 'strong_retry_skipped_dirty_state'
-                    logger.info(
-                        'codex_step_strong_retry_skipped session_id=%s step=%s reason=%s',
-                        session_id,
-                        step_index,
-                        fallback_reason,
-                    )
-                    break
-
-                reset_ok, reset_summary = await self._reset_browser_to_start_url(
-                    start_url=start_url,
-                    actions_log_path=trace['browser_actions_log_path'],
-                )
-                if not reset_ok:
-                    fallback_reason = 'strong_retry_skipped_reset_failed'
-                    attempt_summaries.append(
-                        {
-                            'role': 'reset_before_strong',
-                            'ok': False,
-                            'reason': fallback_reason,
-                            'message': reset_summary,
-                        }
-                    )
-                    logger.info(
-                        'codex_step_strong_retry_skipped session_id=%s step=%s reason=%s reset_summary=%s',
-                        session_id,
-                        step_index,
-                        fallback_reason,
-                        _tail_text(reset_summary, limit=500),
-                    )
-                    break
-
-                attempt_summaries.append(
-                    {
-                        'role': 'reset_before_strong',
-                        'ok': True,
-                        'message': reset_summary,
-                    }
-                )
-                continue
-
-            if (
-                initial_attempt_count == 1
-                and not same_model_retry_added
-                and retryable_failed_status
-            ):
-                if _browser_actions_have_mutating_commands(trace['browser_actions_log_path']):
-                    fallback_reason = 'same_model_retry_skipped_dirty_state'
-                    logger.info(
-                        'codex_step_same_model_retry_skipped session_id=%s step=%s reason=%s',
-                        session_id,
-                        step_index,
-                        fallback_reason,
-                    )
-                    break
-
-                reset_ok, reset_summary = await self._reset_browser_to_start_url(
-                    start_url=start_url,
-                    actions_log_path=trace['browser_actions_log_path'],
-                )
-                if not reset_ok:
-                    fallback_reason = 'same_model_retry_skipped_reset_failed'
-                    attempt_summaries.append(
-                        {
-                            'role': 'reset_before_same_model',
-                            'ok': False,
-                            'reason': fallback_reason,
-                            'message': reset_summary,
-                        }
-                    )
-                    logger.info(
-                        'codex_step_same_model_retry_skipped session_id=%s step=%s reason=%s reset_summary=%s',
-                        session_id,
-                        step_index,
-                        fallback_reason,
-                        _tail_text(reset_summary, limit=500),
-                    )
-                    break
-
-                attempt_summaries.append(
-                    {
-                        'role': 'reset_before_same_model',
-                        'ok': True,
-                        'message': reset_summary,
-                    }
-                )
-                attempts.append(_CodexAttemptSpec(role='same_model_retry', model=attempt.spec.model))
-                same_model_retry_added = True
-                continue
+            attempt_summaries.append(_summarize_codex_attempt(attempt))
 
             break
 
@@ -337,8 +242,8 @@ class AgentRunner:
             codex_started_at=codex_phase_started_at,
             codex_model=latest_attempt.spec.model,
             codex_attempts=attempt_summaries,
-            model_strategy=self._settings.buyer_model_strategy,
-            fallback_reason=fallback_reason or latest_attempt.failure_reason,
+            model_strategy=model_strategy,
+            fallback_reason=latest_attempt.failure_reason,
         )
 
         if latest_attempt.result is None or latest_attempt.failure_message is not None:
@@ -365,7 +270,7 @@ class AgentRunner:
                 else None
             ),
             latest_attempt.spec.model or 'default',
-            self._settings.buyer_model_strategy,
+            model_strategy,
         )
         return result
 
@@ -394,13 +299,17 @@ class AgentRunner:
             prompt=prompt,
             model=attempt_spec.model,
         )
+        attempt_id = f'step-{step_index:03d}-{attempt_spec.role}-{uuid4().hex[:8]}'
         command_for_log = [*cmd[:-1], f'@{trace["prompt_path"]}']
         attempt = _CodexAttemptResult(
             spec=attempt_spec,
+            attempt_id=attempt_id,
             command_for_log=command_for_log,
             output_path=output_path,
             codex_started_at=datetime.now(timezone.utc),
         )
+        attempt_env = dict(env)
+        attempt_env['BUYER_CODEX_ATTEMPT_ID'] = attempt_id
         stream_publisher = _AgentStreamPublisher(
             session_id=trace['session_id'],
             step_index=step_index,
@@ -408,129 +317,16 @@ class AgentRunner:
         )
 
         logger.info(
-            'codex_step_exec step=%s prompt_path=%s model=%s role=%s sandbox=%s',
+            'codex_step_exec step=%s prompt_path=%s model=%s role=%s attempt_id=%s sandbox=%s',
             step_index,
             trace['prompt_path'],
             attempt_spec.model or 'default',
             attempt_spec.role,
+            attempt_id,
             self._settings.codex_sandbox_mode,
         )
 
-        try:
-            browser_actions_offset = _file_size(trace['browser_actions_log_path'])
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=self._settings.codex_workdir,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-            except FileNotFoundError:
-                logger.error(
-                    'codex_step_failed_binary_missing step=%s codex_bin=%s',
-                    step_index,
-                    self._settings.codex_bin,
-                )
-                attempt.failure_reason = 'binary_missing'
-                attempt.failure_message = 'Команда codex не найдена в контейнере buyer. Проверьте CODEX_BIN.'
-                return attempt
-
-            try:
-                attempt.stdout_text, attempt.stderr_text = await asyncio.wait_for(
-                    _collect_process_streams(
-                        process,
-                        publisher=stream_publisher,
-                        browser_actions_log_path=trace['browser_actions_log_path'],
-                        browser_actions_offset=browser_actions_offset,
-                    ),
-                    timeout=self._settings.codex_timeout_sec,
-                )
-            except asyncio.TimeoutError:
-                process.kill()
-                await _communicate_quietly(process)
-                await stream_publisher.aclose()
-                attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
-                attempt.failure_reason = 'timeout'
-                attempt.failure_message = f'Команда codex превысила таймаут {self._settings.codex_timeout_sec} секунд.'
-                logger.error(
-                    'codex_step_timeout step=%s role=%s model=%s timeout_sec=%s duration_ms=%s',
-                    step_index,
-                    attempt_spec.role,
-                    attempt_spec.model or 'default',
-                    self._settings.codex_timeout_sec,
-                    attempt.duration_ms,
-                )
-                return attempt
-
-            attempt.codex_returncode = process.returncode
-            attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
-            logger.info(
-                'codex_step_process_finished step=%s role=%s model=%s returncode=%s duration_ms=%s stdout_len=%s stderr_len=%s',
-                step_index,
-                attempt_spec.role,
-                attempt_spec.model or 'default',
-                attempt.codex_returncode,
-                attempt.duration_ms,
-                len(attempt.stdout_text),
-                len(attempt.stderr_text),
-            )
-
-            if process.returncode != 0:
-                attempt.failure_reason = 'process_failed'
-                attempt.failure_message = _format_codex_failure_message(
-                    returncode=process.returncode,
-                    stderr_text=attempt.stderr_text,
-                    stdout_text=attempt.stdout_text,
-                )
-                if attempt.stderr_text.strip():
-                    logger.warning(
-                        'codex_step_stderr_tail step=%s role=%s tail=%s',
-                        step_index,
-                        attempt_spec.role,
-                        _tail_text(attempt.stderr_text, limit=1200),
-                    )
-                return attempt
-
-            try:
-                raw = Path(output_path).read_text(encoding='utf-8')
-                parsed = json.loads(raw)
-                attempt.result = AgentOutput.model_validate(parsed)
-            except Exception as exc:  # noqa: BLE001 - нужно вернуть понятную причину в сессию
-                logger.error(
-                    'codex_step_failed_parse_output step=%s role=%s error=%s',
-                    step_index,
-                    attempt_spec.role,
-                    _tail_text(str(exc), limit=500),
-                )
-                attempt.failure_reason = 'parse_output_failed'
-                attempt.failure_message = f'Не удалось распарсить структурированный ответ codex: {exc}'
-                return attempt
-
-            return attempt
-        finally:
-            _remove_file_quietly(output_path)
-
-    async def _reset_browser_to_start_url(self, *, start_url: str, actions_log_path: Path) -> tuple[bool, str]:
-        cmd = [
-            'python',
-            '/app/tools/cdp_tool.py',
-            '--endpoint',
-            self._settings.browser_cdp_endpoint,
-            '--timeout-ms',
-            '12000',
-            '--recovery-window-sec',
-            str(self._settings.cdp_recovery_window_sec),
-            '--recovery-interval-ms',
-            str(self._settings.cdp_recovery_interval_ms),
-            'goto',
-            '--url',
-            start_url,
-        ]
-        env = os.environ.copy()
-        env['BUYER_CDP_ACTIONS_LOG_PATH'] = str(actions_log_path)
-        env['BROWSER_CDP_ENDPOINT'] = self._settings.browser_cdp_endpoint
+        browser_actions_offset = _file_size(trace['browser_actions_log_path'])
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -538,23 +334,90 @@ class AgentRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env,
+                env=attempt_env,
             )
-        except FileNotFoundError as exc:
-            return False, _tail_text(f'Не удалось запустить reset CDP (`cdp_tool.py`): {exc}')
+        except FileNotFoundError:
+            logger.error(
+                'codex_step_failed_binary_missing step=%s codex_bin=%s',
+                step_index,
+                self._settings.codex_bin,
+            )
+            attempt.failure_reason = 'binary_missing'
+            attempt.failure_message = 'Команда codex не найдена в контейнере buyer. Проверьте CODEX_BIN.'
+            return attempt
 
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            attempt.stdout_text, attempt.stderr_text = await asyncio.wait_for(
+                _collect_process_streams(
+                    process,
+                    publisher=stream_publisher,
+                    browser_actions_log_path=trace['browser_actions_log_path'],
+                    browser_actions_offset=browser_actions_offset,
+                ),
+                timeout=self._settings.codex_timeout_sec,
+            )
         except asyncio.TimeoutError:
             process.kill()
-            await process.communicate()
-            return False, 'Reset browser to start_url превысил таймаут 30с.'
+            await _communicate_quietly(process)
+            await stream_publisher.aclose()
+            attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
+            attempt.failure_reason = 'timeout'
+            attempt.failure_message = f'Команда codex превысила таймаут {self._settings.codex_timeout_sec} секунд.'
+            logger.error(
+                'codex_step_timeout step=%s role=%s model=%s timeout_sec=%s duration_ms=%s',
+                step_index,
+                attempt_spec.role,
+                attempt_spec.model or 'default',
+                self._settings.codex_timeout_sec,
+                attempt.duration_ms,
+            )
+            return attempt
 
-        stdout_text = stdout.decode('utf-8', errors='ignore').strip()
-        stderr_text = stderr.decode('utf-8', errors='ignore').strip()
+        attempt.codex_returncode = process.returncode
+        attempt.duration_ms = _duration_ms_since(attempt.codex_started_at)
+        logger.info(
+            'codex_step_process_finished step=%s role=%s model=%s returncode=%s duration_ms=%s stdout_len=%s stderr_len=%s',
+            step_index,
+            attempt_spec.role,
+            attempt_spec.model or 'default',
+            attempt.codex_returncode,
+            attempt.duration_ms,
+            len(attempt.stdout_text),
+            len(attempt.stderr_text),
+        )
+
         if process.returncode != 0:
-            return False, _extract_cdp_error_tail(stdout_text=stdout_text, stderr_text=stderr_text)
-        return True, stdout_text or 'reset_ok'
+            attempt.failure_reason = 'process_failed'
+            attempt.failure_message = _format_codex_failure_message(
+                returncode=process.returncode,
+                stderr_text=attempt.stderr_text,
+                stdout_text=attempt.stdout_text,
+            )
+            if attempt.stderr_text.strip():
+                logger.warning(
+                    'codex_step_stderr_tail step=%s role=%s tail=%s',
+                    step_index,
+                    attempt_spec.role,
+                    _tail_text(attempt.stderr_text, limit=1200),
+                )
+            return attempt
+
+        try:
+            raw = Path(output_path).read_text(encoding='utf-8')
+            parsed = json.loads(raw)
+            attempt.result = AgentOutput.model_validate(parsed)
+        except Exception as exc:  # noqa: BLE001 - нужно вернуть понятную причину в сессию
+            logger.error(
+                'codex_step_failed_parse_output step=%s role=%s error=%s',
+                step_index,
+                attempt_spec.role,
+                _tail_text(str(exc), limit=500),
+            )
+            attempt.failure_reason = 'parse_output_failed'
+            attempt.failure_message = f'Не удалось распарсить структурированный ответ codex: {exc}'
+            return attempt
+
+        return attempt
 
     async def _probe_browser_sidecar(self, endpoint: str, *, actions_log_path: Path | None = None) -> tuple[bool, str]:
         window_sec = max(self._settings.cdp_recovery_window_sec, 0.0)
@@ -815,7 +678,7 @@ def _slim_codex_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]
         if not isinstance(attempt, dict):
             continue
         slim: dict[str, Any] = {}
-        for field in ('role', 'model', 'status', 'failure_reason'):
+        for field in ('attempt_id', 'role', 'model', 'status', 'failure_reason', 'failure_message'):
             value = attempt.get(field)
             if value is not None:
                 slim[field] = value
@@ -883,6 +746,7 @@ def _build_browser_actions_metrics(path: Path) -> dict[str, Any]:
 
 def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str, Any]:
     starts_by_command: dict[str, list[dict[str, Any]]] = {}
+    starts_by_command_id: dict[str, dict[str, Any]] = {}
     finished_commands: list[dict[str, Any]] = []
     breakdown: dict[str, dict[str, int]] = {}
     total_command_duration_ms = 0
@@ -899,12 +763,20 @@ def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str,
 
         if event == 'browser_command_started':
             starts_by_command.setdefault(command, []).append(record)
+            command_id = record.get('command_id')
+            if isinstance(command_id, str) and command_id:
+                starts_by_command_id[command_id] = record
             continue
 
         if event in {'browser_command_finished', 'browser_command_failed'}:
             started_record = None
+            command_id = record.get('command_id')
+            if isinstance(command_id, str) and command_id:
+                started_record = starts_by_command_id.pop(command_id, None)
             queue = starts_by_command.get(command)
-            if queue:
+            if isinstance(started_record, dict) and queue and started_record in queue:
+                queue.remove(started_record)
+            elif queue:
                 started_record = queue.pop(0)
 
             duration_ms = _int_or_zero(record.get('duration_ms'))
@@ -934,6 +806,8 @@ def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str,
                         'finished_ms': finished_ts,
                         'duration_ms': duration_ms,
                         'command': command,
+                        'command_id': command_id if isinstance(command_id, str) and command_id else None,
+                        'attempt_id': record.get('attempt_id') if isinstance(record.get('attempt_id'), str) else None,
                         'failed': failed,
                     }
                 )
@@ -944,6 +818,8 @@ def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str,
     top_idle_gaps: list[dict[str, Any]] = []
     previous_finish_ms: int | None = None
     previous_command: str | None = None
+    previous_command_id: str | None = None
+    previous_attempt_id: str | None = None
     for command in finished_commands:
         started_ms = command['started_ms']
         finished_ms = command['finished_ms']
@@ -956,7 +832,11 @@ def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str,
                     'from_epoch_ms': previous_finish_ms,
                     'to_epoch_ms': started_ms,
                     'after_command': previous_command,
+                    'after_command_id': previous_command_id,
+                    'after_attempt_id': previous_attempt_id,
                     'before_command': command['command'],
+                    'before_command_id': command.get('command_id'),
+                    'before_attempt_id': command.get('attempt_id'),
                 }
             )
             browser_busy_union_ms += finished_ms - started_ms
@@ -966,6 +846,8 @@ def _build_browser_actions_metrics_from_records(records: list[Any]) -> dict[str,
             browser_busy_union_ms += finished_ms - previous_finish_ms
         if previous_finish_ms is None or finished_ms >= previous_finish_ms:
             previous_command = command['command']
+            previous_command_id = command.get('command_id')
+            previous_attempt_id = command.get('attempt_id')
             previous_finish_ms = finished_ms
 
     return {
@@ -999,16 +881,7 @@ def _int_or_zero(value: Any) -> int:
 
 
 def _build_model_attempt_specs(settings: Settings) -> list[_CodexAttemptSpec]:
-    if settings.buyer_model_strategy == 'fast_then_strong':
-        fast_model = _non_empty(settings.buyer_fast_codex_model) or 'gpt-5.4-mini'
-        strong_model = _non_empty(settings.buyer_strong_codex_model) or _non_empty(settings.codex_model) or 'gpt-5.5'
-        if fast_model == strong_model:
-            return [_CodexAttemptSpec(role='fast', model=fast_model)]
-        return [
-            _CodexAttemptSpec(role='fast', model=fast_model),
-            _CodexAttemptSpec(role='strong', model=strong_model),
-        ]
-    return [_CodexAttemptSpec(role='single', model=_non_empty(settings.codex_model))]
+    return [_CodexAttemptSpec(role='single', model=_non_empty(settings.codex_model) or 'gpt-5.5')]
 
 
 def _build_codex_command(
@@ -1229,6 +1102,13 @@ async def _collect_process_streams(
         await asyncio.gather(*tasks)
         await publisher.aclose()
         return ''.join(stdout_chunks), ''.join(stderr_chunks)
+    except asyncio.CancelledError:
+        stop_browser_tail.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await publisher.aclose()
+        raise
     except Exception:
         stop_browser_tail.set()
         for task in tasks:
@@ -1427,38 +1307,16 @@ def _stream_item_message(item: dict[str, Any]) -> str:
     return 'stream event'
 
 
-def _browser_actions_have_mutating_commands(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        lines = path.read_text(encoding='utf-8').splitlines()
-    except OSError:
-        return False
-    for raw_line in lines:
-        if not raw_line.strip():
-            continue
-        try:
-            record = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get('event') not in {'browser_command_started', 'browser_command_finished', 'browser_command_failed'}:
-            continue
-        command = record.get('command')
-        if isinstance(command, str) and command in MUTATING_BROWSER_COMMANDS:
-            return True
-    return False
-
-
 def _summarize_codex_attempt(attempt: _CodexAttemptResult) -> dict[str, Any]:
     return {
+        'attempt_id': attempt.attempt_id,
         'role': attempt.spec.role,
         'model': attempt.spec.model,
         'returncode': attempt.codex_returncode,
         'duration_ms': attempt.duration_ms,
         'status': attempt.result.status if attempt.result is not None else None,
         'failure_reason': attempt.failure_reason,
+        'failure_message': attempt.failure_message,
         'output_path': attempt.output_path,
         'tokens_used': _extract_codex_tokens_used(
             stdout_text=attempt.stdout_text,

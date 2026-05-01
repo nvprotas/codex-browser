@@ -63,7 +63,7 @@ See `latest_user_reply` in context_files_json when the file is non-empty.
 
 Use CDP endpoint: {browser_cdp_endpoint}
 
-Краткое напоминание по CDP: используй `python /app/tools/cdp_tool.py --endpoint {browser_cdp_endpoint} <command>`, предпочитай `snapshot`, `links`, `exists`, `attr`, `url`, `title` перед `html`, проверяй результат после `click`, `fill` и `press`.
+Краткое напоминание по CDP: используй `python /app/tools/cdp_tool.py --endpoint {browser_cdp_endpoint} <command>`, предпочитай `snapshot`, `links`, `exists`, `attr`, `url`, `title`, `wait-url`, `wait-selector` перед `html`; после state-changing действий проверяй milestone/evidence, если сама команда не доказала нужное состояние.
 
 Формат ответа: верни только JSON по схеме `{OUTPUT_SCHEMA_PATH}`. Поле `profile_updates` верни всегда: массив новых долговременных фактов или [].
 """.strip()

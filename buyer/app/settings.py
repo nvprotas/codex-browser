@@ -19,14 +19,11 @@ class Settings(BaseSettings):
 
     codex_bin: str = 'codex'
     codex_model: str | None = 'gpt-5.5'
-    buyer_model_strategy: Literal['single', 'fast_then_strong'] = 'single'
-    buyer_fast_codex_model: str = 'gpt-5.4-mini'
-    buyer_strong_codex_model: str | None = None
     codex_timeout_sec: int = 1800
     codex_workdir: str = '/workspace'
     codex_skip_git_repo_check: bool = True
     codex_sandbox_mode: Literal['read-only', 'workspace-write', 'danger-full-access'] = 'danger-full-access'
-    codex_reasoning_effort: Literal['none', 'low', 'medium', 'high', 'xhigh'] | None = 'none'
+    codex_reasoning_effort: Literal['none', 'low', 'medium', 'high', 'xhigh'] | None = 'low'
     codex_reasoning_summary: Literal['auto', 'concise', 'detailed', 'none'] | None = 'none'
     codex_web_search: Literal['disabled', 'cached', 'live'] | None = 'disabled'
     codex_image_generation: Literal['disabled', 'enabled'] = 'disabled'

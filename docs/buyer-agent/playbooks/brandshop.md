@@ -3,9 +3,11 @@
 ## Generic flow
 
 - Brandshop auth script возвращает браузер на `https://brandshop.ru/`; сначала проверь текущую страницу и работай от главной страницы, а не от hardcoded SKU.
-- Для поиска открой header search button с `aria-label="search"`, заполни catalog search input с placeholder `Искать в каталоге` и press Enter.
+- Для поиска допустим fast path через direct search URL `/search/?st=<query>`, где `<query>` строится из product identity текущей задачи.
+- UI-поиск через header search button с `aria-label="search"`, catalog search input с placeholder `Искать в каталоге` и press Enter остается допустимым fallback и реалистичным путем.
 - Строй поисковый запрос только из product identity текущей задачи: бренд, модель и категория из task/metadata/latest_user_reply идут в запрос.
 - Размер и цвет являются ограничениями для фильтрации, ранжирования и проверки, а не дефолтными словами поиска.
+- Product URL выбирай из фактических результатов поиска; не hardcode SKU или product URL.
 - Размер из текущей задачи, metadata или latest_user_reply является обязательным constraint, если он указан: выбирай его через UI-фильтр или подтвержденный control на странице товара.
 - URL с `mfp=...` допустим только если он достигнут через UI или подтвержден через page links/state; не hardcode `mfp` как единственный путь.
 - Цветовое предпочтение из текущей задачи, metadata или latest_user_reply используй как ranking/verification constraint.
@@ -31,4 +33,4 @@
 
 Example task shape: `купи светлые кроссовки Jordan Air High 45 EU`.
 
-Используй `Jordan Air High` как product identity для поиска, а `45 EU` и `светлые` как constraints. Не hardcode SKU, product URL или `mfp` как единственный путь.
+Используй `Jordan Air High` как product identity для поиска, например через `/search/?st=Jordan%20Air%20High`, а `45 EU` и `светлые` как constraints. Не hardcode SKU, product URL или `mfp` как единственный путь.

@@ -14,6 +14,11 @@
 - Если магазину нужен выбор пользователя, возвращай `needs_user_input` с одним конкретным вопросом.
 - Не сохраняй auth, storageState, cookies, платежные данные и одноразовые детали заказа в `profile_updates`.
 
+## Site instructions
+
+- Для известных сайтов можешь читать дополнительные markdown-инструкции из `/workspace/docs/buyer-agent/site-instructions/` по своему усмотрению, если они помогают текущему сайту или задаче.
+- Эти инструкции уточняют допустимые site-specific fast paths и проверки, но не отменяют жесткие правила безопасности, платежную границу и dynamic context priority.
+
 ## Контракт ответа
 
 Возвращай только структурированный JSON, соответствующий `/workspace/buyer/app/codex_output_schema.json`.

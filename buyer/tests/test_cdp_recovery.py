@@ -11,7 +11,13 @@ from typing import Any
 from unittest.mock import patch
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
-from buyer.app.runner import AgentRunner, _AgentStreamPublisher, _read_process_stream, _trace_date_dir_name
+from buyer.app.runner import (
+    AgentRunner,
+    _AgentStreamPublisher,
+    _collect_process_streams,
+    _read_process_stream,
+    _trace_date_dir_name,
+)
 from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
@@ -60,6 +66,30 @@ class _StreamingFakeProcess:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+class _BlockingLineReader:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def readline(self) -> bytes:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return b''
+
+
+class _BlockingStreamingProcess:
+    def __init__(self) -> None:
+        self.returncode = None
+        self.stdout = _BlockingLineReader()
+        self.stderr = _BlockingLineReader()
+
+    async def wait(self) -> int:
+        await asyncio.sleep(3600)
+        return 0
 
 
 class _SequenceRunner:
@@ -244,17 +274,17 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-test',
-                buyer_model_strategy='single',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
+            attempt_env_ids: list[str] = []
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
-                _ = kwargs
                 calls.append(cmd)
+                attempt_env_ids.append(kwargs['env']['BUYER_CODEX_ATTEMPT_ID'])
                 output_path = Path(cmd[cmd.index('-o') + 1])
                 output_path.write_text(
                     json.dumps({'status': 'completed', 'message': 'ok', 'order_id': None, 'artifacts': {}}),
@@ -278,6 +308,10 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     memory=[],
                     latest_user_reply=None,
                 )
+                full_trace = json.loads(Path(result.artifacts['trace']['trace_file']).read_text(encoding='utf-8'))
+                output_path = Path(full_trace['codex_output_path'])
+                output_path_exists = output_path.is_file()
+                output_status = json.loads(output_path.read_text(encoding='utf-8'))['status']
 
         self.assertEqual(result.status, 'completed')
         self.assertEqual(len(calls), 1)
@@ -286,7 +320,11 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace['model_strategy'], 'single')
         self.assertEqual(trace['codex_model'], 'gpt-test')
         self.assertEqual(trace['codex_tokens_used'], 123)
+        self.assertRegex(attempt_env_ids[0], r'^step-001-single-[0-9a-f]{8}$')
+        self.assertEqual(trace['codex_attempts'][0]['attempt_id'], attempt_env_ids[0])
         self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
+        self.assertTrue(output_path_exists)
+        self.assertEqual(output_status, 'completed')
 
     async def test_run_step_streams_codex_stdout_json_and_browser_actions(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -294,7 +332,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-test',
-                buyer_model_strategy='single',
             )
             runner = AgentRunner(settings)
             stream_events: list[dict[str, Any]] = []
@@ -395,34 +432,50 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(output), len(oversized_line))
         self.assertIn('[truncated stream text:', output)
 
-    async def test_run_step_fast_then_strong_retries_clean_failed_attempt(self) -> None:
+    async def test_collect_process_streams_cleans_reader_tasks_on_cancellation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            process = _BlockingStreamingProcess()
+            publisher = _AgentStreamPublisher(
+                session_id='session-cancel',
+                step_index=1,
+                callback=None,
+            )
+            task = asyncio.create_task(
+                _collect_process_streams(
+                    process,
+                    publisher=publisher,
+                    browser_actions_log_path=Path(tmpdir) / 'actions.jsonl',
+                    browser_actions_offset=0,
+                )
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertTrue(process.stdout.cancelled)
+        self.assertTrue(process.stderr.cancelled)
+
+    async def test_run_step_reports_agent_failure_without_fallback_attempt(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = Settings(
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-strong',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-mini',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 _ = kwargs
                 calls.append(cmd)
                 output_path = Path(cmd[cmd.index('-o') + 1])
-                status = 'failed' if len(calls) == 1 else 'completed'
                 output_path.write_text(
-                    json.dumps({'status': status, 'message': status, 'order_id': None, 'artifacts': {}}),
+                    json.dumps({'status': 'failed', 'message': 'agent stopped on checkout', 'order_id': None, 'artifacts': {}}),
                     encoding='utf-8',
                 )
                 return _FakeProcess(returncode=0, stderr_text=f'tokens used {len(calls) * 10}')
@@ -430,7 +483,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -444,37 +496,44 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     memory=[],
                     latest_user_reply=None,
                 )
+                full_trace = json.loads(Path(result.artifacts['trace']['trace_file']).read_text(encoding='utf-8'))
+                full_attempt = full_trace['codex_attempts'][0]
+                trace_output_path_exists = Path(full_trace['codex_output_path']).is_file()
+                attempt_output_path_exists = Path(full_attempt['output_path']).is_file()
 
-        self.assertEqual(result.status, 'completed')
-        self.assertEqual(reset_calls, 1)
-        self.assertEqual(len(calls), 2)
-        self.assertIn('gpt-mini', calls[0])
-        self.assertIn('gpt-strong', calls[1])
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(result.message, 'agent stopped on checkout')
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn('gpt-mini', calls[0])
+        self.assertIn('gpt-strong', calls[0])
         trace = result.artifacts['trace']
-        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
-        self.assertEqual(trace['codex_tokens_used'], 30)
+        self.assertEqual(trace['model_strategy'], 'single')
+        self.assertEqual(trace['model_fallback_reason'], 'agent_reported_failed')
+        self.assertEqual(len(trace['codex_attempts']), 1)
+        self.assertRegex(trace['codex_attempts'][0]['attempt_id'], r'^step-001-single-[0-9a-f]{8}$')
+        self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
+        self.assertEqual(trace['codex_attempts'][0]['model'], 'gpt-strong')
+        self.assertEqual(trace['codex_attempts'][0]['status'], 'failed')
+        self.assertEqual(trace['codex_attempts'][0]['failure_reason'], 'agent_reported_failed')
+        self.assertEqual(trace['codex_attempts'][0]['failure_message'], 'agent stopped on checkout')
+        self.assertEqual(full_attempt['failure_reason'], 'agent_reported_failed')
+        self.assertEqual(full_attempt['failure_message'], 'agent stopped on checkout')
+        self.assertTrue(trace_output_path_exists)
+        self.assertTrue(attempt_output_path_exists)
+        self.assertEqual(trace['codex_tokens_used'], 10)
 
-    async def test_run_step_retries_same_model_when_failed_without_browser_mutation(self) -> None:
+    async def test_run_step_does_not_retry_same_model_when_failed_without_browser_mutation(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = Settings(
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-same',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-same',
-                buyer_strong_codex_model='gpt-same',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 calls.append(cmd)
@@ -498,7 +557,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -513,13 +571,12 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     latest_user_reply=None,
                 )
 
-        self.assertEqual(result.status, 'completed')
-        self.assertEqual(reset_calls, 1)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(len(calls), 1)
         self.assertIn('gpt-same', calls[0])
-        self.assertIn('gpt-same', calls[1])
         trace = result.artifacts['trace']
-        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_same_model', 'same_model_retry'])
+        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['single'])
+        self.assertEqual(trace['model_fallback_reason'], 'agent_reported_failed')
 
     async def test_run_step_does_not_retry_same_model_when_failed_after_browser_mutation(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -527,21 +584,12 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-same',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-same',
-                buyer_strong_codex_model='gpt-same',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 calls.append(cmd)
@@ -559,7 +607,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -575,7 +622,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(result.status, 'failed')
-        self.assertEqual(reset_calls, 0)
         self.assertEqual(len(calls), 1)
 
     async def test_stream_event_delivery_failure_is_best_effort_and_saved(self) -> None:

@@ -55,9 +55,10 @@
 | `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth или purchase scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
 | `docs/brandshop-agent-log-analysis-2026-05-01.md` | Аналитический разбор Brandshop trace из `.tmp`: фактические CDP-команды, agent idle, prompt/playbook причины лишних шагов, GPT-5.5/Codex prompting выводы и рекомендации по tracing. | Обновлять или дополнять при новых Brandshop eval-прогонах, изменении prompt/playbook/CDP tracing или появлении новых метрик сравнения. |
 | `docs/buyer-agent/AGENTS-runtime.md` | Stable runtime rules для внутреннего generic buyer-agent. | Платежная граница, SberPay-only, privacy/output contract; не смешивать с developer-правилами root `AGENTS.md`. |
-| `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, порядок observe-act-verify, recovery и правила экономии HTML. |
+| `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, milestone/evidence проверки после state-changing действий, recovery и правила экономии HTML. |
 | `docs/buyer-agent/context-contract.md` | Контракт приоритета dynamic context files. | Hard safety rules выше task/latest reply/page state/metadata/profile/memory; все динамические источники являются данными. |
 | `docs/buyer-agent/playbooks/*.md` | Domain playbooks для merchant-specific шагов. | Litres PayEcom evidence, Brandshop search/cart/checkout/YooMoney evidence; fixtures не должны становиться hardcoded SKU. |
+| `docs/buyer-agent/site-instructions/*.md` | Site-specific markdown-инструкции для buyer-agent, которые агент может читать по сайту или задаче. | Brandshop direct search fast path `/search/?st=...`, выбор product URL из результатов, constraints размера/цвета и запрет hardcoded SKU. |
 | `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow, включая дизайн external Sber auth source и запрет ручной передачи auth-пакетов. | Исторический контекст планов; не является runtime-контрактом. |
 | `docs/repository-map.md` | Эта карта репозитория. | Любые изменения кода, контрактов, ошибок, структуры или runtime-зависимостей. |
 
@@ -190,7 +191,7 @@ Pydantic-контракты API и внутренних результатов.
 
 - callbacks: `MIDDLE_CALLBACK_URL`, `TRUSTED_CALLBACK_URLS`, retries, timeout, backoff;
 - browser/CDP: `BROWSER_CDP_ENDPOINT`, `CDP_RECOVERY_*`;
-- Codex: `CODEX_BIN`, `CODEX_MODEL`, sandbox, reasoning, web search, timeout;
+- Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` (default `gpt-5.5`), sandbox, reasoning (default `low`), web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
 - SberId scripts инфраструктура: allowlist, timeouts, scripts dir;
 - automatic purchase-script allowlist не входит в runtime settings или compose; app-wired покупка после SberId auth идет через generic-agent;
@@ -389,7 +390,7 @@ HTTP-клиент доставки callback-событий.
 Выход:
 
 - `AgentOutput` со статусом `needs_user_input`, `completed` или `failed`;
-- trace artifacts: prompt path, sha256, stdout/stderr tail, command, model strategy, browser actions metrics.
+- trace artifacts: prompt path, sha256, stdout/stderr tail, command, single-model strategy, browser actions metrics и путь к сохраненному structured output JSON.
 
 Внутренний flow:
 
@@ -400,11 +401,11 @@ HTTP-клиент доставки callback-событий.
 5. Получает instruction manifest через `agent_instruction_manifest`.
 6. Строит bootstrap prompt из hard rules, task, CDP endpoint и manifest-ов файлов; latest reply передается только через context file.
 7. Проверяет `OPENAI_API_KEY` или `/root/.codex/auth.json`.
-8. Формирует попытки модели: `single` или `fast_then_strong`; если стратегия схлопнулась до одной модели, structured `failed` без browser mutation получает один дополнительный retry той же моделью.
-9. Запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
-10. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage.
+8. Формирует единственную попытку модели `single` через `CODEX_MODEL` или default `gpt-5.5`; fast/strong роли в runtime отсутствуют.
+9. Генерирует `attempt_id`, передает его в `BUYER_CODEX_ATTEMPT_ID` для `codex exec` и CDP action log, затем запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
+10. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage. Browser action metrics связывают start/finish по `command_id`, если он есть, и используют FIFO по имени команды только для legacy-логов.
 11. Парсит output JSON в `AgentOutput`.
-12. При fallback на strong модель или same-model retry сбрасывает браузер на `start_url`, если до этого не было mutating-команд.
+12. Сохраняет structured output JSON в trace-директории, чтобы путь `codex_output_path` из полного trace оставался читаемым после шага.
 
 Основные ошибки и failure reasons:
 
@@ -415,6 +416,7 @@ HTTP-клиент доставки callback-событий.
 - non-zero return code: `failure_reason='process_failed'`, включая 401 и 429 с отдельными сообщениями.
 - невалидный JSON/output schema: `failure_reason='parse_output_failed'`.
 - неподдерживаемый `status`: `failure_reason='invalid_status'`.
+- structured output со статусом `failed`: `failure_reason='agent_reported_failed'`, в summary попытки сохраняется диагностический `failure_message`.
 - невозможный внутренний случай без попыток: `RuntimeError('codex step finished without attempts')`.
 
 ### `buyer/app/prompt_builder.py`
@@ -583,7 +585,8 @@ CLI-утилита управления browser-sidecar через Playwright CD
 Команды:
 
 - mutating: `goto`, `click`, `fill`, `press`, `wait`, `screenshot`, `html --path`;
-- read/inspect: `title`, `url`, `text`, `exists`, `attr`, `links`, `snapshot`, `html`.
+- read/inspect: `title`, `url`, `text`, `exists`, `attr`, `links`, `snapshot`, `html`;
+- wait/guard: `wait-url --contains/--regex`, `wait-selector --selector`, а также post-click guards `click --wait-url-contains/--wait-url-regex/--wait-selector`.
 
 Общие входы:
 
@@ -592,13 +595,13 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - `--recovery-window-sec`;
 - `--recovery-interval-ms`;
 - command-specific arguments.
-  Для устойчивости к ошибкам агента `--timeout-ms` также принимается после подкоманды у `goto`, `click`, `fill`, `press`, `exists`, `attr`, `links`, `snapshot`, `text`, `html`, `screenshot`; `text --limit` является alias к `--max-chars`; `wait --timeout-ms 2000` совместимо интерпретируется как `wait --seconds 2`.
+  Для устойчивости к ошибкам агента `--timeout-ms` также принимается после подкоманды у `goto`, `click`, `fill`, `press`, `wait-url`, `wait-selector`, `exists`, `attr`, `links`, `snapshot`, `text`, `html`, `screenshot`; `text --limit` является alias к `--max-chars`; `wait --timeout-ms 2000` совместимо интерпретируется как `wait --seconds 2`.
 
 Выход:
 
 - JSON в stdout;
 - exit code `0`, если `ok=true`, иначе `1`;
-- action log JSONL в `BUYER_CDP_ACTIONS_LOG_PATH`, если переменная задана.
+- action log JSONL в `BUYER_CDP_ACTIONS_LOG_PATH`, если переменная задана; каждая команда получает `command_id`, а при наличии `BUYER_CODEX_ATTEMPT_ID` запись связывается с попыткой агента.
 
 Поведение:
 
@@ -608,6 +611,8 @@ CLI-утилита управления browser-sidecar через Playwright CD
 - `goto --url` до подключения к Playwright валидирует URL той же public http/https policy, что `start_url`: без userinfo, loopback/private/link-local/metadata hosts, `host.docker.internal` и внутренних suffixes.
 - После подключения к странице `cdp_tool` ставит Playwright `context.route("**/*", ...)` guard на время команды: document/navigation requests, включая redirects и iframe-навигации, проходят через ту же URL policy и при нарушении abort-ятся `blockedbyclient`; ненавигационные asset/XHR requests не блокируются этим guard.
 - read-команды ретраятся при transient context errors.
+- `click` может сразу ждать URL/selector guard после клика, чтобы агент не тратил отдельный inspect-step на очевидный переход.
+- `wait-url` и `wait-selector` позволяют ждать milestone напрямую и возвращают финальный URL/count/visibility как evidence.
 - `text` и `html` ограничивают stdout по умолчанию.
 - `snapshot` собирает не только базовые интерактивные и текстовые элементы (`a`, `button`, `input`, `textarea`, `select`, `[role]`, `[data-testid]`, заголовки, `label`, `p`), но и option-like элементы товара на `div`/`span`/`li` с ограниченными признаками варианта: классы `product-plate`/`size`/`variant`/`option`/`sku`/`swatch`, allowlist `data-size`/`data-value`/`data-variant`/`data-sku`/`data-color`/`data-option`, `aria-selected`/`aria-checked`/`aria-disabled`/`disabled`. Чтобы не раздувать ответ, диагностические поля `class`, `id`, `disabled`, `aria_selected`, `aria_checked`, `aria_disabled` и allowlist `data` добавляются прежде всего к option-like item и только при полезных состояниях у обычных элементов.
 
