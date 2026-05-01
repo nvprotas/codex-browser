@@ -27,7 +27,7 @@ from .prompt_builder import build_agent_prompt
 from .settings import Settings
 from .user_profile import load_user_profile
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 STREAM_BATCH_INTERVAL_SEC = 0.5
 STREAM_BATCH_SIZE = 20

@@ -18,7 +18,7 @@ from ._utils import duration_ms_since, remove_file_quietly, tail_text, trace_dat
 from .runner import _build_codex_config_overrides
 from .settings import Settings
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 SECRET_KEY_PARTS = (
     'apikey',

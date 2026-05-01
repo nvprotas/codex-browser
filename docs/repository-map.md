@@ -91,6 +91,17 @@ Lifecycle:
 - `startup`: `store.initialize()`, для Postgres создает pool и миграции.
 - `shutdown`: отменяет post-session analysis, закрывает external auth client при наличии, HTTP client callbacks и repository.
 
+### `buyer/app/logging_config.py`
+
+Настраивает формат логов контейнера `buyer`.
+
+Поведение:
+
+- `main.py` вызывает `configure_component_logging()` при импорте приложения;
+- формат строк для uvicorn/app handlers: `[%(name)s] %(levelname)s: %(message)s`;
+- application loggers `app.*` в контейнере и `buyer.*` в локальных тестах используют те же handlers и не дублируют записи через propagation;
+- модули `service`, `runner`, `auth_scripts`, `purchase_scripts`, `knowledge_analyzer`, `user_profile` логируют через `logging.getLogger(__name__)`, поэтому в начале строки виден компонент, например `[app.runner]` или `[app.service]`.
+
 ### `buyer/app/url_policy.py`
 
 Централизует URL policy для task input.

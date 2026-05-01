@@ -244,6 +244,8 @@ Post-session анализ не отправляет дополнительный
 docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
 
+Строки логов `buyer` начинаются с имени logger-а в квадратных скобках, например `[app.service]` или `[app.runner]`, чтобы было видно, какой компонент пишет событие.
+
 Ошибки auth-навигаций и закрытий дополнительно попадают в логи контейнера как `auth_script_stderr ...`; полный успешный auth trace остается в JSONL-файлах внутри dated trace-директории.
 
 `micro-ui` также показывает live-поток `agent_stream_event` через общий SSE `/api/events/stream`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`. UI обновляется по callback-событиям от `buyer`; периодический polling для списка сессий и событий не используется.

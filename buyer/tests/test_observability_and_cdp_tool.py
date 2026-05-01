@@ -958,7 +958,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
             },
         )
 
-        with self.assertLogs('uvicorn.error', level='INFO') as logs:
+        with self.assertLogs('buyer.app.service', level='INFO') as logs:
             _log_step_result_to_container(session_id='session-1', step_index=2, result=result)
 
         output = '\n'.join(logs.output)

@@ -6,6 +6,7 @@ from .auth_scripts import SberIdScriptRunner, parse_allowlist
 from .callback import CallbackClient
 from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionKnowledgeAnalyzer
+from .logging_config import configure_component_logging
 from .models import (
     SessionDetail,
     SessionReplyRequest,
@@ -27,6 +28,9 @@ from .state import (
     SessionStore,
 )
 from .url_policy import UrlPolicyError, parse_url_allowlist, validate_callback_url, validate_start_url
+
+
+configure_component_logging()
 
 
 def _build_session_store(settings: Settings) -> SessionStore:

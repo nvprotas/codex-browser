@@ -30,7 +30,7 @@ from .state import (
 )
 from .user_profile import append_profile_updates
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 
 class BuyerService:

@@ -723,7 +723,7 @@ class KnowledgeAnalyzerAsyncTests(unittest.IsolatedAsyncioTestCase):
             env['OPENAI_API_KEY'] = 'test-key'
             with patch.dict(os.environ, env, clear=True):
                 with patch('buyer.app.knowledge_analyzer.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec):
-                    with self.assertLogs('uvicorn.error', level='INFO') as logs:
+                    with self.assertLogs('buyer.app.knowledge_analyzer', level='INFO') as logs:
                         status = await analyzer.analyze(snapshot)
 
             self.assertEqual(status['status'], 'completed')

@@ -17,7 +17,7 @@ from .script_runtime import (
 )
 from ._utils import tail_text
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 PURCHASE_SCRIPT_COMPLETED = 'completed'
 PURCHASE_SCRIPT_FAILED = 'failed'

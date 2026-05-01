@@ -23,7 +23,7 @@ from .script_runtime import (
 )
 from ._utils import remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 
 AUTH_OK = 'auth_ok'
