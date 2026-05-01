@@ -561,10 +561,10 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 `buyer/scripts/sberid/brandshop.ts`:
 
 - готовит контекст Brandshop;
-- перед login-flow проверяет текущую авторизацию по account/profile/logout/user markers и при успехе возвращает `already_authenticated=true`;
+- перед login-flow проверяет текущую авторизацию по DOM-признаку `.header-authorize__avatar` и account/profile/logout/user markers; при успехе возвращает `already_authenticated=true`;
 - ищет profile/login/Sber ID controls;
 - логирует auth-навигации, включая переходы на `/account/`, и cleanup-закрытия через `auth-trace.ts`;
-- валидирует возврат на ожидаемый host и auth markers: простая страница `/account/`, generic `Профиль` и login-индикаторы вроде `Войти` не считаются авторизацией без сильных markers заказов, logout или данных аккаунта;
+- валидирует возврат на ожидаемый host и auth markers: простая страница `/account/`, generic `Профиль` и login-индикаторы вроде `Войти` не считаются авторизацией без сильных markers `.header-authorize__avatar`, заказов, logout или данных аккаунта;
 - возвращает те же auth reason codes.
 
 `buyer/scripts/sberid/kuper.ts`, `samokat.ts`, `okko.ts`:

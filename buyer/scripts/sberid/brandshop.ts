@@ -83,9 +83,16 @@ function authVerificationUrl(startUrl: string): string {
   return url.toString();
 }
 
-export function verifyBrandshopAuthSnapshot(rawUrl: string, bodyText: string | null | undefined): AuthVerification {
+export function verifyBrandshopAuthSnapshot(
+  rawUrl: string,
+  bodyText: string | null | undefined,
+  avatarSeen = false,
+): AuthVerification {
   const text = String(bodyText || '').replace(/\s+/g, ' ').trim();
   const markers: string[] = [];
+  if (avatarSeen) {
+    markers.push('header-authorize__avatar');
+  }
   if (/Личный кабинет/iu.test(text)) {
     markers.push('Личный кабинет');
   }
@@ -123,9 +130,11 @@ export function verifyBrandshopAuthSnapshot(rawUrl: string, bodyText: string | n
   const hasProfile = markers.includes('Профиль') || markers.includes('Личный кабинет');
   const hasOrders = markers.includes('Мои заказы');
   const hasAccountUserInfo = markers.includes('Личные данные');
-  const hasStrongAuthenticatedMarker = hasOrders || hasLogout || hasAccountUserInfo;
+  const hasAuthorizedAvatar = markers.includes('header-authorize__avatar');
+  const hasStrongAuthenticatedMarker = hasAuthorizedAvatar || hasOrders || hasLogout || hasAccountUserInfo;
   return {
-    verified: !loginFormSeen && hasStrongAuthenticatedMarker && (hasProfile || hasLogout || hasAccountUserInfo),
+    verified:
+      hasAuthorizedAvatar || (!loginFormSeen && hasStrongAuthenticatedMarker && (hasProfile || hasLogout || hasAccountUserInfo)),
     markers,
     login_form_seen: loginFormSeen,
     account_url_seen: accountUrlSeen,
@@ -233,9 +242,18 @@ async function pageBodyText(page: Page): Promise<string> {
     .catch(() => '');
 }
 
+async function hasBrandshopAuthorizedAvatar(page: Page): Promise<boolean> {
+  return page
+    .locator('.header-authorize__avatar')
+    .first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+}
+
 async function verifyAuthPage(page: Page, tracePath: string, event: string): Promise<AuthVerification> {
   const bodyText = await pageBodyText(page);
-  const verification = verifyBrandshopAuthSnapshot(page.url(), bodyText);
+  const avatarSeen = await hasBrandshopAuthorizedAvatar(page);
+  const verification = verifyBrandshopAuthSnapshot(page.url(), bodyText, avatarSeen);
   appendTrace(tracePath, {
     ts: new Date().toISOString(),
     event,
