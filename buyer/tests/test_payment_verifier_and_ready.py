@@ -5,8 +5,84 @@ from datetime import datetime, timezone
 from typing import Any
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
+from buyer.app.payment_verifier import (
+    parse_payecom_payment_url,
+    parse_yoomoney_payment_url,
+    verify_completed_payment,
+)
 from buyer.app.service import BuyerService
 from buyer.app.state import SessionState, SessionStore
+
+
+def test_provider_parsers_return_order_id_without_merchant_policy() -> None:
+    payecom = parse_payecom_payment_url('https://payecom.ru/pay_ru?orderId=order-1')
+    yoomoney = parse_yoomoney_payment_url(
+        'https://yoomoney.ru/checkout/payments/v2/contract?orderId=order-2'
+    )
+
+    assert payecom is not None
+    assert payecom.provider == 'payecom'
+    assert payecom.order_id == 'order-1'
+    assert payecom.host == 'payecom.ru'
+    assert yoomoney is not None
+    assert yoomoney.provider == 'yoomoney'
+    assert yoomoney.order_id == 'order-2'
+    assert yoomoney.host == 'yoomoney.ru'
+
+
+def test_payment_verification_result_statuses_are_explicit() -> None:
+    accepted = verify_completed_payment(
+        'https://www.litres.ru/',
+        AgentOutput(
+            status='completed',
+            message='Generic runner дошел до Litres SberPay iframe',
+            order_id='order-789',
+            payment_evidence={
+                'source': 'litres_payecom_iframe',
+                'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+            },
+            artifacts={},
+        ),
+    )
+    rejected = verify_completed_payment(
+        'https://example-shop.test/',
+        AgentOutput(
+            status='completed',
+            message='Found YooMoney contract URL',
+            order_id='unknown-order-123',
+            payment_evidence={
+                'source': 'yoomoney_payment_url',
+                'url': 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=other-order',
+            },
+            artifacts={},
+        ),
+    )
+    unverified = verify_completed_payment(
+        'https://example-shop.test/',
+        AgentOutput(
+            status='completed',
+            message='Found YooMoney contract URL',
+            order_id='unknown-order-123',
+            payment_evidence={
+                'source': 'yoomoney_payment_url',
+                'url': 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123',
+            },
+            artifacts={},
+        ),
+    )
+
+    assert accepted.status == 'accepted'
+    assert accepted.accepted is True
+    assert accepted.provider == 'payecom'
+    assert accepted.evidence_url == 'https://payecom.ru/pay_ru?orderId=order-789'
+    assert accepted.order_id_host == 'payecom.ru'
+    assert rejected.status == 'rejected'
+    assert rejected.accepted is False
+    assert unverified.status == 'unverified'
+    assert unverified.accepted is False
+    assert unverified.provider == 'yoomoney'
+    assert unverified.evidence_url == 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123'
+    assert unverified.order_id_host == 'yoomoney.ru'
 
 
 class _SequenceRunner:
@@ -218,6 +294,33 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(scenario_finished_events), 1)
                 self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
+    async def test_unknown_merchant_with_known_provider_evidence_finishes_unverified_without_payment_ready(self) -> None:
+        final_state = await self._run_single_output(
+            start_url='https://example-shop.test/',
+            output=AgentOutput(
+                status='completed',
+                message='Found YooMoney contract URL',
+                order_id='unknown-order-123',
+                payment_evidence={
+                    'source': 'yoomoney_payment_url',
+                    'url': 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123',
+                },
+                artifacts={'source': 'generic'},
+            ),
+        )
+
+        self.assertEqual(final_state.status, SessionStatus.UNVERIFIED)
+        self.assertEqual(self._events(final_state, 'payment_ready'), [])
+        payment_unverified_events = self._events(final_state, 'payment_unverified')
+        self.assertEqual(len(payment_unverified_events), 1)
+        payload = payment_unverified_events[0].payload
+        self.assertEqual(payload.get('order_id'), 'unknown-order-123')
+        self.assertEqual(payload.get('provider'), 'yoomoney')
+        self.assertEqual(payload.get('order_id_host'), 'yoomoney.ru')
+        scenario_finished_events = self._events(final_state, 'scenario_finished')
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'unverified')
+
     async def test_litres_rejects_payecom_port_variants(self) -> None:
         cases = [
             'https://payecom.ru:443/pay_ru?orderId=order-789',
@@ -275,6 +378,32 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
                 scenario_finished_events = self._events(final_state, 'scenario_finished')
                 self.assertEqual(len(scenario_finished_events), 1)
                 self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
+
+    async def test_litres_ignores_legacy_purchase_script_shaped_artifacts(self) -> None:
+        final_state = await self._run_single_output(
+            start_url='https://www.litres.ru/',
+            output=AgentOutput(
+                status='completed',
+                message='Legacy script-shaped artifacts не должны подтверждать payment_ready',
+                order_id='order-789',
+                payment_evidence=None,
+                artifacts={
+                    'purchase_script': {
+                        'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-789',
+                        'payment_evidence': {
+                            'source': 'litres_payecom_iframe',
+                            'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+                        },
+                    }
+                },
+            ),
+        )
+
+        self.assertEqual(final_state.status, SessionStatus.FAILED)
+        self.assertEqual(self._events(final_state, 'payment_ready'), [])
+        scenario_finished_events = self._events(final_state, 'scenario_finished')
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
     async def _run_single_output(self, *, start_url: str, output: AgentOutput) -> SessionState:
         runner = _SequenceRunner([output])

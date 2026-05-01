@@ -53,6 +53,7 @@ class CaseRunState(StrEnum):
     RUNNING = 'running'
     WAITING_USER = 'waiting_user'
     PAYMENT_READY = 'payment_ready'
+    UNVERIFIED = 'unverified'
     FINISHED = 'finished'
     FAILED = 'failed'
     TIMEOUT = 'timeout'
@@ -64,6 +65,7 @@ class CaseRunState(StrEnum):
 class CallbackEventType(StrEnum):
     ASK_USER = 'ask_user'
     PAYMENT_READY = 'payment_ready'
+    PAYMENT_UNVERIFIED = 'payment_unverified'
     SCENARIO_FINISHED = 'scenario_finished'
     SESSION_STARTED = 'session_started'
     AGENT_STEP_STARTED = 'agent_step_started'

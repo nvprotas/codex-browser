@@ -22,7 +22,7 @@ class SberIdAuthIdempotencyHelperTests(unittest.TestCase):
             with self.subTest(script=script_path.name):
                 source = script_path.read_text(encoding='utf-8')
                 precheck_index = source.index(precheck_line)
-                first_entry_navigation_index = source.index('await page.goto(entryUrl')
+                first_entry_navigation_index = source.index("await tracedGoto(page, tracePath, 'auth_entry', entryUrl")
                 first_sber_click_index = source.index('clickFirstVisible(page, sberIdTargets()')
                 already_authenticated_index = source.index('already_authenticated: true')
 

@@ -93,6 +93,44 @@ def test_run_and_callback_contracts_validate_known_states() -> None:
     assert manifest.cases[0].state == CaseRunState.PAYMENT_READY
 
 
+def test_unverified_callback_contract_validates_review_needed_state() -> None:
+    occurred_at = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    callback = BuyerCallbackEnvelope(
+        event_id='event-unverified-1',
+        session_id='session-unverified',
+        event_type=CallbackEventType.PAYMENT_UNVERIFIED,
+        occurred_at=occurred_at,
+        idempotency_key='idem-unverified-1',
+        payload={
+            'order_id': 'order-unknown-1',
+            'order_id_host': 'yoomoney.ru',
+            'provider': 'yoomoney',
+            'message': 'Платежная граница найдена, но merchant policy не подтвердила SberPay.',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        eval_run_id='eval-20260501-090000',
+        eval_case_id='unknown_shop_sberpay_001',
+    )
+    manifest = EvalRunManifest(
+        eval_run_id='eval-20260501-090000',
+        status=EvalRunStatus.RUNNING,
+        created_at=occurred_at,
+        updated_at=occurred_at,
+        cases=[
+            EvalRunCase(
+                eval_case_id='unknown_shop_sberpay_001',
+                case_version='1',
+                state=CaseRunState.UNVERIFIED,
+                session_id='session-unverified',
+                callback_events=[callback],
+            )
+        ],
+    )
+
+    assert manifest.cases[0].callback_events[0].event_type == CallbackEventType.PAYMENT_UNVERIFIED
+    assert manifest.cases[0].state == CaseRunState.UNVERIFIED
+
+
 @pytest.mark.parametrize(
     ('model_cls', 'payload'),
     [

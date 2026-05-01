@@ -50,8 +50,6 @@ class Settings(BaseSettings):
     sber_cookies_api_retries: int = Field(default=1, ge=0)
     auth_scripts_dir: str = '/app/scripts'
     auth_script_timeout_sec: int = Field(default=90, ge=5)
-    purchase_script_allowlist: str = ''
-    purchase_script_timeout_sec: int = Field(default=120, ge=5)
 
     state_backend: Literal['memory', 'postgres'] = 'memory'
     database_url: str = 'postgresql://buyer:buyer@postgres:5432/buyer'

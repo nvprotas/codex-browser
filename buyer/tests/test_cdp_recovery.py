@@ -10,9 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from buyer.app.auth_scripts import parse_allowlist
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
-from buyer.app.purchase_scripts import PurchaseScriptResult
 from buyer.app.runner import AgentRunner, _AgentStreamPublisher, _read_process_stream, _trace_date_dir_name
 from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
@@ -124,24 +122,6 @@ class _NoopAuthScriptRunner:
 
     async def run(self, **_: Any) -> Any:
         return None
-
-
-class _RecordingCompletedPurchaseScriptRunner:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        self.calls += 1
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт дошел до оплаты',
-            order_id='order-456',
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-456',
-            },
-        )
 
 
 class _RecordingKnowledgeAnalyzer:
@@ -902,6 +882,54 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
+    async def test_unverified_payment_boundary_finishes_without_completed_analysis(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        analyzer = _RecordingKnowledgeAnalyzer(callback_client=callback_client)
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Found YooMoney contract URL',
+                order_id='unknown-order-123',
+                payment_evidence={
+                    'source': 'brandshop_yoomoney_sberpay_redirect',
+                    'url': 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123',
+                },
+                artifacts={'source': 'generic'},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
+            knowledge_analyzer=analyzer,  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test-task',
+            start_url='https://example-shop.test/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+        await service.wait_for_post_session_analysis()
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.UNVERIFIED)
+        self.assertEqual(analyzer.snapshots, [])
+        self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
+        scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'unverified')
+
     async def test_litres_uses_generic_runner_with_default_purchase_settings(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
@@ -916,8 +944,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 artifacts={'source': 'generic'},
             ),
         ])
-        purchase_runner = _RecordingCompletedPurchaseScriptRunner()
-        settings = Settings(_env_file=None)
         store = SessionStore(max_active_sessions=1)
         service = BuyerService(
             store=store,
@@ -930,8 +956,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             sberid_allowlist=set(),
             sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
-            purchase_script_runner=purchase_runner,  # type: ignore[arg-type]
         )
 
         state = await service.create_session(
@@ -945,7 +969,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(purchase_runner.calls, 0)
         self.assertEqual(runner.calls, 1)
 
         payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']

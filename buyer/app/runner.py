@@ -21,6 +21,8 @@ from ._utils import (
     trace_time_dir_name as _trace_time_dir_name,
 )
 from .models import AgentOutput, TaskAuthPayload
+from .agent_context_files import write_agent_context_files
+from .agent_instruction_manifest import build_agent_instruction_manifest
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
 from .user_profile import load_user_profile
@@ -119,18 +121,23 @@ class AgentRunner:
             self._settings.buyer_user_info_path,
             max_chars=self._settings.buyer_user_info_max_chars,
         )
+        context_file_manifest = write_agent_context_files(
+            step_dir=trace['step_dir'],
+            task=task,
+            start_url=start_url,
+            metadata=metadata,
+            memory=memory,
+            latest_user_reply=latest_user_reply,
+            user_profile_text=user_profile.text,
+            auth_state=_build_agent_auth_state(auth=auth, auth_context=auth_context),
+        )
 
         prompt = build_agent_prompt(
             task=task,
             start_url=start_url,
             browser_cdp_endpoint=self._settings.browser_cdp_endpoint,
-            cdp_preflight_summary=probe_summary,
-            metadata=metadata,
-            auth_payload=_build_redacted_auth_payload(auth),
-            auth_context=auth_context,
-            user_profile_text=user_profile.text,
-            user_profile_truncated=user_profile.truncated,
-            memory=memory,
+            instruction_manifest=build_agent_instruction_manifest(start_url=start_url),
+            context_file_manifest=context_file_manifest,
             latest_user_reply=latest_user_reply,
         )
         trace['prompt_path'].write_text(prompt, encoding='utf-8')
@@ -655,6 +662,7 @@ class AgentRunner:
             'trace_date': trace_date,
             'trace_time': trace_time,
             'session_dir': session_dir,
+            'step_dir': session_dir / step_tag,
             'prompt_path': session_dir / f'{step_tag}-prompt.txt',
             'browser_actions_log_path': session_dir / f'{step_tag}-browser-actions.jsonl',
             'step_trace_path': session_dir / f'{step_tag}-trace.json',
@@ -1555,4 +1563,29 @@ def _build_redacted_auth_payload(auth: TaskAuthPayload | None) -> dict[str, Any]
             'cookies_count': len(cookies) if isinstance(cookies, list) else 0,
             'origins_count': len(origins) if isinstance(origins, list) else 0,
         },
+    }
+
+
+def _build_agent_auth_state(
+    *,
+    auth: TaskAuthPayload | None,
+    auth_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    auth_context_dict = auth_context if isinstance(auth_context, dict) else {}
+    provider = (auth.provider if auth is not None else '') or str(auth_context_dict.get('provider') or '')
+    reason_code = auth_context_dict.get('reason_code')
+    safe_summary: dict[str, Any] = {}
+    for key in ('source', 'mode', 'path', 'reason_code', 'attempts', 'script_status', 'context_prepared'):
+        value = auth_context_dict.get(key)
+        if isinstance(value, (str, int, bool)) or value is None:
+            safe_summary[key] = value
+    domain = auth_context_dict.get('domain')
+    if isinstance(domain, str):
+        safe_summary['domain'] = domain
+
+    return {
+        'provided': auth is not None,
+        'provider': provider.strip().lower() or None,
+        'authenticated': reason_code == 'auth_ok',
+        'summary': safe_summary,
     }

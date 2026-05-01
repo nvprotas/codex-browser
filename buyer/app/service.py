@@ -19,8 +19,7 @@ from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionAnalysisSnapshot, PostSessionKnowledgeAnalyzer
 from .models import AgentOutput, EventEnvelope, SessionStatus, TaskAuthPayload
 from .persistence import _sanitize_persistent_metadata
-from .payment_verifier import PaymentVerificationResult, payment_evidence_from_purchase_script, verify_completed_payment
-from .purchase_scripts import PurchaseScriptRunner
+from .payment_verifier import PaymentVerificationResult, verify_completed_payment
 from .runner import AgentRunner
 from .state import (
     ReplyValidationError,
@@ -48,8 +47,6 @@ class BuyerService:
         sberid_allowlist: set[str],
         sberid_auth_retry_budget: int,
         auth_script_runner: SberIdScriptRunner,
-        purchase_script_allowlist: set[str] | None = None,
-        purchase_script_runner: PurchaseScriptRunner | None = None,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
         buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
         external_auth_client: ExternalSberCookiesClient | None = None,
@@ -64,8 +61,6 @@ class BuyerService:
         self._sberid_allowlist = {item for item in sberid_allowlist if item}
         self._sberid_auth_retry_budget = max(sberid_auth_retry_budget, 0)
         self._auth_script_runner = auth_script_runner
-        self._purchase_script_allowlist = {item for item in (purchase_script_allowlist or set()) if item}
-        self._purchase_script_runner = purchase_script_runner
         self._knowledge_analyzer = knowledge_analyzer
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
         self._post_session_analysis_semaphore = asyncio.Semaphore(1)
@@ -165,11 +160,6 @@ class BuyerService:
                     f'[SBERID_AUTH_SUMMARY] {json.dumps(auth_summary, ensure_ascii=False)}',
                 )
 
-            purchase_result = await self._run_purchase_script_flow(state)
-            if purchase_result is not None:
-                await self._handle_completed(state, purchase_result, auth_summary=auth_summary)
-                return
-
             while True:
                 state = await self._store.get(session_id)
                 memory = await self._store.get_agent_memory(session_id)
@@ -234,7 +224,15 @@ class BuyerService:
                     recovery_attempts = 0
                     last_recovery_error_tail = 'none'
                     payment_verification = verify_completed_payment(state.start_url, result)
-                    if not payment_verification.accepted:
+                    if payment_verification.status == 'unverified':
+                        await self._handle_unverified(
+                            state,
+                            result,
+                            payment_verification=payment_verification,
+                            auth_summary=auth_summary,
+                        )
+                        return
+                    if payment_verification.status == 'rejected':
                         await self._handle_failed(
                             state,
                             payment_verification.failure_reason or 'Completed result rejected: payment verification failed.',
@@ -351,7 +349,15 @@ class BuyerService:
         payment_verification: PaymentVerificationResult | None = None,
     ) -> None:
         payment_verification = payment_verification or verify_completed_payment(state.start_url, result)
-        if not payment_verification.accepted:
+        if payment_verification.status == 'unverified':
+            await self._handle_unverified(
+                state,
+                result,
+                payment_verification=payment_verification,
+                auth_summary=auth_summary,
+            )
+            return
+        if payment_verification.status == 'rejected':
             await self._handle_failed(
                 state,
                 payment_verification.failure_reason or 'Completed result rejected: payment verification failed.',
@@ -426,6 +432,71 @@ class BuyerService:
             message=result.message,
             order_id=result.order_id,
             artifacts=artifacts,
+        )
+
+    async def _handle_unverified(
+        self,
+        state: SessionState,
+        result: AgentOutput,
+        *,
+        payment_verification: PaymentVerificationResult,
+        auth_summary: dict[str, Any] | None,
+    ) -> None:
+        artifacts = _artifacts_with_payment_evidence(result)
+        if auth_summary:
+            artifacts['auth'] = auth_summary
+        if payment_verification.evidence_url:
+            artifacts['payment_verification'] = {
+                'status': payment_verification.status,
+                'provider': payment_verification.provider,
+                'evidence_url': payment_verification.evidence_url,
+                'order_id_host': payment_verification.order_id_host,
+                'reason': payment_verification.failure_reason,
+            }
+
+        reason = payment_verification.failure_reason or 'Payment evidence found, but merchant policy is unverified.'
+        reason_code = 'merchant_policy_not_allowlisted'
+        await self._emit_event(
+            state,
+            event_type='payment_unverified',
+            payload={
+                'order_id': result.order_id,
+                'order_id_host': payment_verification.order_id_host,
+                'provider': payment_verification.provider,
+                'evidence_url': payment_verification.evidence_url,
+                'message': 'Платежный шаг найден, но merchant verifier не подтвержден.',
+                'reason': reason_code,
+                'failure_reason': reason,
+            },
+            idempotency_suffix='payment-unverified',
+        )
+        await self._emit_event(
+            state,
+            event_type='scenario_finished',
+            payload={
+                'status': 'unverified',
+                'message': result.message,
+                'order_id': result.order_id,
+                'artifacts': _sanitize_terminal_callback_artifacts(artifacts),
+            },
+            idempotency_suffix='scenario-unverified',
+        )
+        await self._store.record_artifacts(state.session_id, [artifacts])
+        await self._store.set_status(state.session_id, SessionStatus.UNVERIFIED, error=reason)
+        logger.warning(
+            'session_unverified session_id=%s order_id=%s provider=%s order_id_host=%s reason=%s',
+            state.session_id,
+            result.order_id,
+            payment_verification.provider,
+            payment_verification.order_id_host,
+            _tail_text(reason, limit=700),
+        )
+        _log_buyer_progress(
+            session_id=state.session_id,
+            stage='payment',
+            status='unverified',
+            order_id=result.order_id,
+            message='Платежный шаг найден, но merchant verifier не подтвержден; payment_ready не отправлен.',
         )
 
     async def _handle_failed(
@@ -608,137 +679,6 @@ class BuyerService:
         await self._store.set_auth(state.session_id, auth)
         state.auth = auth
         return auth
-
-    async def _run_purchase_script_flow(self, state: SessionState) -> AgentOutput | None:
-        if self._purchase_script_runner is None:
-            return None
-
-        domain = domain_from_url(state.start_url)
-        if not is_domain_in_allowlist(domain, self._purchase_script_allowlist):
-            return None
-
-        _log_buyer_progress(
-            session_id=state.session_id,
-            stage='purchase_script',
-            message=f'Пробую быстрый purchase-скрипт для домена {domain}.',
-        )
-        try:
-            script_result = await self._purchase_script_runner.run(
-                session_id=state.session_id,
-                domain=domain,
-                start_url=state.start_url,
-                task=state.task,
-            )
-        except Exception as exc:  # noqa: BLE001 - быстрый путь не должен ломать generic fallback
-            await self._store.add_agent_memory(
-                state.session_id,
-                'system',
-                (
-                    '[PURCHASE_SCRIPT_FALLBACK] '
-                    f'Быстрый purchase-скрипт для {domain} аварийно завершился: {_tail_text(str(exc), limit=500)}. '
-                    'Продолжай через generic browser-flow.'
-                ),
-            )
-            logger.warning(
-                'purchase_script_exception_fallback session_id=%s domain=%s error=%s',
-                state.session_id,
-                domain,
-                _tail_text(str(exc), limit=700),
-            )
-            _log_buyer_progress(
-                session_id=state.session_id,
-                stage='purchase_script',
-                status='fallback',
-                message=f'Быстрый purchase-скрипт упал, перехожу к generic flow: {_tail_text(str(exc), limit=250)}',
-            )
-            return None
-
-        if script_result.status == 'completed' and script_result.order_id:
-            payment_evidence = payment_evidence_from_purchase_script(script_result)
-            candidate = AgentOutput(
-                status='completed',
-                message=script_result.message,
-                order_id=script_result.order_id,
-                payment_evidence=payment_evidence,
-                artifacts={'purchase_script': script_result.artifacts},
-            )
-            payment_verification = verify_completed_payment(state.start_url, candidate)
-            if not payment_verification.accepted or not payment_verification.order_id_host:
-                verification_failure = (
-                    payment_verification.failure_reason
-                    or 'accepted payment verification did not provide order_id_host.'
-                )
-                await self._store.add_agent_memory(
-                    state.session_id,
-                    'system',
-                    (
-                        '[PURCHASE_SCRIPT_FALLBACK] '
-                        f'Быстрый purchase-скрипт для {domain} вернул completed/order_id, '
-                        f'но не прошел verifier SberPay: {verification_failure}. '
-                        'Продолжай через generic browser-flow.'
-                    ),
-                )
-                logger.warning(
-                    'purchase_script_invalid_payment_evidence_fallback session_id=%s domain=%s order_id=%s artifacts=%s',
-                    state.session_id,
-                    domain,
-                    script_result.order_id,
-                    _tail_text(json.dumps(script_result.artifacts, ensure_ascii=False, default=str), limit=700),
-                )
-                _log_buyer_progress(
-                    session_id=state.session_id,
-                    stage='purchase_script',
-                    status='fallback',
-                    order_id=script_result.order_id,
-                    message=(
-                        'Быстрый purchase-скрипт дошел до orderId, но verifier отклонил evidence; '
-                        'перехожу к generic flow.'
-                    ),
-                )
-                return None
-
-            logger.info(
-                'purchase_script_completed session_id=%s domain=%s order_id=%s',
-                state.session_id,
-                domain,
-                script_result.order_id,
-            )
-            _log_buyer_progress(
-                session_id=state.session_id,
-                stage='purchase_script',
-                status='completed',
-                order_id=script_result.order_id,
-                message='Быстрый purchase-скрипт довел сценарий до платежного шага.',
-            )
-            return candidate
-
-        await self._store.add_agent_memory(
-            state.session_id,
-            'system',
-            (
-                '[PURCHASE_SCRIPT_FALLBACK] '
-                f'Быстрый purchase-скрипт для {domain} не завершился успешно: '
-                f'{script_result.reason_code}; {script_result.message}. '
-                'Продолжай через generic browser-flow.'
-            ),
-        )
-        logger.info(
-            'purchase_script_fallback session_id=%s domain=%s reason=%s message=%s',
-            state.session_id,
-            domain,
-            script_result.reason_code,
-            _tail_text(script_result.message, limit=500),
-        )
-        _log_buyer_progress(
-            session_id=state.session_id,
-            stage='purchase_script',
-            status='fallback',
-            message=(
-                f'Быстрый purchase-скрипт не завершил сценарий ({script_result.reason_code}); '
-                'перехожу к generic flow.'
-            ),
-        )
-        return None
 
     async def _ask_user_for_reply(
         self,

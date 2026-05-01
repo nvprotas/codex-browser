@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import unittest
+from pathlib import Path
 
+from buyer.app.agent_instruction_manifest import build_agent_instruction_manifest
 from buyer.app.prompt_builder import build_agent_prompt
 from buyer.tools.cdp_tool import _collect_snapshot, parser
 
@@ -12,20 +14,32 @@ def _brandshop_prompt() -> str:
         task='Купи светлые кроссовки Jordan Air High 45 EU',
         start_url='https://brandshop.ru/',
         browser_cdp_endpoint='http://browser:9223',
-        cdp_preflight_summary='OK',
-        metadata={'brand': 'Jordan', 'model': 'Air High', 'size': '45 EU', 'color': 'светлые'},
-        auth_payload=None,
-        auth_context={'profile': 'brandshop_sberid'},
-        user_profile_text=None,
-        user_profile_truncated=False,
-        memory=[],
+        instruction_manifest=build_agent_instruction_manifest(start_url='https://brandshop.ru/'),
+        context_file_manifest={
+            'task': '/workspace/.tmp/buyer-observability/session/step/task.json',
+            'metadata': '/workspace/.tmp/buyer-observability/session/step/metadata.json',
+            'memory': '/workspace/.tmp/buyer-observability/session/step/memory.json',
+            'latest_user_reply': '/workspace/.tmp/buyer-observability/session/step/latest-user-reply.md',
+            'user_profile': '/workspace/.tmp/buyer-observability/session/step/user-profile.md',
+            'auth_state': '/workspace/.tmp/buyer-observability/session/step/auth-state.json',
+        },
         latest_user_reply=None,
     )
 
 
 class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
-    def test_prompt_contains_brandshop_generic_playbook_requirements(self) -> None:
+    def test_prompt_points_to_brandshop_playbook_without_embedding_it(self) -> None:
         prompt = _brandshop_prompt()
+
+        self.assertIn('/workspace/docs/buyer-agent/playbooks/brandshop.md', prompt)
+        self.assertIn('Jordan Air High 45 EU', prompt)
+        self.assertIn('Не выполняй реальный платеж', prompt)
+        self.assertNotIn('brandshop_yoomoney_sberpay_redirect', prompt)
+        self.assertNotIn('Искать в каталоге', prompt)
+        self.assertNotIn('header search button', prompt)
+
+    def test_brandshop_playbook_contains_generic_runtime_requirements(self) -> None:
+        playbook = Path('docs/buyer-agent/playbooks/brandshop.md').read_text(encoding='utf-8')
 
         expected_fragments = [
             'https://brandshop.ru/',
@@ -33,7 +47,7 @@ class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
             'Искать в каталоге',
             'press Enter',
             'Jordan Air High',
-            'размер и цвет являются ограничениями',
+            'Размер и цвет являются ограничениями',
             '45 EU',
             'фильтр',
             'mfp',
@@ -52,32 +66,37 @@ class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
             'https://yoomoney.ru/checkout/payments/v2/contract?orderId=',
             'brandshop_yoomoney_sberpay_redirect',
             'не продолжай оплату на YooMoney',
+            'Не hardcode SKU',
         ]
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, prompt)
+                self.assertIn(fragment, playbook)
 
     def test_prompt_does_not_hardcode_brandshop_example_as_runtime_defaults(self) -> None:
         prompt = build_agent_prompt(
             task='Купи темную худи Stussy размера M',
             start_url='https://brandshop.ru/',
             browser_cdp_endpoint='http://browser:9223',
-            cdp_preflight_summary='OK',
-            metadata={'brand': 'Stussy', 'category': 'худи', 'size': 'M', 'color': 'темная'},
-            auth_payload=None,
-            auth_context={'profile': 'brandshop_sberid'},
-            user_profile_text=None,
-            user_profile_truncated=False,
-            memory=[],
+            instruction_manifest=build_agent_instruction_manifest(start_url='https://brandshop.ru/'),
+            context_file_manifest={
+                'task': '/workspace/.tmp/buyer-observability/session/step/task.json',
+                'metadata': '/workspace/.tmp/buyer-observability/session/step/metadata.json',
+                'memory': '/workspace/.tmp/buyer-observability/session/step/memory.json',
+                'latest_user_reply': '/workspace/.tmp/buyer-observability/session/step/latest-user-reply.md',
+                'user_profile': '/workspace/.tmp/buyer-observability/session/step/user-profile.md',
+                'auth_state': '/workspace/.tmp/buyer-observability/session/step/auth-state.json',
+            },
             latest_user_reply=None,
         )
+        playbook = Path('docs/buyer-agent/playbooks/brandshop.md').read_text(encoding='utf-8')
 
         self.assertNotIn('Jordan Air High', prompt)
         self.assertNotIn('45 EU', prompt)
         self.assertNotIn('светлые', prompt)
-        self.assertIn('product identity', prompt)
-        self.assertIn('размер из текущей задачи', prompt)
-        self.assertIn('цветовое предпочтение из текущей задачи', prompt)
+        self.assertIn('Stussy', prompt)
+        self.assertIn('product identity', playbook)
+        self.assertIn('Размер из текущей задачи', playbook)
+        self.assertIn('Цветовое предпочтение из текущей задачи', playbook)
 
 
 class _SnapshotElement:

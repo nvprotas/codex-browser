@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from tempfile import TemporaryDirectory
 
-from buyer.app.auth_scripts import parse_allowlist
 from buyer.app.purchase_scripts import PurchaseScriptRunner
 from buyer.app.settings import Settings
 
@@ -22,8 +21,13 @@ class PurchaseScriptRegistryTests(unittest.TestCase):
 
         self.assertNotIn('litres.ru', registry)
 
-    def test_default_purchase_script_allowlist_is_empty(self) -> None:
+    def test_purchase_script_allowlist_setting_is_not_part_of_default_runtime_contract(self) -> None:
         settings = Settings(_env_file=None)
 
-        self.assertEqual(settings.purchase_script_allowlist, '')
-        self.assertEqual(parse_allowlist(settings.purchase_script_allowlist), set())
+        self.assertFalse(hasattr(settings, 'purchase_script_allowlist'))
+
+    def test_default_app_runtime_does_not_wire_purchase_script_runner(self) -> None:
+        from buyer.app.main import service
+
+        self.assertFalse(hasattr(service, '_purchase_script_runner'))
+        self.assertFalse(hasattr(service, '_purchase_script_allowlist'))

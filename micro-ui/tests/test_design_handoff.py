@@ -126,3 +126,62 @@ class CallbackStoreAskUserSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.order_id, 'brandshop-order-123')
         self.assertEqual(summary.order_id_host, 'yoomoney.ru')
         self.assertEqual(summary.last_message, 'Платежный шаг готов.')
+
+    async def test_list_sessions_exposes_unverified_payment_without_payment_ready_status(self) -> None:
+        store = CallbackStore()
+
+        await store.add(
+            _session_event(
+                event_id='evt-payment-unverified',
+                event_type='payment_unverified',
+                occurred_at=datetime(2026, 5, 1, 9, 20, 12, tzinfo=timezone.utc),
+                payload={
+                    'order_id': 'unknown-order-123',
+                    'order_id_host': 'yoomoney.ru',
+                    'provider': 'yoomoney',
+                    'message': 'Платежная граница найдена, но нужна проверка.',
+                    'reason': 'merchant_policy_not_allowlisted',
+                },
+            )
+        )
+        summaries = await store.list_sessions()
+
+        summary = summaries[0]
+        self.assertEqual(summary.status, 'unverified')
+        self.assertEqual(summary.last_event_type, 'payment_unverified')
+        self.assertEqual(summary.order_id, 'unknown-order-123')
+        self.assertEqual(summary.order_id_host, 'yoomoney.ru')
+        self.assertEqual(summary.payment_provider, 'yoomoney')
+        self.assertIsNone(summary.waiting_reply_id)
+        self.assertEqual(summary.last_message, 'Платежная граница найдена, но нужна проверка.')
+
+    async def test_unverified_summary_is_not_overwritten_by_later_completed_scenario_finished(self) -> None:
+        store = CallbackStore()
+
+        await store.add(
+            _session_event(
+                event_id='evt-payment-unverified',
+                event_type='payment_unverified',
+                occurred_at=datetime(2026, 5, 1, 9, 20, 12, tzinfo=timezone.utc),
+                payload={
+                    'order_id': 'unknown-order-123',
+                    'order_id_host': 'yoomoney.ru',
+                    'provider': 'yoomoney',
+                    'message': 'Платежная граница найдена, но нужна проверка.',
+                    'reason': 'merchant_policy_not_allowlisted',
+                },
+            )
+        )
+        await store.add(
+            _session_event(
+                event_id='evt-scenario-finished',
+                event_type='scenario_finished',
+                occurred_at=datetime(2026, 5, 1, 9, 20, 13, tzinfo=timezone.utc),
+                payload={'status': 'completed', 'message': 'Позднее terminal-событие.'},
+            )
+        )
+
+        summary = (await store.list_sessions())[0]
+
+        self.assertEqual(summary.status, 'unverified')
+        self.assertEqual(summary.order_id, 'unknown-order-123')

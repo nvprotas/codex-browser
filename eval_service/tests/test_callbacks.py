@@ -386,6 +386,108 @@ def test_buyer_callback_failed_scenario_finished_marks_case_failed(tmp_path: Pat
     assert 'Покупка завершилась ошибкой.' in (case.error or '')
 
 
+def test_buyer_callback_payment_unverified_marks_case_review_needed(tmp_path: Path) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    client.post(
+        '/callbacks/buyer',
+        json=_callback_payload('ask_user', {'reply_id': 'reply-42', 'question': 'Продолжить?'}),
+    )
+
+    response = client.post(
+        '/callbacks/buyer',
+        json=_callback_payload(
+            'payment_unverified',
+            {
+                'order_id': 'order-unknown-1',
+                'order_id_host': 'yoomoney.ru',
+                'provider': 'yoomoney',
+                'message': 'Платежная граница найдена, но merchant policy не подтвердила SberPay.',
+                'reason': 'merchant_policy_not_allowlisted',
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()['state'] == 'unverified'
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.UNVERIFIED
+    assert case.finished_at == datetime(2026, 4, 28, 12, 0, 45, tzinfo=UTC)
+    assert case.waiting_reply_id is None
+    assert 'merchant_policy_not_allowlisted' in (case.error or '')
+
+    finished_response = client.post(
+        '/callbacks/buyer',
+        json={
+            **_callback_payload(
+                'scenario_finished',
+                {'status': 'unverified', 'message': 'Сценарий завершен как непроверенный.'},
+            ),
+            'event_id': 'event-scenario_finished-unverified',
+            'idempotency_key': 'idem-scenario_finished-unverified',
+        },
+    )
+
+    assert finished_response.status_code == 200
+    assert finished_response.json()['state'] == 'unverified'
+    case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert case.state == CaseRunState.UNVERIFIED
+    assert [event.event_type.value for event in case.callback_events[-2:]] == [
+        'payment_unverified',
+        'scenario_finished',
+    ]
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        {
+            'order_id_host': 'yoomoney.ru',
+            'provider': 'yoomoney',
+            'message': 'Нужна проверка.',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        {
+            'order_id': 'order-unknown-1',
+            'provider': 'yoomoney',
+            'message': 'Нужна проверка.',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        {
+            'order_id': 'order-unknown-1',
+            'order_id_host': 'yoomoney.ru',
+            'message': 'Нужна проверка.',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        {
+            'order_id': 'order-unknown-1',
+            'order_id_host': 'yoomoney.ru',
+            'provider': 'yoomoney',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        {
+            'order_id': 'order-unknown-1',
+            'order_id_host': 'yoomoney.ru',
+            'provider': 'yoomoney',
+            'message': 'Нужна проверка.',
+        },
+    ],
+)
+def test_buyer_callback_rejects_malformed_payment_unverified_without_state_change(
+    tmp_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    client, store, _buyer = _client_with_store(tmp_path)
+    _create_run(store)
+    before_case = store.read_manifest('eval-20260428-120000').cases[0]
+
+    response = client.post('/callbacks/buyer', json=_callback_payload('payment_unverified', payload))
+
+    assert response.status_code == 422
+    after_case = store.read_manifest('eval-20260428-120000').cases[0]
+    assert after_case.model_dump(mode='json') == before_case.model_dump(mode='json')
+
+
 def test_callback_with_eval_ids_rejects_mismatched_session_id(tmp_path: Path) -> None:
     client, store, _buyer = _client_with_store(tmp_path)
     _create_run(store)
