@@ -31,6 +31,7 @@ class PurchaseScriptResult:
     order_id: str | None
     artifacts: dict[str, Any]
 
+#TODO Purchase скрипты не планируются, но можно оставить runner для других кастомных скриптов, которые агент может запустить сам при необходимости.
 
 class PurchaseScriptRunner:
     def __init__(

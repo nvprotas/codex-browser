@@ -15,6 +15,8 @@ YOOMONEY_PAYMENT_PATH = '/checkout/payments/v2/contract'
 LITRES_DOMAINS = {'litres.ru'}
 BRANDSHOP_DOMAINS = {'brandshop.ru'}
 
+#TODO Payment verifier должен быть универсальным и поддерживать любые домены, а не только Litres и Brandshop. Оплата на yoomoney может использовать и на других сайтах. Iframe с payecom может быть встроен в любой сайт или даже открываться как отдельная страница, а не iframe. 
+#TODO Сейчас домен не из списка сразу accepted=False. Но это не всегда значит, что платеж не подготовлен/не проведен. Возможно стоит добавить третий статус "unverified" для доменов вне списка, который будет означать, что мы не можем подтвердить факт оплаты, но и не можем подтвердить отсутствие оплаты.
 
 @dataclass(frozen=True)
 class PaymentVerificationResult:
