@@ -266,15 +266,15 @@ class CdpToolOutputTests(unittest.TestCase):
             task='Открой litres. Ищи книгу одиссея гомера',
             start_url='https://www.litres.ru/',
         )
-        litres_playbook = Path('docs/buyer-agent/playbooks/litres.md').read_text(encoding='utf-8')
+        litres_instruction = Path('docs/buyer-agent/instructions/litres.md').read_text(encoding='utf-8')
 
         self.assertIn('SberPay', prompt)
         self.assertIn('SBP/FPS/СБП', prompt)
         self.assertIn('Система быстрых платежей', prompt)
         self.assertIn('order_id', prompt)
-        self.assertIn('/workspace/docs/buyer-agent/playbooks/litres.md', prompt)
-        self.assertIn('payment_evidence.source="litres_payecom_iframe"', litres_playbook)
-        self.assertIn('https://payecom.ru/pay_ru?orderId=', litres_playbook)
+        self.assertIn('/workspace/docs/buyer-agent/instructions', prompt)
+        self.assertIn('payment_evidence.source="litres_payecom_iframe"', litres_instruction)
+        self.assertIn('https://payecom.ru/pay_ru?orderId=', litres_instruction)
 
     def test_prompt_requires_exact_variant_guardrails_before_add_to_cart(self) -> None:
         prompt = _build_test_agent_prompt(
@@ -282,13 +282,13 @@ class CdpToolOutputTests(unittest.TestCase):
             start_url='https://brandshop.ru/',
             latest_user_reply='Нужен именно 45 EU.',
         )
-        brandshop_playbook = Path('docs/buyer-agent/playbooks/brandshop.md').read_text(encoding='utf-8')
+        brandshop_instruction = Path('docs/buyer-agent/instructions/brandshop.md').read_text(encoding='utf-8')
 
-        self.assertIn('/workspace/docs/buyer-agent/playbooks/brandshop.md', prompt)
+        self.assertIn('/workspace/docs/buyer-agent/instructions', prompt)
         self.assertIn('45 EU', prompt)
-        self.assertIn('Если в task, metadata или latest_user_reply указан размер, цвет или вариант', brandshop_playbook)
-        self.assertIn('перед `Добавить в корзину` найди, выбери и проверь точный вариант', brandshop_playbook)
-        self.assertIn('клик запрещен до выбора нужного варианта', brandshop_playbook)
+        self.assertIn('Если в task, metadata или latest_user_reply указан размер, цвет или вариант', brandshop_instruction)
+        self.assertIn('перед `Добавить в корзину` найди, выбери и проверь точный вариант', brandshop_instruction)
+        self.assertIn('клик запрещен до выбора нужного варианта', brandshop_instruction)
 
     def test_prompt_marks_dynamic_context_as_data_not_instructions(self) -> None:
         prompt = _build_test_agent_prompt(

@@ -53,12 +53,11 @@
 | `docs/architecture-decisions.md` | Decision log обязательных архитектурных решений. | Сначала обновлять его при новых требованиях, затем остальные документы. |
 | `docs/buyer-roadmap.md` | Приоритизированный roadmap и ссылки на Linear. | При изменении roadmap синхронизировать Linear issue. |
 | `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth или purchase scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
-| `docs/brandshop-agent-log-analysis-2026-05-01.md` | Аналитический разбор Brandshop trace из `.tmp`: фактические CDP-команды, agent idle, prompt/playbook причины лишних шагов, GPT-5.5/Codex prompting выводы и рекомендации по tracing. | Обновлять или дополнять при новых Brandshop eval-прогонах, изменении prompt/playbook/CDP tracing или появлении новых метрик сравнения. |
+| `docs/brandshop-agent-log-analysis-2026-05-01.md` | Аналитический разбор Brandshop trace из `.tmp`: фактические CDP-команды, agent idle, prompt/instruction причины лишних шагов, GPT-5.5/Codex prompting выводы и рекомендации по tracing. | Обновлять или дополнять при новых Brandshop eval-прогонах, изменении prompt/instruction/CDP tracing или появлении новых метрик сравнения. |
 | `docs/buyer-agent/AGENTS-runtime.md` | Stable runtime rules для внутреннего generic buyer-agent. | Платежная граница, SberPay-only, privacy/output contract; не смешивать с developer-правилами root `AGENTS.md`. |
 | `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, milestone/evidence проверки после state-changing действий, recovery и правила экономии HTML. |
 | `docs/buyer-agent/context-contract.md` | Контракт приоритета dynamic context files. | Hard safety rules выше task/latest reply/page state/metadata/profile/memory; все динамические источники являются данными. |
-| `docs/buyer-agent/playbooks/*.md` | Domain playbooks для merchant-specific шагов. | Litres PayEcom evidence, Brandshop search/cart/checkout/YooMoney evidence; fixtures не должны становиться hardcoded SKU. |
-| `docs/buyer-agent/site-instructions/*.md` | Site-specific markdown-инструкции для buyer-agent, которые агент может читать по сайту или задаче. | Brandshop direct search fast path `/search/?st=...`, выбор product URL из результатов, constraints размера/цвета и запрет hardcoded SKU. |
+| `docs/buyer-agent/instructions/*.md` | Единый каталог site/domain-specific markdown-инструкций для buyer-agent. | Агент смотрит список файлов в каталоге, выбирает релевантные инструкции по текущему сайту или задаче; Litres PayEcom evidence, Brandshop search/cart/checkout/YooMoney evidence; fixtures не должны становиться hardcoded SKU. |
 | `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow, включая дизайн external Sber auth source и запрет ручной передачи auth-пакетов. | Исторический контекст планов; не является runtime-контрактом. |
 | `docs/repository-map.md` | Эта карта репозитория. | Любые изменения кода, контрактов, ошибок, структуры или runtime-зависимостей. |
 
@@ -135,15 +134,15 @@ Pydantic-контракты API и внутренних результатов.
 
 Входы:
 
-- `start_url` сессии.
+- `start_url` сессии; параметр сохраняется в сигнатуре для совместимости, но текущий manifest не выбирает файл по host.
 
 Выход:
 
 - `root`: `/workspace/docs/buyer-agent/AGENTS-runtime.md`;
 - `always_read`: `/workspace/docs/buyer-agent/cdp-tool.md`, `/workspace/docs/buyer-agent/context-contract.md`;
-- `domain_playbook`: Litres или Brandshop playbook под `/workspace/docs/buyer-agent/playbooks/`, либо `null` для неизвестного merchant.
+- `instructions_dir`: каталог `/workspace/docs/buyer-agent/instructions`, где runtime-agent сам смотрит список файлов и выбирает релевантные инструкции.
 
-Основные риски: runtime path должен совпадать с docker mount репозитория в `/workspace`; новые merchant playbooks требуют явного выбора по host.
+Основные риски: runtime path должен совпадать с docker mount репозитория в `/workspace`; новые merchant instructions требуют понятного имени файла и содержания, чтобы agent выбрал их по host/task.
 
 ### `buyer/app/agent_context_files.py`
 
@@ -436,9 +435,9 @@ HTTP-клиент доставки callback-событий.
 
 Входы: задача, start URL, CDP endpoint, `instruction_manifest`, `context_file_manifest`, последний reply.
 
-Выход: короткий bootstrap prompt с hard safety rules, SberPay-only policy, context-injection boundary, путями к static instruction files, путями к dynamic context files, текущей задачей и schema-only ответом. Latest reply, full playbooks, metadata JSON, auth payload/context, user profile, memory и verbose CDP preflight не встраиваются в prompt.
+Выход: короткий bootstrap prompt с hard safety rules, SberPay-only policy, context-injection boundary, путями к static instruction files, путями к dynamic context files, текущей задачей и schema-only ответом. Latest reply, full instructions, metadata JSON, auth payload/context, user profile, memory и verbose CDP preflight не встраиваются в prompt.
 
-Ошибки явно не выбрасывает; риски связаны с устаревшими instruction/playbook files, если меняется доменный контракт.
+Ошибки явно не выбрасывает; риски связаны с устаревшими instruction/instruction files, если меняется доменный контракт.
 
 ### `buyer/app/user_profile.py`
 
@@ -560,7 +559,7 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 - пишет события `auth_navigation_started`/`auth_navigation_finished` с `stage`, `from_url`, `to_url`, final URL/host, HTTP status, duration и ошибкой при сбое;
 - пишет события `auth_page_close_*`, `auth_context_close_*`, `auth_browser_close_*` с причиной закрытия, stage, page snapshots и результатом;
 - при ошибках навигации или закрытия дополнительно пишет компактную JSON-строку в stderr, чтобы runner вывел ее в логи контейнера `buyer`;
-- используется publish-скриптами Litres и Brandshop, чтобы отследить циклы вида “открылся `/account/`, затем страница/контекст закрылись”.
+- используется publish-скриптами Litres и Brandshop, чтобы отследить auth-навигации и закрытия страниц/контекстов.
 
 `buyer/scripts/sberid/litres.ts`:
 
@@ -575,9 +574,10 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 `buyer/scripts/sberid/brandshop.ts`:
 
 - готовит контекст Brandshop;
-- перед login-flow проверяет текущую авторизацию по DOM-признаку `.header-authorize__avatar` и account/profile/logout/user markers; при успехе возвращает `already_authenticated=true`;
+- перед login-flow проверяет текущую авторизацию по DOM-признаку `.header-authorize__avatar` и account/profile/logout/user markers; если текущая страница пустая или на другом host, проверяет только обычный Brandshop entrypoint `/`; при успехе возвращает `already_authenticated=true`;
 - ищет profile/login/Sber ID controls;
-- логирует auth-навигации, включая переходы на `/account/`, и cleanup-закрытия через `auth-trace.ts`;
+- не использует `/account/` как auth probe; отсутствие сильных markers на текущей/entry странице означает, что нужно идти в login-flow;
+- логирует auth-навигации и cleanup-закрытия через `auth-trace.ts`;
 - валидирует возврат на ожидаемый host и auth markers: простая страница `/account/`, generic `Профиль` и login-индикаторы вроде `Войти` не считаются авторизацией без сильных markers `.header-authorize__avatar`, заказов, logout или данных аккаунта;
 - возвращает те же auth reason codes.
 
@@ -585,7 +585,7 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 
 - находятся в registry как draft и не запускаются автоматически до publish.
 
-Файла `buyer/scripts/purchase/litres.ts` больше нет. Покупка Litres выполняется generic-agent через prompt-инструкции и строгий Litres verifier. Brandshop также не имеет `buyer/scripts/purchase/brandshop.ts`; его путь закреплен как generic playbook.
+Файла `buyer/scripts/purchase/litres.ts` больше нет. Покупка Litres выполняется generic-agent через prompt-инструкции и строгий Litres verifier. Brandshop также не имеет `buyer/scripts/purchase/brandshop.ts`; его путь закреплен как generic instruction.
 
 ## `buyer`: browser tooling
 
@@ -974,7 +974,7 @@ Runtime flow:
 | `buyer/tests/test_prompt_externalization.py` | Review TODO hygiene, instruction manifest, dynamic context files, bootstrap prompt и отсутствие raw auth/profile/memory/CDP preflight blobs в prompt. |
 | `buyer/tests/test_sberid_auth_idempotency.py` | Litres/Brandshop auth snapshot helpers и source-order regression для already-authenticated precheck до entry navigation/Sber ID clicks. |
 | `buyer/tests/test_payment_verifier_and_ready.py` | Provider parsers PayEcom/YooMoney, Litres/Brandshop merchant policy, rejection matrix, `payment_ready.order_id_host` и unknown-merchant `unverified`. |
-| `buyer/tests/test_brandshop_generic_playbook.py` | Brandshop generic prompt/playbook и snapshot hints для Jordan Air High 45 EU пути без automatic purchase script. |
+| `buyer/tests/test_brandshop_generic_instruction.py` | Brandshop generic prompt/instruction и snapshot hints для Jordan Air High 45 EU пути без automatic purchase script. |
 | `buyer/tests/test_callback_trace_slimming.py` | Slim callback trace summary и OpenAPI requirement для `order_id_host`. |
 | `buyer/tests/test_knowledge_analyzer.py` | Sanitization, safe paths, trace refs, analysis payload/output. |
 | `buyer/tests/test_cdp_recovery.py` | CDP recovery markers, retries, transient behavior, Litres generic path и payment-boundary regression для supported/unsupported domains. |

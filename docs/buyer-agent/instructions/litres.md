@@ -1,6 +1,6 @@
-# Playbook Litres
+# Инструкции Litres
 
-## Payment boundary
+## Платежная граница
 
 - Дойди до оплаты только через SberPay/СберPay/СберПэй.
 - Для Litres SberPay находится за способом оплаты `Российская карта`.

@@ -14,7 +14,7 @@ class SberIdAuthIdempotencyHelperTests(unittest.TestCase):
             ),
             (
                 buyer_root / 'scripts' / 'sberid' / 'brandshop.ts',
-                'const existingAuth = await verifyCurrentOrAccountPage(page, startUrl, tracePath);',
+                'const existingAuth = await verifyCurrentOrEntryPage(page, startUrl, tracePath);',
             ),
         ]
 
@@ -29,6 +29,13 @@ class SberIdAuthIdempotencyHelperTests(unittest.TestCase):
                 self.assertLess(precheck_index, first_entry_navigation_index)
                 self.assertLess(precheck_index, first_sber_click_index)
                 self.assertGreater(already_authenticated_index, precheck_index)
+
+    def test_brandshop_auth_does_not_probe_account_page(self) -> None:
+        buyer_root = Path(__file__).resolve().parents[1]
+        source = (buyer_root / 'scripts' / 'sberid' / 'brandshop.ts').read_text(encoding='utf-8')
+
+        self.assertNotIn("url.pathname = '/account/'", source)
+        self.assertNotIn('auth_verify_account', source)
 
     def _run_tsx(self, source: str) -> dict:
         buyer_root = Path(__file__).resolve().parents[1]

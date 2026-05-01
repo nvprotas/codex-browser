@@ -24,7 +24,7 @@ def test_instruction_manifest_points_to_runtime_markdown_files() -> None:
     assert manifest['root'] == '/workspace/docs/buyer-agent/AGENTS-runtime.md'
     assert '/workspace/docs/buyer-agent/cdp-tool.md' in manifest['always_read']
     assert '/workspace/docs/buyer-agent/context-contract.md' in manifest['always_read']
-    assert manifest['domain_playbook'] == '/workspace/docs/buyer-agent/playbooks/brandshop.md'
+    assert manifest['instructions_dir'] == '/workspace/docs/buyer-agent/instructions'
 
 
 def test_context_files_are_written_without_raw_auth_payload(tmp_path: Path) -> None:
@@ -133,7 +133,7 @@ def test_prompt_is_short_bootstrap_with_instruction_and_context_paths() -> None:
                 '/workspace/docs/buyer-agent/cdp-tool.md',
                 '/workspace/docs/buyer-agent/context-contract.md',
             ],
-            'domain_playbook': '/workspace/docs/buyer-agent/playbooks/brandshop.md',
+            'instructions_dir': '/workspace/docs/buyer-agent/instructions',
         },
         context_file_manifest={
             'task': '/workspace/.tmp/buyer-observability/session/step/task.json',
@@ -144,7 +144,7 @@ def test_prompt_is_short_bootstrap_with_instruction_and_context_paths() -> None:
     )
 
     assert '/workspace/docs/buyer-agent/AGENTS-runtime.md' in prompt
-    assert '/workspace/docs/buyer-agent/playbooks/brandshop.md' in prompt
+    assert '/workspace/docs/buyer-agent/instructions' in prompt
     assert 'Не выполняй реальный платеж' in prompt
     assert 'SBP/FPS/СБП' in prompt
     assert 'Jordan Air High 45 EU' in prompt

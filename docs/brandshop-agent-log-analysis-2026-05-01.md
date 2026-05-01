@@ -9,7 +9,7 @@
 | Срез | Что проверялось |
 | --- | --- |
 | Метрики trace | Количество browser-action записей, CDP-команд, idle gaps, retry behavior, объем артефактов. |
-| Prompt/playbook | `AGENTS.md`, runtime prompt, `docs/buyer-agent/*`, Brandshop playbook и правила CDP tool. |
+| Prompt/instruction | `AGENTS.md`, runtime prompt, `docs/buyer-agent/*`, Brandshop instruction и правила CDP tool. |
 | Runner/tracing | `buyer/app/runner.py`, `buyer/tools/cdp_tool.py`, schema structured output и callback trace summary. |
 
 ## Источники
@@ -25,7 +25,7 @@
 - `docs/buyer-agent/AGENTS-runtime.md`
 - `docs/buyer-agent/cdp-tool.md`
 - `docs/buyer-agent/context-contract.md`
-- `docs/buyer-agent/playbooks/brandshop.md`
+- `docs/buyer-agent/instructions/brandshop.md`
 - `AGENTS.md`
 
 Официальные источники OpenAI:
@@ -77,7 +77,7 @@
 | Final payment boundary | `https://yoomoney.ru/checkout/payments/v2/contract?orderId=3186b36d-000f-5001-8000-1d3d9682dead` |
 | Итоговый provider host | `yoomoney.ru` |
 
-Важно: размер `45 EU` в этом прогоне был не в тексте `task`, а в `metadata.json`. Для агента это все равно обязательный constraint: Brandshop playbook прямо делает размер из task, metadata или latest user reply обязательным, а `context-contract` относит metadata к предпочтениям и устойчивым ограничениям.
+Важно: размер `45 EU` в этом прогоне был не в тексте `task`, а в `metadata.json`. Для агента это все равно обязательный constraint: Brandshop instruction прямо делает размер из task, metadata или latest user reply обязательным, а `context-contract` относит metadata к предпочтениям и устойчивым ограничениям.
 
 ## Архитектура текущего выполнения
 
@@ -124,7 +124,7 @@ Brandshop auth script сработал до generic-agent шага. В `auth-sta
 - `reason_code=auth_ok`;
 - `domain=brandshop.ru`.
 
-По trace auth был не полностью лишним: первый переход на `/account/` показал, что Brandshop еще не залогинен и редиректит на `/login/`. После SberId лог содержит промежуточный navigation finish на `/login/`, а затем `auth_verify_account` уже видит `/account/` и подтверждает login markers. Улучшение тут не в удалении финальной проверки account-state, а в более умном preflight: если есть только Sber cookies и нет Brandshop session markers, можно не делать первый account probe, а сразу идти в auth entrypoint.
+По trace старый auth-flow дважды использовал `/account/`: первый переход доказывал отсутствие Brandshop session, финальная проверка после SberId подтверждала login markers. После последующих правок Brandshop auth больше не использует `/account/` как probe: он проверяет текущую страницу, при пустой/чужой странице переходит только на Brandshop entrypoint `/` и принимает авторизацию только по сильным DOM-маркерам.
 
 ### 1. Generic-agent запуск
 
@@ -143,7 +143,7 @@ Prompt требует прочитать stable instruction files:
 - `/workspace/docs/buyer-agent/AGENTS-runtime.md`;
 - `/workspace/docs/buyer-agent/cdp-tool.md`;
 - `/workspace/docs/buyer-agent/context-contract.md`;
-- Brandshop playbook.
+- Brandshop instruction.
 
 Параллельно Codex как продукт также читает `AGENTS.md` перед работой. Официальная документация Codex описывает цепочку discovery: global instructions из `CODEX_HOME`, затем project instructions от корня репозитория до cwd, причем более близкие файлы идут позднее и имеют больший приоритет. Это значит, что запуск `codex exec` из `/workspace` может видеть root `AGENTS.md` проекта вместе с runtime prompt. В нашем root `AGENTS.md` есть engineering-процесс правила, полезные для разработки, но шумные для shopping-runtime.
 
@@ -280,9 +280,9 @@ Trace показывает:
 - HTML сохраняется в файл и локально grep-ается узким паттерном;
 - полный HTML не печатается в stdout.
 
-### 4. Brandshop playbook ориентирует на UI search, а не direct route
+### 4. Brandshop instruction ориентирует на UI search, а не direct route
 
-Текущий Brandshop playbook говорит открывать header search button, вводить запрос и нажимать Enter. Поэтому direct URL сейчас нужно считать предлагаемым изменением playbook-а, а не уже разрешенным путем. Для generic-agent это изменение оправдано, если цель - надежно и быстро дойти до SberPay boundary без hardcoded SKU.
+Текущий Brandshop instruction говорит открывать header search button, вводить запрос и нажимать Enter. Поэтому direct URL сейчас нужно считать предлагаемым изменением instruction-а, а не уже разрешенным путем. Для generic-agent это изменение оправдано, если цель - надежно и быстро дойти до SberPay boundary без hardcoded SKU.
 
 В пользовательском ручном сценарии прямой URL после UI search выглядит так:
 
@@ -299,7 +299,7 @@ Trace показывает:
 
 ### 5. Цветовое constraint "светлые" вызывает избыточное исследование
 
-Brandshop playbook требует проверить бренд, модель, категорию, цвет и размер. Для `светлые` это правильно, потому что есть черный и светлый вариант. Но prompt не говорит, когда доказательств достаточно.
+Brandshop instruction требует проверить бренд, модель, категорию, цвет и размер. Для `светлые` это правильно, потому что есть черный и светлый вариант. Но prompt не говорит, когда доказательств достаточно.
 
 Практичное правило:
 
@@ -345,7 +345,7 @@ flowchart TD
   D --> E[AGENTS-runtime.md]
   D --> F[cdp-tool.md]
   D --> G[context-contract.md]
-  D --> H[Brandshop playbook]
+  D --> H[Brandshop instruction]
   D --> I[Dynamic context files]
   I --> J[task and metadata]
   I --> K[auth-state and memory]
@@ -390,7 +390,7 @@ flowchart TD
 - текущие инструкции побуждают модель механически исполнять требование "проверять после каждого click/fill/press", что видно в trace;
 - при `reasoning_effort=none` она может тратить меньше reasoning tokens, но все равно делать длинный tool loop из-за prompt constraints;
 - отсутствие reasoning summary и per-attempt diagnostics делает долгие idle gaps почти непрозрачными;
-- process-heavy playbook может быть хуже, чем короткие outcome-first success criteria с явными stop rules.
+- process-heavy instruction может быть хуже, чем короткие outcome-first success criteria с явными stop rules.
 
 Нужно не просто "думать меньше", а дать модели правильный execution budget:
 
@@ -402,7 +402,7 @@ HTML budget: 0 для обычного пути; 1 только при missing s
 Search budget: 1 search results observation; повтор только если нет matching товара.
 ```
 
-### Что именно надо изменить в prompt/playbook
+### Что именно надо изменить в prompt/instruction
 
 | Сейчас | Предлагаемое правило |
 | --- | --- |
@@ -416,7 +416,7 @@ Search budget: 1 search results observation; повтор только если 
 
 ## Целевой Brandshop step-by-step без жесткого purchase script
 
-Этот flow не является hardcoded purchase script: агент сам выбирает product URL из результатов и проверяет constraints. Но playbook дает ему более короткую стратегию.
+Этот flow не является hardcoded purchase script: агент сам выбирает product URL из результатов и проверяет constraints. Но instruction дает ему более короткую стратегию.
 
 ### Подготовка
 
@@ -640,7 +640,7 @@ Search budget: 1 search results observation; повтор только если 
 
 ## Рекомендуемый новый prompt frame для Brandshop
 
-Это не полный prompt, а требования к следующей редакции `AGENTS-runtime.md`/playbook:
+Это не полный prompt, а требования к следующей редакции `AGENTS-runtime.md`/instruction:
 
 ```text
 Goal:
@@ -675,7 +675,7 @@ Stop rules:
 - ошибка была только одна, strict selector;
 - HTML действительно самый большой browser output contributor;
 - inter-command idle действительно доминирует над browser command duration;
-- auth дважды проверял `/account/` по разным причинам: первый probe доказал отсутствие Brandshop session, а финальная account-state проверка после SberId подтвердила успешный login markers;
+- в исходном trace auth дважды проверял `/account/`, но это поведение признано лишним и заменено проверкой текущей/entry страницы по сильным markers;
 - итоговый orderId найден на `yoomoney.ru`, что соответствует текущему Brandshop verifier.
 
 Где данных не хватает:
@@ -689,12 +689,12 @@ Stop rules:
 
 ## Итоговая рекомендация
 
-Для простого запроса вроде `купи светлые кроссовки Jordan Air High 45 EU` текущему generic-agent не нужен жесткий purchase script, но ему нужен более короткий Brandshop playbook и более строгий evidence budget.
+Для простого запроса вроде `купи светлые кроссовки Jordan Air High 45 EU` текущему generic-agent не нужен жесткий purchase script, но ему нужен более короткий Brandshop instruction и более строгий evidence budget.
 
 Оптимальная следующая итерация:
 
 1. Оставить generic-agent владельцем покупки.
-2. В Brandshop playbook разрешить direct search URL и milestone checks.
+2. В Brandshop instruction разрешить direct search URL и milestone checks.
 3. В CDP tool добавить `wait-url`, `wait-selector` и command correlation.
 4. В prompt убрать mechanical verify-after-every-action и заменить на success criteria + stop rules.
 5. В runner сохранить failed structured outputs и записывать retry diagnostics.

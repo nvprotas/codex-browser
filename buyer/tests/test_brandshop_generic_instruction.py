@@ -27,19 +27,19 @@ def _brandshop_prompt() -> str:
     )
 
 
-class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
-    def test_prompt_points_to_brandshop_playbook_without_embedding_it(self) -> None:
+class BrandshopGenericInstructionPromptTests(unittest.TestCase):
+    def test_prompt_points_to_instruction_directory_without_embedding_brandshop_details(self) -> None:
         prompt = _brandshop_prompt()
 
-        self.assertIn('/workspace/docs/buyer-agent/playbooks/brandshop.md', prompt)
+        self.assertIn('/workspace/docs/buyer-agent/instructions', prompt)
         self.assertIn('Jordan Air High 45 EU', prompt)
         self.assertIn('Не выполняй реальный платеж', prompt)
         self.assertNotIn('brandshop_yoomoney_sberpay_redirect', prompt)
         self.assertNotIn('Искать в каталоге', prompt)
         self.assertNotIn('header search button', prompt)
 
-    def test_brandshop_playbook_contains_generic_runtime_requirements(self) -> None:
-        playbook = Path('docs/buyer-agent/playbooks/brandshop.md').read_text(encoding='utf-8')
+    def test_brandshop_instruction_contains_generic_runtime_requirements(self) -> None:
+        instruction = Path('docs/buyer-agent/instructions/brandshop.md').read_text(encoding='utf-8')
 
         expected_fragments = [
             'https://brandshop.ru/',
@@ -70,7 +70,7 @@ class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
         ]
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, playbook)
+                self.assertIn(fragment, instruction)
 
     def test_prompt_does_not_hardcode_brandshop_example_as_runtime_defaults(self) -> None:
         prompt = build_agent_prompt(
@@ -88,15 +88,15 @@ class BrandshopGenericPlaybookPromptTests(unittest.TestCase):
             },
             latest_user_reply=None,
         )
-        playbook = Path('docs/buyer-agent/playbooks/brandshop.md').read_text(encoding='utf-8')
+        instruction = Path('docs/buyer-agent/instructions/brandshop.md').read_text(encoding='utf-8')
 
         self.assertNotIn('Jordan Air High', prompt)
         self.assertNotIn('45 EU', prompt)
         self.assertNotIn('светлые', prompt)
         self.assertIn('Stussy', prompt)
-        self.assertIn('product identity', playbook)
-        self.assertIn('Размер из текущей задачи', playbook)
-        self.assertIn('Цветовое предпочтение из текущей задачи', playbook)
+        self.assertIn('product identity', instruction)
+        self.assertIn('Размер из текущей задачи', instruction)
+        self.assertIn('Цветовое предпочтение из текущей задачи', instruction)
 
 
 class _SnapshotElement:

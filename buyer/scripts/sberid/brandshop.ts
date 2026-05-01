@@ -72,17 +72,6 @@ function isSberIdHost(host: string): boolean {
   return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
 }
 
-function authVerificationUrl(startUrl: string): string {
-  const url = new URL(startUrl);
-  if (isSameOrSubdomain(normalizeHost(url.hostname), BRANDSHOP_DOMAIN)) {
-    url.hostname = BRANDSHOP_DOMAIN;
-  }
-  url.pathname = '/account/';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-}
-
 export function verifyBrandshopAuthSnapshot(
   rawUrl: string,
   bodyText: string | null | undefined,
@@ -267,36 +256,44 @@ async function verifyAuthPage(page: Page, tracePath: string, event: string): Pro
   return verification;
 }
 
-async function verifyCurrentOrAccountPage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
-  let verification = await verifyAuthPage(page, tracePath, 'auth_verify_current');
+async function verifyAuthPageWithSettling(
+  page: Page,
+  tracePath: string,
+  event: string,
+  settleTimeoutMs: number,
+): Promise<AuthVerification> {
+  const deadline = Date.now() + settleTimeoutMs;
+  let verification = await verifyAuthPage(page, tracePath, event);
+  while (!verification.verified && Date.now() < deadline) {
+    await page.waitForTimeout(500);
+    verification = await verifyAuthPage(page, tracePath, event);
+  }
+  return verification;
+}
+
+async function verifyCurrentOrEntryPage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
+  let verification = await verifyAuthPageWithSettling(page, tracePath, 'auth_verify_current', 2500);
   if (verification.verified) {
+    return verification;
+  }
+
+  const targetHost = hostFromUrl(startUrl);
+  const expectedHost = isSameOrSubdomain(targetHost, BRANDSHOP_DOMAIN) ? BRANDSHOP_DOMAIN : targetHost;
+  const currentHost = hostFromUrl(page.url());
+  if (isSameOrSubdomain(currentHost, expectedHost)) {
     return verification;
   }
 
   await tracedGoto(
     page,
     tracePath,
-    'auth_verify_account',
-    authVerificationUrl(startUrl),
+    'auth_verify_entry',
+    authEntryUrl(startUrl),
     { waitUntil: 'domcontentloaded', timeout: 12000 },
     true,
   );
   await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
-  verification = await verifyAuthPage(page, tracePath, 'auth_verify_account');
-  if (verification.verified) {
-    return verification;
-  }
-
-  await tracedGoto(
-    page,
-    tracePath,
-    'auth_verify_start_url',
-    startUrl,
-    { waitUntil: 'domcontentloaded', timeout: 12000 },
-    true,
-  );
-  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
-  return verifyAuthPage(page, tracePath, 'auth_verify_start_url');
+  return verifyAuthPageWithSettling(page, tracePath, 'auth_verify_entry', 2500);
 }
 
 async function clickFirstVisible(
@@ -562,7 +559,7 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
-    const existingAuth = await verifyCurrentOrAccountPage(page, startUrl, tracePath);
+    const existingAuth = await verifyCurrentOrEntryPage(page, startUrl, tracePath);
     if (existingAuth.verified) {
       const currentUrl = page.url();
       const currentHost = hostFromUrl(currentUrl);
@@ -762,7 +759,7 @@ async function main(): Promise<void> {
       finalHost = hostFromUrl(finalUrl);
 
       if (isSameOrSubdomain(finalHost, expectedHost) && (sberLoops > 0 || finalUrl !== entryUrl)) {
-        const verification = await verifyCurrentOrAccountPage(authPage, startUrl, tracePath);
+        const verification = await verifyCurrentOrEntryPage(authPage, startUrl, tracePath);
         finalUrl = authPage.url();
         finalHost = hostFromUrl(finalUrl);
         lastAuthVerification = verification;
