@@ -484,8 +484,9 @@ Registry:
 Выход:
 
 - `AuthScriptResult(status, reason_code, message, artifacts)`;
-- trace/output files в `BUYER_TRACE_DIR/<session_id>/`: runner удаляет legacy stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` перед запуском и передает скрипту уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
+- trace/output files в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`: runner переиспользует существующую dated session trace-директорию либо создает ее до generic-agent шага; legacy stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` удаляются и из dated session dir, и из старого flat `BUYER_TRACE_DIR/<session_id>/`, затем скрипту передается уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
 - входной Playwright `storageState` передается TypeScript-скрипту через временный файл вне workspace с правами `0600` и удаляется в `finally`, поэтому raw auth state не остается в `BUYER_TRACE_DIR`.
+- stderr auth-скрипта логируется runner-ом как `auth_script_stderr ...` в container logs; подробные успешные trace-события остаются только в JSONL-файлах.
 
 Reason codes:
 
@@ -544,6 +545,7 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 - общий TypeScript helper для диагностического trace вокруг auth-навигаций и закрытия Playwright pages/contexts/browser;
 - пишет события `auth_navigation_started`/`auth_navigation_finished` с `stage`, `from_url`, `to_url`, final URL/host, HTTP status, duration и ошибкой при сбое;
 - пишет события `auth_page_close_*`, `auth_context_close_*`, `auth_browser_close_*` с причиной закрытия, stage, page snapshots и результатом;
+- при ошибках навигации или закрытия дополнительно пишет компактную JSON-строку в stderr, чтобы runner вывел ее в логи контейнера `buyer`;
 - используется publish-скриптами Litres и Brandshop, чтобы отследить циклы вида “открылся `/account/`, затем страница/контекст закрылись”.
 
 `buyer/scripts/sberid/litres.ts`:

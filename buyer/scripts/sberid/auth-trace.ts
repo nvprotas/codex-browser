@@ -31,6 +31,10 @@ function compactError(error: unknown): string {
   return String(error).replace(/\s+/g, ' ').slice(0, 500);
 }
 
+function writeContainerError(event: string, details: Record<string, unknown>): void {
+  process.stderr.write(`${JSON.stringify({ event, ...details })}\n`);
+}
+
 function pageSnapshot(page: Page): Record<string, unknown> {
   if (page.isClosed()) {
     return { closed: true, url: null, host: null };
@@ -92,6 +96,7 @@ export async function tracedGoto(
     });
   } catch (error) {
     const finalUrl = page.url();
+    const errorText = compactError(error);
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'auth_navigation_finished',
@@ -105,8 +110,17 @@ export async function tracedGoto(
         final_url: finalUrl,
         final_host: hostFromUrl(finalUrl),
         elapsed_ms: Date.now() - startedAt,
-        error: compactError(error),
+        error: errorText,
       },
+    });
+    writeContainerError('auth_navigation_failed', {
+      stage,
+      from_url: fromUrl,
+      to_url: toUrl,
+      final_url: finalUrl,
+      final_host: hostFromUrl(finalUrl),
+      elapsed_ms: Date.now() - startedAt,
+      error: errorText,
     });
     if (!swallowErrors) {
       throw error;
@@ -141,6 +155,7 @@ export async function tracedPageClose(page: Page, tracePath: string, stage: stri
       },
     });
   } catch (error) {
+    const errorText = compactError(error);
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'auth_page_close_finished',
@@ -150,8 +165,15 @@ export async function tracedPageClose(page: Page, tracePath: string, stage: stri
         ok: false,
         elapsed_ms: Date.now() - startedAt,
         page_before_close: before,
-        error: compactError(error),
+        error: errorText,
       },
+    });
+    writeContainerError('auth_page_close_failed', {
+      stage,
+      reason,
+      elapsed_ms: Date.now() - startedAt,
+      page_before_close: before,
+      error: errorText,
     });
   }
 }
@@ -189,6 +211,7 @@ export async function tracedContextClose(
       },
     });
   } catch (error) {
+    const errorText = compactError(error);
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'auth_context_close_finished',
@@ -198,8 +221,15 @@ export async function tracedContextClose(
         ok: false,
         elapsed_ms: Date.now() - startedAt,
         pages_before_close: pagesBeforeClose,
-        error: compactError(error),
+        error: errorText,
       },
+    });
+    writeContainerError('auth_context_close_failed', {
+      stage,
+      reason,
+      elapsed_ms: Date.now() - startedAt,
+      page_count: pagesBeforeClose.length,
+      error: errorText,
     });
   }
 }
@@ -225,6 +255,7 @@ export async function tracedBrowserClose(browser: Browser, tracePath: string, st
       },
     });
   } catch (error) {
+    const errorText = compactError(error);
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'auth_browser_close_finished',
@@ -233,8 +264,14 @@ export async function tracedBrowserClose(browser: Browser, tracePath: string, st
         reason,
         ok: false,
         elapsed_ms: Date.now() - startedAt,
-        error: compactError(error),
+        error: errorText,
       },
+    });
+    writeContainerError('auth_browser_close_failed', {
+      stage,
+      reason,
+      elapsed_ms: Date.now() - startedAt,
+      error: errorText,
     });
   }
 }

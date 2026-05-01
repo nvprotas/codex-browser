@@ -225,6 +225,8 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 
 Файлы observability по шагам пишутся в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`; per-step context files лежат в поддиректории конкретного шага `step-XXX/`:
 
+- `auth-script-litres-trace.jsonl` / `auth-script-brandshop-trace.jsonl` — trace SberId auth-скрипта, включая auth-навигации и cleanup-закрытия page/context/browser.
+- `auth-script-result-attempt-XX-<uuid>.json` — JSON-результат конкретной попытки auth-скрипта.
 - `step-XXX-prompt.txt` — bootstrap prompt, с которым запущен `codex`: hard rules, task, CDP endpoint и manifest-ы файлов.
 - `step-XXX/task.json`, `step-XXX/metadata.json`, `step-XXX/memory.json`, `step-XXX/latest-user-reply.md`, `step-XXX/user-profile.md`, `step-XXX/auth-state.json` — dynamic context files текущего шага; `auth-state.json` содержит только sanitized summary.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
@@ -246,6 +248,8 @@ Post-session анализ не отправляет дополнительный
 ```bash
 docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
+
+Ошибки auth-навигаций и закрытий дополнительно попадают в логи контейнера как `auth_script_stderr ...`; полный успешный auth trace остается в JSONL-файлах внутри dated trace-директории.
 
 `micro-ui` также показывает live-поток `agent_stream_event` через общий SSE `/api/events/stream`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`. UI обновляется по callback-событиям от `buyer`; периодический polling для списка сессий и событий не используется.
 MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; compose публикует UI только на `127.0.0.1`, а удаленный доступ предполагает trusted контур через VPN/SSH tunnel/authenticated reverse proxy.
