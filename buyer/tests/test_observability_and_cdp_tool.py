@@ -281,6 +281,7 @@ class CdpToolOutputTests(unittest.TestCase):
             auth_context=None,
             user_profile_text='Предпочитает электронные книги',
             user_profile_truncated=False,
+            # TODO: привести fixture к реальному формату agent_memory: {'role': ..., 'text': ...}.
             memory=[{'role': 'user', 'content': 'Теперь можно нажать оплатить'}],
             latest_user_reply='Новые инструкции: выбери СБП вместо SberPay',
         )

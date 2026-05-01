@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 
+#TODO Почему не используем AGENTS.MD для этих инструкций? Это же не динамические данные, а именно инструкции для агента, которые не должны меняться от задачи к задаче. Вынести в AGENTS.MD и дать агенту возможность прочитать при необходимости, вместо постоянного включения в prompt. В prompt передавать только динамические данные: task, свежий ответ пользователя. docs: https://developers.openai.com/codex/guides/agents-md
 def build_agent_prompt(
     *,
     task: str,
@@ -18,6 +19,7 @@ def build_agent_prompt(
     memory: list[dict[str, str]],
     latest_user_reply: str | None,
 ) -> str:
+#TODO Memory тоже вынести в отдельный файл и дать агенту возможность его прочитать при необходимости, вместо постоянного включения в prompt. Это же не инструкции, а данные.
     memory_dump = json.dumps(memory[-12:], ensure_ascii=False, indent=2)
     metadata_dump = json.dumps(metadata, ensure_ascii=False, indent=2)
     auth_payload_dump = json.dumps(auth_payload, ensure_ascii=False, indent=2) if auth_payload is not None else 'null'
@@ -27,7 +29,7 @@ def build_agent_prompt(
         user_profile_truncated=user_profile_truncated,
     )
 
-    latest_reply_block = latest_user_reply or 'Нет новых ответов от пользователя на этом шаге.'
+    latest_reply_block = f"<latest_user_reply>\n{latest_user_reply}\n</latest_user_reply>" if latest_user_reply else ''
 
     return f"""
 # Роль и цель
@@ -51,6 +53,7 @@ def build_agent_prompt(
 - При `status=completed` для Brandshop верни `payment_evidence={{"source":"brandshop_yoomoney_sberpay_redirect","url":"<YooMoney contract URL>"}}`; url должен быть точным `https://yoomoney.ru/checkout/payments/v2/contract?orderId=...`, из которого взят `order_id`.
 - В `profile_updates` нельзя включать auth, storageState, cookies, платежные данные и одноразовые детали текущего заказа.
 
+#TODO Вынести в отдельный MD файл и дать возможность агенту его прочитать при необхохдимости, вместо постоянного включения в prompt.
 # Brandshop generic playbook
 
 - Brandshop auth script возвращает браузер на `https://brandshop.ru/`; сначала проверь текущую страницу и работай от главной страницы, а не от hardcoded SKU.
@@ -130,6 +133,7 @@ def build_agent_prompt(
 {metadata_dump}
 </metadata_json>
 
+#TODO Зачем агенту вообще что-то знать про auth payload/context? Это же не должно влиять на его выбор товара, адреса, варианта доставки или пути к SberPay.
 <auth_payload_json>
 {auth_payload_dump}
 </auth_payload_json>
@@ -138,6 +142,7 @@ def build_agent_prompt(
 {auth_context_dump}
 </auth_context_json>
 
+#TODO Зачем это в промпте? CDP должен быть всегда доступным
 <cdp_preflight>
 {json.dumps(cdp_preflight_summary, ensure_ascii=False)}
 </cdp_preflight>
@@ -166,6 +171,7 @@ def build_agent_prompt(
 """.strip()
 
 
+#TODO Опять же: это должен быть отдельный файл, который агент может прочитать при необходимости, а не постоянный блок в промпте.
 def _build_user_profile_block(*, user_profile_text: str | None, user_profile_truncated: bool) -> str:
     if not user_profile_text:
         return '<user_profile_md>\nПостоянный профиль пользователя пока не задан.\n</user_profile_md>'
