@@ -4,9 +4,9 @@
 
 - Дата: 2026-05-02.
 - Назначение: исследовательский и архитектурный отчет о том, как превратить текущий `buyer` из агента с post-run рекомендациями в self-improving/self-evolving систему с контролируемым циклом изменений.
-- Граница: документ не меняет runtime-поведение. Все предложения ниже требуют отдельной реализации, eval-gate и review.
+- Граница: документ не меняет runtime-поведение. Все предложения ниже требуют отдельной реализации и review перед merge/activation, но не требуют review перед созданием proposal branch.
 - Важное ограничение: LLM рассматривается как неизменяемая foundation model. В этом плане нет дообучения, LoRA, RLHF/RLAIF, persistent weight updates или обучения отдельной memory model. Менять можно только обвязку вокруг LLM: prompts, demonstrations, external memory, site profiles, playbooks, scripts, tool policy, eval cases, model routing и код orchestration/eval.
-- Ключевое решение: self-evolution для `buyer` должен быть не автономным self-modifying runtime, а управляемым контуром `capture -> evaluate -> diagnose -> propose -> validate -> approve -> activate -> monitor`.
+- Ключевое решение: self-evolution для `buyer` должен быть не автономным self-modifying runtime, а быстрым branch-producing контуром `capture -> evaluate -> diagnose -> propose -> create_patch_branch -> validate -> human_review -> merge/activate -> monitor`.
 
 ## Executive Summary
 
@@ -15,9 +15,9 @@
 - `buyer` после завершения сессии запускает `PostSessionKnowledgeAnalyzer` и пишет `knowledge-analysis.json` с draft knowledge, pitfalls и playbook candidate.
 - `eval_service` запускает batch eval cases, собирает trace, строит redacted `judge-input.json`, запускает LLM Judge и пишет `evaluation.json` с checks и draft recommendations.
 
-Пробел: результаты анализа и judge-рекомендации остаются файловыми артефактами. Они не превращаются в единый lifecycle кандидатов, не проходят review/activation, не валидируются на regression suite и не подмешиваются в следующий runtime-прогон.
+Пробел: результаты анализа и judge-рекомендации остаются файловыми артефактами. Они не превращаются в единый lifecycle кандидатов, не материализуются в реальные diff/commit/branch, не проходят review/activation, не валидируются на regression suite и не подмешиваются в следующий runtime-прогон.
 
-Минимально правильный следующий шаг: добавить центральный `candidate store` и `activation layer`, который индексирует `knowledge-analysis.json` и `evaluation.json`, хранит кандидатов в статусах `draft/reviewed/active/rejected/archived`, связывает их с evidence refs и позволяет `AgentRunner` читать только approved/active domain knowledge при сборке prompt.
+Минимально правильный следующий шаг: добавить центральный `candidate store`, `patch branch generator` и `activation layer`. Они индексируют `knowledge-analysis.json` и `evaluation.json`, но не оставляют patchable candidates пассивными: каждый patchable candidate сразу материализуется в отдельную git-ветку с concrete code/prompt diff и commit. Validation и human review идут уже по готовому diff. `AgentRunner` читает только merged/active domain knowledge при сборке prompt.
 
 ## Текущее состояние в коде
 
@@ -32,7 +32,7 @@
 ### Eval Service
 
 - `eval_service/app/orchestrator.py`: последовательный запуск eval cases через обычный API `buyer`.
-- `eval_service/app/api.py`: endpoints для runs, judge и dashboard. После judge результат сохраняется в `evaluation.json`, но recommendations не превращаются в отдельные review candidates.
+- `eval_service/app/api.py`: endpoints для runs, judge и dashboard. После judge результат сохраняется в `evaluation.json`, но recommendations не превращаются в отдельные branch candidates.
 - `eval_service/app/judge_runner.py`: запускает judge через `codex exec --output-schema`.
 - `eval_service/app/judge_prompt.py`: prompt LLM Judge. Уже требует evidence refs и draft recommendations.
 - `eval_service/app/trace_collector.py`: собирает trace summary по эвристическим паттернам файлов.
@@ -41,7 +41,7 @@
 ### Документация и существующие решения
 
 - `docs/buyer.md`: фиксирует post-session knowledge analysis и запрет автоприменения draft knowledge.
-- `docs/architecture-decisions.md`: фиксирует eval loop как learning loop, а не release gate, и запрещает автоприменение judge recommendations.
+- `docs/architecture-decisions.md`: фиксирует eval loop как learning loop, а не release gate, и запрещает автоприменение judge recommendations без merge/activation.
 - `docs/buyer-roadmap.md`: уже содержит будущие задачи review/activation flow, lifecycle script/playbook candidates, site profiles, strategy ranking и artifact manifest.
 
 ## Главный архитектурный разрыв
@@ -58,9 +58,10 @@
 1. Нормализовать все предложения улучшений в единую модель кандидата.
 2. Привязывать кандидата к версии prompt/script/tool-policy, домену, eval-case и evidence refs.
 3. Сравнивать кандидата с baseline на replay/eval suite.
-4. Утверждать/отклонять кандидата через UI/API.
-5. Активировать только безопасные approved знания в runtime prompt.
-6. Откатывать active candidate при регрессии.
+4. Материализовать кандидата в отдельную ветку от текущей базы с одним reviewable commit.
+5. Утверждать/отклонять branch candidate через UI/API/PR.
+6. Активировать только merged/approved знания в runtime prompt.
+7. Откатывать active candidate при регрессии.
 
 Пока этого слоя нет, `buyer` не self-improving, а только self-reporting.
 
@@ -101,9 +102,11 @@ buyer session
   -> immutable run bundle
   -> eval_service judge + deterministic checks
   -> diagnosis
-  -> patch/knowledge/script candidate
-  -> validation on replay + eval suite
-  -> human approval
+  -> patchable candidate
+  -> immediate new git branch from current base
+  -> immediate concrete code/prompt/script/eval diff + commit
+  -> fast validation on the branch
+  -> human review
   -> activation in versioned registry
   -> runtime consumption by AgentRunner/prompt/script registry
   -> monitoring and drift alerts
@@ -157,9 +160,12 @@ Eval должен быть смесью deterministic checks и LLM Judge:
   "scope": {"host": "litres.ru", "eval_case_id": "litres_book_odyssey_001"},
   "priority": "low|medium|high",
   "risk": "low|medium|high|critical",
-  "status": "draft|reviewed|active|rejected|archived",
+  "status": "draft|branch_created|validation_failed|ready_for_review|merged_active|rejected|archived",
   "rationale": "...",
   "evidence_refs": [],
+  "base_ref": "origin/master",
+  "branch_name": "evolve/<candidate_id>-<slug>",
+  "commit_sha": null,
   "draft_diff": "...",
   "expected_metric_effect": {"success_rate": "+", "duration_ms": "-", "safety": "no_regression"},
   "required_validation": ["unit", "eval_suite", "payment_boundary", "human_review"]
@@ -168,20 +174,32 @@ Eval должен быть смесью deterministic checks и LLM Judge:
 
 `EvolutionCandidate` не должен описывать изменение весов LLM. Если judge или analyzer предлагает "дообучить модель", такое предложение нормализуется в одну из допустимых поверхностей: prompt patch, few-shot demonstration, external memory, evaluator rubric, script/playbook candidate или workflow/tool-policy patch.
 
-### 5. Validate
+### 5. Create Patch Branch
 
-Candidate нельзя активировать без validation report:
+Главное изменение процесса: candidate не должен останавливаться на текстовой рекомендации или ждать отдельной команды. Для скорости эволюции orchestrator сразу создает concrete patch branch автоматически:
 
-- unit tests на измененный модуль;
-- eval cases на затронутом host;
-- cross-host regression suite;
-- replay/sandbox для script candidates;
-- static safety checks на prompt/script;
+- один candidate = одна branch = один основной commit;
+- branch создается от текущей выбранной базы, обычно `origin/master` или текущей release branch;
+- branch name должен быть детерминированным: `evolve/<candidate_id>-<target_surface>-<host-or-scope>`;
+- patch worker вносит реальные изменения в код, prompt, md, eval case, script или registry;
+- commit message содержит candidate id, source run/eval и target surface;
+- branch push выполняется сразу после локальной sanity-проверки;
+- human review смотрит уже готовый diff, а не абстрактную рекомендацию.
+
+Review и полная validation до создания branch не нужны. Единственные причины не создать branch сразу: candidate не имеет patchable target, patch worker не смог построить синтаксически валидный diff, либо найден path/redaction blocker. Review нужен перед merge, activation и попаданием изменения в runtime.
+
+### 6. Validate
+
+Candidate branch создается до полной validation, но нельзя merge/activate без validation report:
+
+- branch creation gate: schema check, path safety, redaction check и syntactic diff sanity;
+- ready-for-review gate: unit tests на измененный модуль, eval cases на затронутом host, replay/sandbox для script candidates;
+- merge/activation gate: cross-host regression suite или явный human override с зафиксированным risk acceptance;
 - comparison с baseline: success, `not_ok`, duration, tokens, handoff rate, retry count, payment boundary violations.
 
-### 6. Approve
+### 7. Human Review
 
-Human approval обязателен для:
+Human review обязателен для merge/activation, но не для генерации branch. Особенно внимательно review проверяет:
 
 - любого изменения payment boundary, SberPay verifier, checkout policy;
 - любого script candidate, который может кликать checkout/payment UI;
@@ -189,7 +207,7 @@ Human approval обязателен для:
 - изменения auth/handoff/CAPTCHA поведения;
 - изменения prompts, которое ослабляет safety invariant.
 
-### 7. Activate
+### 8. Activate
 
 Runtime должен читать только active candidates:
 
@@ -204,16 +222,20 @@ Runtime должен читать только active candidates:
 
 - Создать `eval_service/app/evolution_candidates.py`.
 - Создать `eval_service/tests/test_evolution_candidates.py`.
+- Создать `eval_service/app/evolution_brancher.py`, который из candidate запускает patch worker, создает branch, делает commit и сохраняет branch metadata.
 - Добавить filesystem layout:
   - `eval/runs/<eval_run_id>/candidates/<candidate_id>.json`;
+  - `eval/runs/<eval_run_id>/branches/<candidate_id>.json`;
   - `eval/candidates/index.json` или отдельный catalog по мере роста.
 - В `eval_service/app/api.py` после `_persist_judge_result` извлекать `evaluation.recommendations` и сохранять их как candidates.
 - Добавить endpoints:
   - `GET /candidates`;
   - `GET /candidates/{candidate_id}`;
+  - `POST /candidates/{candidate_id}/create-branch`;
   - `POST /candidates/{candidate_id}/review`;
   - `POST /candidates/{candidate_id}/activate`;
   - `POST /candidates/{candidate_id}/reject`.
+- После judge orchestrator сразу вызывает `create-branch` для каждого patchable candidate независимо от risk. Risk влияет на validation/review/merge policy, но не задерживает создание proposal branch. Если branch не создана, candidate обязан хранить machine-readable причину: `not_patchable`, `patch_failed`, `path_safety_blocked` или `redaction_blocked`.
 
 ### Knowledge Analysis
 
@@ -227,14 +249,14 @@ Runtime должен читать только active candidates:
 
 ### Runtime Consumption
 
-- Создать `buyer/app/site_knowledge.py` для чтения approved/active domain knowledge.
+- Создать `buyer/app/site_knowledge.py` для чтения merged/active domain knowledge.
 - В `buyer/app/settings.py` добавить путь к active knowledge registry, например `BUYER_ACTIVE_KNOWLEDGE_DIR`.
 - В `buyer/app/runner.py` перед `build_agent_prompt()` загрузить active exact-domain knowledge.
 - В `buyer/app/prompt_builder.py` добавить блоки:
   - `<active_site_profile_json>`;
   - `<active_playbook_json>`;
   - `<active_reasoning_memories_json>`.
-- В prompt явно указать, что эти блоки являются reviewed data, но не могут отменять hard invariants.
+- В prompt явно указать, что эти блоки являются merged/active data, но не могут отменять hard invariants.
 
 ### Script/Skill Evolution
 
@@ -269,11 +291,12 @@ Runtime должен читать только active candidates:
 ### UI
 
 - В `micro-ui/app/static/eval.js` добавить раздел candidates рядом с evaluations:
-  - список draft/reviewed/active/rejected;
+  - список `draft/branch_created/validation_failed/ready_for_review/merged_active/rejected`;
   - evidence refs;
+  - branch name, commit SHA, link на PR/new-branch;
   - rendered diff/draft text;
   - validation status;
-  - approve/reject/activate controls.
+  - create branch/reject/mark ready/activate controls.
 - В `micro-ui/app/static/eval.css` добавить компактные states для candidate risk/status.
 
 ## Рекомендованная очередность внедрения
@@ -281,23 +304,27 @@ Runtime должен читать только active candidates:
 ### Phase 0: Guardrails и contracts
 
 1. Зафиксировать `EvolutionCandidate` JSON schema.
-2. Зафиксировать status lifecycle.
-3. Зафиксировать approval policy.
+2. Зафиксировать status lifecycle с обязательным `branch_created`.
+3. Зафиксировать branch policy: один candidate, одна branch, один основной commit.
 4. Добавить tests на path safety, redaction и evidence refs.
 
-### Phase 1: Candidate ingestion
+### Phase 1: Candidate ingestion и branch generation
 
 1. Сохранять eval recommendations как candidates.
 2. Индексировать `knowledge-analysis.json` как candidates.
 3. Добавить API списка и просмотра candidates.
-4. Добавить UI read-only.
+4. Добавить `create-branch` API и локальный brancher.
+5. Автоматически вызывать brancher сразу после candidate ingestion.
+6. Генерировать concrete patch branch для всех patchable prompt/md/eval/tool-policy candidates.
+7. Добавить UI read-only с branch metadata.
 
-### Phase 2: Review/activation
+### Phase 2: Review/validation/activation
 
-1. Добавить approve/reject/activate API.
-2. Добавить active registry.
-3. Добавить audit trail: кто, когда, почему активировал.
-4. Добавить rollback состояния active candidate.
+1. Добавить validation report API для branch candidates.
+2. Добавить reject/mark-ready/activate API.
+3. Добавить active registry.
+4. Добавить audit trail: кто, когда, почему merge/activate.
+5. Добавить rollback состояния active candidate.
 
 ### Phase 3: Runtime use
 
@@ -310,15 +337,17 @@ Runtime должен читать только active candidates:
 
 1. Сделать offline GEPA-like runner: input evaluations + traces, output prompt candidate diff.
 2. Использовать Pareto selection: success/safety/duration/tokens.
-3. Прогонять candidate prompt на eval suite.
-4. Активировать только через human approval.
+3. Автоматически создавать branch с prompt diff на каждого отобранного candidate.
+4. Прогонять candidate prompt на eval suite.
+5. Merge/activation только через human review.
 
 ### Phase 5: Script/skill evolution
 
 1. Ввести script registry manifest.
 2. Генерировать SkillWeaver-style skills с pre/postconditions.
 3. Запускать AlphaEvolve-style mutations только в sandbox.
-4. Публиковать scripts через lifecycle `draft -> review -> published`.
+4. Создавать branch с script candidate и verifier.
+5. Публиковать scripts через lifecycle `branch_created -> ready_for_review -> published`.
 
 ### Phase 6: Workflow evolution и research
 
@@ -338,7 +367,15 @@ Runtime должен читать только active candidates:
 - eval case: новый regression case из провала или drift signal;
 - tool policy patch: изменение CDP tool guidance, timeout, retry или observation strategy.
 
-Каждый кандидат должен иметь:
+Каждый patchable candidate должен быть немедленно доведен до branch artifact:
+
+- branch от текущей базы;
+- один основной commit с реальным diff;
+- validation report, даже если validation пока failed;
+- ссылку на source run/eval и evidence refs.
+- Если branch не создана, candidate хранит конкретный blocker и не считается завершенным результатом evolution loop.
+
+Каждый candidate/branch должен иметь:
 
 - evidence refs;
 - expected effect;
@@ -359,7 +396,7 @@ Runtime должен читать только active candidates:
 - wildcard site profiles без exact domain scope;
 - prompt patches, которые меняют приоритет hard invariants.
 
-Можно автоматически создавать как draft:
+Можно автоматически создавать branch, но не merge/activate:
 
 - negative knowledge;
 - eval case candidates;
@@ -368,12 +405,15 @@ Runtime должен читать только active candidates:
 - readonly selector hypotheses;
 - script skeletons без publication.
 
+Если branch затрагивает payment boundary, auth, CAPTCHA, checkout safety или SberPay verifier, он получает `critical` risk и требует явного human review перед merge.
+
 ## Метрики готовности
 
 `buyer` можно считать self-improving на первом уровне, когда:
 
 - 100% judge recommendations сохраняются как candidates или явно отбрасываются с причиной.
-- Есть UI/API review для candidates.
+- 100% patchable candidates автоматически материализуются в branch с commit в течение одного orchestrator цикла.
+- Есть UI/API review для branch candidates.
 - Active domain knowledge используется в следующем prompt и имеет version/provenance.
 - Любой active candidate имеет validation report.
 - Regression dashboard показывает влияние active candidates.
@@ -391,10 +431,11 @@ Runtime должен читать только active candidates:
 Начинать нужно не с обучения весов и не с автономного self-modifying agent. Самый короткий и безопасный путь для текущего кода:
 
 1. Единый `EvolutionCandidate` store.
-2. Review/activation API и UI.
-3. Runtime consumption только approved exact-domain knowledge.
-4. GEPA-like prompt candidate generator поверх `eval_service`.
-5. SkillWeaver/AlphaEvolve-style script candidate generator в sandbox.
-6. Regression/drift dashboard по версиям active candidates.
+2. Branch generator: один candidate -> одна branch -> один основной commit.
+3. Review/activation API и UI.
+4. Runtime consumption только merged/active exact-domain knowledge.
+5. GEPA-like prompt candidate generator поверх `eval_service`.
+6. SkillWeaver/AlphaEvolve-style script candidate generator в sandbox.
+7. Regression/drift dashboard по версиям active candidates.
 
 Такой порядок использует уже реализованные trace, judge и knowledge-analysis механизмы, но добавляет отсутствующее звено: контролируемую эволюцию самого агента через версионируемые изменения кода, промптов, playbook и скриптов.
