@@ -4,9 +4,10 @@
 
 - Дата: 2026-05-02.
 - Назначение: исследовательский и архитектурный отчет о том, как превратить текущий `buyer` из агента с post-run рекомендациями в self-improving/self-evolving систему с контролируемым циклом изменений.
-- Граница: документ не меняет runtime-поведение. Все предложения ниже требуют отдельной реализации и review перед merge/activation, но не требуют review перед созданием proposal branch.
+- Текущий режим проекта: research/experiments, production-контур отсутствует. Поэтому автономный loop может агрессивно менять экспериментальные ветки, перезапускать `buyer`-кандидатов и продвигать experimental champion без предварительного human gate.
+- Граница: документ не меняет runtime-поведение. Все предложения ниже требуют отдельной реализации. Human review нужен перед переносом в `master` или долгоживущую shared baseline, но не перед созданием proposal branch, запуском candidate container или продвижением research champion.
 - Важное ограничение: LLM рассматривается как неизменяемая foundation model. В этом плане нет дообучения, LoRA, RLHF/RLAIF, persistent weight updates или обучения отдельной memory model. Менять можно только обвязку вокруг LLM: prompts, demonstrations, external memory, site profiles, playbooks, scripts, tool policy, eval cases, model routing и код orchestration/eval.
-- Ключевое решение: self-evolution для `buyer` должен быть не автономным self-modifying runtime, а быстрым branch-producing контуром `capture -> evaluate -> diagnose -> propose -> create_patch_branch -> validate -> human_review -> merge/activate -> monitor`.
+- Ключевое решение: self-evolution для `buyer` должен быть не self-modifying внутри процесса покупки, а автономным research-lab контуром в отдельном контейнере: `capture -> evaluate -> diagnose -> create_patch_branch -> restart_candidate_buyer -> validate -> promote_champion -> next_generation`.
 
 ## Executive Summary
 
@@ -17,7 +18,7 @@
 
 Пробел: результаты анализа и judge-рекомендации остаются файловыми артефактами. Они не превращаются в единый lifecycle кандидатов, не материализуются в реальные diff/commit/branch, не проходят review/activation, не валидируются на regression suite и не подмешиваются в следующий runtime-прогон.
 
-Минимально правильный следующий шаг: добавить центральный `candidate store`, `patch branch generator` и `activation layer`. Они индексируют `knowledge-analysis.json` и `evaluation.json`, но не оставляют patchable candidates пассивными: каждый patchable candidate сразу материализуется в отдельную git-ветку с concrete code/prompt diff и commit. Validation и human review идут уже по готовому diff. `AgentRunner` читает только merged/active domain knowledge при сборке prompt.
+Минимально правильный следующий шаг: добавить отдельный `evolution_orchestrator` container, центральный `candidate store`, `patch branch generator`, candidate buyer runner и champion selector. Они индексируют `knowledge-analysis.json` и `evaluation.json`, но не оставляют patchable candidates пассивными: каждый patchable candidate сразу материализуется в отдельную git-ветку с concrete code/prompt diff и commit, затем запускается как отдельный `buyer`-кандидат в eval/sandbox. Human review идет уже по готовому diff и validation report; research champion может двигаться автономно.
 
 ## Текущее состояние в коде
 
@@ -65,6 +66,122 @@
 
 Пока этого слоя нет, `buyer` не self-improving, а только self-reporting.
 
+## Research-only autonomous lab
+
+Так как production сейчас нет, целевой режим должен быть агрессивнее классического review-before-activation. Нужен отдельный `evolution_orchestrator` container, который работает как лабораторный контроллер и может сам ломать, чинить, пересобирать и сравнивать экспериментальные версии `buyer`.
+
+```text
+evolution_orchestrator
+  -> берет текущий champion как baseline
+  -> запускает baseline eval
+  -> выбирает failures/slow/fragile trajectories
+  -> генерирует N patchable candidates
+  -> для каждого candidate создает branch/worktree/commit
+  -> поднимает buyer-eval-candidate-<candidate_id>
+  -> прогоняет targeted eval suite
+  -> сравнивает candidate с champion
+  -> продвигает лучший candidate в evolve/champion
+  -> пушит candidate branches, champion ref и validation reports
+  -> начинает следующий generation cycle
+```
+
+### Контейнерная граница
+
+`evolution_orchestrator` должен быть отдельным сервисом, а не частью `buyer`, потому что ему нужны права и поведение, опасные для агента покупки:
+
+- read/write доступ к repo checkout и отдельным git worktrees;
+- создание branch, commit, push;
+- управление только eval/sandbox buyer containers, например `buyer-eval-baseline` и `buyer-eval-candidate-*`;
+- read/write доступ к eval artifacts и trace bundles;
+- возможность пересобирать или перезапускать candidate `buyer`;
+- собственный lifecycle, logs и stop switch.
+
+`buyer` остается исполнителем shopping task. `evolution_orchestrator` становится агентом эволюции вокруг него.
+
+### Branch и champion policy
+
+В research-mode нужны два класса веток:
+
+- `evolve/cand-<cycle_id>-<n>-<slug>`: один candidate, один основной commit, один validation report.
+- `evolve/champion`: текущая лучшая экспериментальная линия, которую orchestrator может fast-forward или force-with-lease двигать автоматически после улучшения метрик.
+
+`master` остается человеческой интеграционной линией. Автономный loop может двигать `evolve/champion`, но перенос champion в `master` должен оставаться отдельным решением человека, пока не появится формальная auto-merge policy.
+
+### Candidate buyer lifecycle
+
+Для каждого candidate orchestrator должен запускать отдельный buyer instance:
+
+```text
+candidate branch/worktree
+  -> build or reuse image/layer
+  -> start buyer-eval-candidate-<candidate_id>
+  -> run eval_service targeted cases against candidate endpoint
+  -> collect traces/evaluation/validation report
+  -> stop candidate container
+```
+
+Baseline/champion и candidate должны проходить одинаковый eval set на сопоставимых настройках. Иначе selector будет выбирать шум, а не улучшение.
+
+### Оценка улучшения или ухудшения
+
+Autonomous loop обязан доказывать, что candidate лучше текущего champion, а не просто отличается от него. Для каждого candidate нужен `delta report`:
+
+```text
+candidate_score - champion_score = delta
+```
+
+Минимальная оценка должна включать:
+
+- `success_rate_delta`: изменение доли успешных eval cases;
+- `hard_safety_delta`: любые payment/auth/CAPTCHA violations;
+- `payment_boundary_ok_delta`: сохранение SberPay boundary и запрета final payment;
+- `task_correctness_delta`: товар, вариант, количество, доставка, payment evidence;
+- `duration_ms_delta`: время сценария;
+- `buyer_tokens_delta`: стоимость reasoning;
+- `steps_delta`: число browser/tool actions;
+- `handoff_rate_delta`: как часто потребовался handoff;
+- `repetition_rate_delta`: навигационные петли и повторные попытки;
+- `flake_rate_delta`: разброс результата на repeated runs.
+
+Selector должен применять порядок решений:
+
+1. Hard safety veto: candidate с новым safety violation не может стать champion.
+2. Correctness first: рост скорости/стоимости не компенсирует падение task correctness.
+3. Regression budget: candidate не должен ухудшать cross-host или unrelated cases сверх заданного порога.
+4. Statistical confidence: для flaky cases нужен повторный прогон, а не решение по одному seed.
+5. Pareto selection: если один candidate улучшает success, а другой снижает cost, оба могут остаться в archive, но champion выбирается по текущей objective function.
+
+Пример минимальной objective function для research-mode:
+
+```text
+score =
+  1000 * success_rate
+  + 300 * payment_boundary_ok_rate
+  - 5000 * hard_safety_violation_rate
+  - 0.001 * median_duration_ms
+  - 0.01 * median_buyer_tokens
+  - 50 * handoff_rate
+  - 25 * repetition_rate
+```
+
+Promote rule:
+
+- promote candidate в `evolve/champion`, если `hard_safety_violation_rate == 0`, `success_rate_delta >= 0`, нет critical regression и `score_delta >= threshold`;
+- если candidate улучшает одну метрику, но ухудшает другую, сохранить branch как Pareto candidate, но не двигать champion без явной objective-policy;
+- если новый champion на следующем generation показывает regression против предыдущего champion, orchestrator должен сделать demotion/rollback на последний хороший champion ref.
+
+### Research-mode safety invariants
+
+Даже без production нельзя снимать hard safety:
+
+- не нажимать final payment/confirm;
+- не заменять SberPay на СБП/SBP/FPS;
+- не обходить CAPTCHA без handoff;
+- не сохранять auth secrets, cookies, `storageState`, tokens или одноразовые платежные данные в candidates/reports;
+- не менять веса foundation model;
+- не выполнять destructive git operations вне явно разрешенных worktrees/branches;
+- не давать orchestrator неограниченный Docker socket, если можно заменить его узким runner API или compose profile только для eval containers.
+
 ## Свежие подходы SotA на 2026-05-02
 
 ### Наиболее применимые сразу
@@ -105,10 +222,12 @@ buyer session
   -> patchable candidate
   -> immediate new git branch from current base
   -> immediate concrete code/prompt/script/eval diff + commit
-  -> fast validation on the branch
-  -> human review
-  -> activation in versioned registry
-  -> runtime consumption by AgentRunner/prompt/script registry
+  -> restart buyer-eval-candidate
+  -> targeted validation on candidate container
+  -> promote to evolve/champion if metrics improve
+  -> optional human review for master/shared baseline
+  -> activation in versioned research registry
+  -> runtime consumption by next generation
   -> monitoring and drift alerts
 ```
 
@@ -160,15 +279,15 @@ Eval должен быть смесью deterministic checks и LLM Judge:
   "scope": {"host": "litres.ru", "eval_case_id": "litres_book_odyssey_001"},
   "priority": "low|medium|high",
   "risk": "low|medium|high|critical",
-  "status": "draft|branch_created|validation_failed|ready_for_review|merged_active|rejected|archived",
+  "status": "draft|branch_created|candidate_running|validation_failed|champion_candidate|champion_active|ready_for_master_review|merged_active|rejected|archived",
   "rationale": "...",
   "evidence_refs": [],
-  "base_ref": "origin/master",
-  "branch_name": "evolve/<candidate_id>-<slug>",
+  "base_ref": "evolve/champion",
+  "branch_name": "evolve/cand-<cycle_id>-<n>-<slug>",
   "commit_sha": null,
   "draft_diff": "...",
   "expected_metric_effect": {"success_rate": "+", "duration_ms": "-", "safety": "no_regression"},
-  "required_validation": ["unit", "eval_suite", "payment_boundary", "human_review"]
+  "required_validation": ["unit", "targeted_eval_suite", "payment_boundary", "champion_selector"]
 }
 ```
 
@@ -179,27 +298,28 @@ Eval должен быть смесью deterministic checks и LLM Judge:
 Главное изменение процесса: candidate не должен останавливаться на текстовой рекомендации или ждать отдельной команды. Для скорости эволюции orchestrator сразу создает concrete patch branch автоматически:
 
 - один candidate = одна branch = один основной commit;
-- branch создается от текущей выбранной базы, обычно `origin/master` или текущей release branch;
-- branch name должен быть детерминированным: `evolve/<candidate_id>-<target_surface>-<host-or-scope>`;
+- branch создается от текущей выбранной базы, в research-mode обычно `evolve/champion`;
+- branch name должен быть детерминированным: `evolve/cand-<cycle_id>-<n>-<target_surface>-<host-or-scope>`;
 - patch worker вносит реальные изменения в код, prompt, md, eval case, script или registry;
 - commit message содержит candidate id, source run/eval и target surface;
 - branch push выполняется сразу после локальной sanity-проверки;
-- human review смотрит уже готовый diff, а не абстрактную рекомендацию.
+- candidate buyer запускается из этой branch/worktree;
+- человек при необходимости смотрит уже готовый diff, а не абстрактную рекомендацию.
 
-Review и полная validation до создания branch не нужны. Единственные причины не создать branch сразу: candidate не имеет patchable target, patch worker не смог построить синтаксически валидный diff, либо найден path/redaction blocker. Review нужен перед merge, activation и попаданием изменения в runtime.
+Review и полная validation до создания branch не нужны. Единственные причины не создать branch сразу: candidate не имеет patchable target, patch worker не смог построить синтаксически валидный diff, либо найден path/redaction blocker. Review нужен перед переносом в `master` или shared baseline, но не перед research champion promotion.
 
 ### 6. Validate
 
-Candidate branch создается до полной validation, но нельзя merge/activate без validation report:
+Candidate branch создается до полной validation. Для продвижения в research champion нужен validation/selector report, для переноса в `master` нужен human review:
 
 - branch creation gate: schema check, path safety, redaction check и syntactic diff sanity;
-- ready-for-review gate: unit tests на измененный модуль, eval cases на затронутом host, replay/sandbox для script candidates;
-- merge/activation gate: cross-host regression suite или явный human override с зафиксированным risk acceptance;
+- champion promotion gate: targeted eval cases на затронутом host, payment boundary checks, replay/sandbox для script candidates, отсутствие hard safety violations;
+- master/shared-baseline gate: cross-host regression suite или явный human override с зафиксированным risk acceptance;
 - comparison с baseline: success, `not_ok`, duration, tokens, handoff rate, retry count, payment boundary violations.
 
 ### 7. Human Review
 
-Human review обязателен для merge/activation, но не для генерации branch. Особенно внимательно review проверяет:
+Human review обязателен для переноса в `master` или долгоживущую shared baseline, но не для генерации branch, запуска candidate buyer или продвижения `evolve/champion`. Особенно внимательно review проверяет:
 
 - любого изменения payment boundary, SberPay verifier, checkout policy;
 - любого script candidate, который может кликать checkout/payment UI;
@@ -207,16 +327,45 @@ Human review обязателен для merge/activation, но не для ге
 - изменения auth/handoff/CAPTCHA поведения;
 - изменения prompts, которое ослабляет safety invariant.
 
-### 8. Activate
+### 8. Activate / Promote
 
-Runtime должен читать только active candidates:
+Research runtime может читать champion branch state. Shared runtime должен читать только active candidates:
 
-- `AgentRunner` получает active site profile/reasoning memories/playbook по exact host;
+- candidate/champion `AgentRunner` получает branch-local active site profile/reasoning memories/playbook по exact host;
+- shared `AgentRunner` получает только merged/active site profile/reasoning memories/playbook по exact host;
 - `prompt_builder` добавляет отдельные data-блоки, не как инструкции более высокого приоритета;
 - script registry выбирает только active/published scripts;
 - все active artifacts имеют version, provenance и rollback path.
 
 ## Конкретные изменения по файлам
+
+### Evolution Orchestrator Container
+
+- Создать новый сервис `evolution_orchestrator`.
+- Добавить `evolution_orchestrator/Dockerfile`.
+- Добавить compose profile или отдельный `docker-compose.evolution.yml` для запуска research loop.
+- Создать модули:
+  - `evolution_orchestrator/app/main.py`: цикл поколений, stop switch, планировщик.
+  - `evolution_orchestrator/app/settings.py`: пути к repo, eval artifacts, branch prefix, champion ref, limits.
+  - `evolution_orchestrator/app/git_worktree.py`: создание branch/worktree/commit/push, запрет destructive операций вне worktree.
+  - `evolution_orchestrator/app/candidate_runner.py`: build/restart/stop candidate `buyer`.
+  - `evolution_orchestrator/app/eval_runner.py`: запуск targeted eval suite против baseline и candidate endpoints.
+  - `evolution_orchestrator/app/champion_selector.py`: сравнение candidate с champion по success/safety/duration/tokens/handoff.
+  - `evolution_orchestrator/app/delta_report.py`: расчет улучшения/ухудшения, confidence и rollback recommendation.
+  - `evolution_orchestrator/app/reports.py`: запись validation report и generation summary.
+- Минимальные входы:
+  - path к repo checkout;
+  - path к eval runs/traces;
+  - champion ref, например `evolve/champion`;
+  - eval case selector;
+  - max candidates per generation.
+- Минимальные выходы:
+  - candidate branches;
+  - updated `evolve/champion`;
+  - delta reports;
+  - generation report;
+  - validation reports;
+  - pushed refs.
 
 ### Candidate Store
 
@@ -287,6 +436,13 @@ Runtime должен читать только active candidates:
   - `buyer_tokens_delta`;
   - `handoff_rate_delta`;
   - `loop_or_repetition_rate`.
+- В `evolution_orchestrator/app/delta_report.py` добавить сравнение champion vs candidate:
+  - одинаковый eval case set;
+  - repeated runs для flaky cases;
+  - confidence по success/cost/duration;
+  - safety veto;
+  - Pareto archive;
+  - rollback recommendation при regression.
 
 ### UI
 
@@ -301,14 +457,23 @@ Runtime должен читать только active candidates:
 
 ## Рекомендованная очередность внедрения
 
-### Phase 0: Guardrails и contracts
+### Phase 0: Research lab guardrails и contracts
 
 1. Зафиксировать `EvolutionCandidate` JSON schema.
 2. Зафиксировать status lifecycle с обязательным `branch_created`.
 3. Зафиксировать branch policy: один candidate, одна branch, один основной commit.
-4. Добавить tests на path safety, redaction и evidence refs.
+4. Зафиксировать champion policy: `evolve/champion` может двигаться автономно, `master` нет.
+5. Добавить tests на path safety, redaction и evidence refs.
 
-### Phase 1: Candidate ingestion и branch generation
+### Phase 1: Evolution orchestrator MVP
+
+1. Создать `evolution_orchestrator` container.
+2. Добавить git worktree/branch/commit/push wrapper.
+3. Добавить candidate buyer runner для restart/build/stop eval containers.
+4. Добавить baseline-vs-candidate eval runner.
+5. Добавить generation report.
+
+### Phase 2: Candidate ingestion и branch generation
 
 1. Сохранять eval recommendations как candidates.
 2. Индексировать `knowledge-analysis.json` как candidates.
@@ -318,7 +483,17 @@ Runtime должен читать только active candidates:
 6. Генерировать concrete patch branch для всех patchable prompt/md/eval/tool-policy candidates.
 7. Добавить UI read-only с branch metadata.
 
-### Phase 2: Review/validation/activation
+### Phase 3: Champion selection и autonomous generations
+
+1. Добавить selector по метрикам success/safety/duration/tokens/handoff.
+2. Добавить delta report: baseline/champion vs candidate.
+3. Добавить confidence threshold и repeated runs для flaky cases.
+4. Обновлять `evolve/champion` только при доказанном улучшении или явной objective-policy.
+5. Запускать следующий generation cycle от champion.
+6. Писать lineage: parent champion, candidate branches, selected champion, rejected candidates.
+7. Делать demotion/rollback, если новый champion регрессирует на следующем generation.
+
+### Phase 4: Review/validation/activation
 
 1. Добавить validation report API для branch candidates.
 2. Добавить reject/mark-ready/activate API.
@@ -326,22 +501,22 @@ Runtime должен читать только active candidates:
 4. Добавить audit trail: кто, когда, почему merge/activate.
 5. Добавить rollback состояния active candidate.
 
-### Phase 3: Runtime use
+### Phase 5: Runtime use
 
 1. Подключить active site profile/reasoning memories к prompt.
 2. Ограничить scope exact host и exact surface.
 3. Добавить тесты, что active knowledge не может отменить hard invariants.
 4. Добавить eval cases для проверки, что approved knowledge реально влияет на trajectory.
 
-### Phase 4: Prompt evolution
+### Phase 6: Prompt evolution
 
 1. Сделать offline GEPA-like runner: input evaluations + traces, output prompt candidate diff.
 2. Использовать Pareto selection: success/safety/duration/tokens.
 3. Автоматически создавать branch с prompt diff на каждого отобранного candidate.
 4. Прогонять candidate prompt на eval suite.
-5. Merge/activation только через human review.
+5. В research-mode автоматически продвигать лучший prompt candidate в `evolve/champion`.
 
-### Phase 5: Script/skill evolution
+### Phase 7: Script/skill evolution
 
 1. Ввести script registry manifest.
 2. Генерировать SkillWeaver-style skills с pre/postconditions.
@@ -349,7 +524,7 @@ Runtime должен читать только active candidates:
 4. Создавать branch с script candidate и verifier.
 5. Публиковать scripts через lifecycle `branch_created -> ready_for_review -> published`.
 
-### Phase 6: Workflow evolution и research
+### Phase 8: Workflow evolution и research
 
 1. Ввести workflow config population: `script_first`, `generic_first`, `handoff_early`, `recovery_heavy`, `cheap_model_first`.
 2. Применить EvoFlow-style selection по host/case tags.
@@ -386,7 +561,7 @@ Runtime должен читать только active candidates:
 
 ## Safety policy для self-evolution
 
-Нельзя автоматически активировать:
+Даже в research-mode нельзя автоматически активировать или продвигать в champion изменения, которые нарушают hard safety:
 
 - ослабление запрета реального платежа;
 - замену SberPay на СБП/SBP/FPS;
@@ -426,16 +601,28 @@ Runtime должен читать только active candidates:
 - Есть rollback и staged rollout.
 - Safety violations остаются нулевыми на regression suite.
 
+`buyer` можно считать автономно self-evolving в research-mode, когда:
+
+- `evolution_orchestrator` сам запускает generation cycles без ручного старта каждого шага.
+- Для каждого generation есть baseline/champion eval, candidate eval и selector report.
+- Для каждого candidate есть delta report: что улучшилось, что ухудшилось, confidence и promote/reject reason.
+- Candidate `buyer` поднимается, перезапускается и останавливается автоматически.
+- `evolve/champion` двигается автоматически только при улучшении metrics и нулевых hard safety violations.
+- Все candidate branches и champion moves пушатся с validation artifacts и lineage.
+
 ## Итоговая рекомендация
 
-Начинать нужно не с обучения весов и не с автономного self-modifying agent. Самый короткий и безопасный путь для текущего кода:
+Начинать нужно не с обучения весов и не с self-modifying внутри процесса `buyer`. С учетом того, что production нет, самый короткий путь для текущего кода:
 
-1. Единый `EvolutionCandidate` store.
-2. Branch generator: один candidate -> одна branch -> один основной commit.
-3. Review/activation API и UI.
-4. Runtime consumption только merged/active exact-domain knowledge.
-5. GEPA-like prompt candidate generator поверх `eval_service`.
-6. SkillWeaver/AlphaEvolve-style script candidate generator в sandbox.
-7. Regression/drift dashboard по версиям active candidates.
+1. Отдельный `evolution_orchestrator` container.
+2. Git worktree/branch/commit/push wrapper.
+3. Candidate buyer runner, который пересобирает и перезапускает `buyer` для eval.
+4. Единый `EvolutionCandidate` store.
+5. Branch generator: один candidate -> одна branch -> один основной commit.
+6. Champion selector и автономное движение `evolve/champion`.
+7. Delta report + confidence threshold + rollback/demotion policy.
+8. GEPA-like prompt candidate generator поверх `eval_service`.
+9. SkillWeaver/AlphaEvolve-style script candidate generator в sandbox.
+10. Regression/drift dashboard по версиям candidate/champion.
 
-Такой порядок использует уже реализованные trace, judge и knowledge-analysis механизмы, но добавляет отсутствующее звено: контролируемую эволюцию самого агента через версионируемые изменения кода, промптов, playbook и скриптов.
+Такой порядок использует уже реализованные trace, judge и knowledge-analysis механизмы, но добавляет отсутствующее звено: автономную исследовательскую лабораторию, которая сама создает и проверяет новые версии `buyer`, двигает экспериментального champion и оставляет человеку готовые ветки с diff, метриками и lineage.

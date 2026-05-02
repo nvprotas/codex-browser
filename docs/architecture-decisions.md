@@ -119,23 +119,29 @@
 ## Self-evolution, patch branches и review/activation
 
 - Статус решения: принято, дата фиксации — 2026-05-02.
-- Self-evolution для `buyer` строится как контролируемый offline/nearline контур, который сразу применяет patchable changes в proposal branches, но не меняет production-runtime без merge/activation.
+- Текущий режим проекта — research/experiments без production-контура. Поэтому self-evolution строится как автономная research lab, а не как production release gate.
+- Self-evolution для `buyer` строится вне процесса покупки: отдельный `evolution_orchestrator` container сразу применяет patchable changes в proposal branches, запускает candidate `buyer` containers, сравнивает их с baseline/champion и может автономно двигать `evolve/champion`.
 - LLM считается неизменяемой foundation model: запрещено закладывать в production-контур дообучение весов, LoRA, RLHF/RLAIF, persistent weight updates или обучение отдельной memory model.
 - Допустимые поверхности изменений: prompts, few-shot examples/demonstrations, external memory, site profiles, playbooks, scripts, tool policy, eval cases, model routing и код orchestration/eval вокруг LLM.
-- Канонический цикл: `capture -> evaluate -> diagnose -> propose -> create_patch_branch -> validate -> human_review -> merge/activate -> monitor`.
+- Канонический research-cycle: `capture -> evaluate -> diagnose -> create_patch_branch -> restart_candidate_buyer -> validate -> promote_champion -> next_generation`.
 - Любое изменение prompt, playbook, site profile, script, tool policy или eval case сначала оформляется как candidate с evidence refs, scope, risk, expected effect и required validation, затем сразу материализуется в отдельную git branch с concrete diff, если candidate patchable и нет path/redaction blocker.
-- Branch policy: один candidate = одна branch = один основной commit. Branch создается от текущей выбранной базы (`origin/master` или текущая release branch), чтобы человек review-ил готовое изменение, а не абстрактную рекомендацию.
+- Branch policy: один candidate = одна branch = один основной commit. В research-mode branch создается от `evolve/champion`; для human integration branch может создаваться от `origin/master` или текущей release branch.
+- Research branch policy: candidate branches имеют вид `evolve/cand-<cycle_id>-<n>-<slug>`. Текущая лучшая экспериментальная линия хранится в `evolve/champion` и может обновляться orchestrator автоматически при улучшении metrics и отсутствии hard safety violations.
+- Champion selection обязан сравнивать candidate с текущим champion на одинаковом eval set и писать delta report: success, task correctness, payment boundary, hard safety, duration, tokens, handoff, repetition, flakiness и итоговый score.
+- Candidate не может стать champion при новом hard safety violation. Улучшение cost/duration не компенсирует ухудшение task correctness или payment boundary.
+- Если результат flaky или delta мал, orchestrator должен запускать repeated eval или сохранять branch как Pareto candidate без продвижения champion.
+- Если новый champion в следующем generation регрессирует против предыдущего champion, orchestrator должен откатить `evolve/champion` на последний хороший ref и сохранить regression report.
 - Источники candidates:
   - `knowledge-analysis.json` из post-session анализа `buyer`;
   - `evaluation.json` recommendations из `eval_service`;
   - drift/regression signals;
   - ручные предложения разработчика или оператора.
-- Candidate lifecycle: `draft -> branch_created -> validation_failed|ready_for_review -> merged_active|rejected -> archived`.
-- Human approval обязателен перед merge/activation, но не перед созданием branch. Скорость эволюции достигается тем, что agent сразу применяет patch в отдельной ветке, а человек отклоняет или мержит уже готовый diff.
-- Runtime `buyer` может использовать только `merged_active` candidates с exact scope. Draft/branch_created/validation_failed/ready_for_review/rejected candidates не попадают в prompt, script registry или tool policy.
+- Candidate lifecycle в research-mode: `draft -> branch_created -> candidate_running -> validation_failed|champion_candidate|champion_active|rejected -> archived`.
+- Human approval обязателен перед переносом в `master` или долгоживущую shared baseline, но не перед созданием branch, запуском candidate container или продвижением `evolve/champion`.
+- Основной/shared runtime `buyer` может использовать только `merged_active` candidates с exact scope. Eval/champion buyer containers могут запускать branch code, но это считается research execution, а не activation в shared baseline.
 - Active knowledge в prompt передается как data-блок и не может отменять hard invariants: запрет реального платежа, SberPay-only policy, запрет auth-секретов в памяти/профиле и CAPTCHA-only-through-handoff.
-- Prompt evolution допускается через GEPA/DSPy-like offline optimization по eval traces; результат должен автоматически попасть в patch branch, а затем пройти targeted validation и human review перед merge.
-- Script/skill evolution допускается только в sandbox/replay/eval окружении. Публикация script candidate для реального магазина требует branch validation, human approval и domain-specific verifier.
+- Prompt evolution допускается через GEPA/DSPy-like offline optimization по eval traces; результат должен автоматически попасть в patch branch, пройти targeted validation и может стать research champion.
+- Script/skill evolution допускается только в sandbox/replay/eval окружении. Публикация script candidate в `master` требует branch validation, human approval и domain-specific verifier.
 - Автоматическая активация изменений payment boundary, auth, handoff, CAPTCHA, checkout safety или SberPay verifier запрещена.
 - Для каждого `merged_active` candidate должен существовать rollback path и provenance: source run/eval, evidence refs, reviewer, activation timestamp и validation report.
 

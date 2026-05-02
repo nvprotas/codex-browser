@@ -51,7 +51,7 @@
 | `docs/buyer.md` | Согласованная v1-спецификация домена `buyer`. | Граница SberPay, lifecycle, auth, handoff, knowledge-analysis. |
 | `docs/architecture-decisions.md` | Decision log обязательных архитектурных решений. | Сначала обновлять его при новых требованиях, затем остальные документы. |
 | `docs/buyer-roadmap.md` | Приоритизированный roadmap и ссылки на Linear. | При изменении roadmap синхронизировать Linear issue. |
-| `docs/self-evolving-buyer-report-2026-05-02.md` | Исследовательский отчет о замыкании self-improving/self-evolving loop для `buyer`. | SotA-подходы на 2026-05-02, текущие пробелы, branch-producing candidate lifecycle, конкретные точки изменений. |
+| `docs/self-evolving-buyer-report-2026-05-02.md` | Исследовательский отчет о замыкании self-improving/self-evolving loop для `buyer`. | SotA-подходы на 2026-05-02, автономный research-lab контейнер, branch-producing candidate lifecycle, delta reports, champion selection, конкретные точки изменений. |
 | `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow, включая дизайн external Sber auth source и запрет ручной передачи auth-пакетов. | Исторический контекст планов; не является runtime-контрактом. |
 | `docs/repository-map.md` | Эта карта репозитория. | Любые изменения кода, контрактов, ошибок, структуры или runtime-зависимостей. |
 
