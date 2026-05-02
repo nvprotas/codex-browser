@@ -116,6 +116,27 @@
 - Draft-рекомендации judge могут относиться к prompt, playbook, site profile, script candidate или eval case, но не применяются автоматически.
 - Baseline времени и токенов считается детерминированно как медиана последних N успешных evaluations по `eval_case_id`; trend-judge по истории выносится в future work.
 
+## Self-evolution и review/activation
+
+- Статус решения: принято, дата фиксации — 2026-05-02.
+- Self-evolution для `buyer` строится как контролируемый offline/nearline контур, а не как автономное изменение production-runtime.
+- LLM считается неизменяемой foundation model: запрещено закладывать в production-контур дообучение весов, LoRA, RLHF/RLAIF, persistent weight updates или обучение отдельной memory model.
+- Допустимые поверхности изменений: prompts, few-shot examples/demonstrations, external memory, site profiles, playbooks, scripts, tool policy, eval cases, model routing и код orchestration/eval вокруг LLM.
+- Канонический цикл: `capture -> evaluate -> diagnose -> propose -> validate -> approve -> activate -> monitor`.
+- Любое изменение prompt, playbook, site profile, script, tool policy или eval case сначала оформляется как reviewable candidate с evidence refs, scope, risk, expected effect и required validation.
+- Источники candidates:
+  - `knowledge-analysis.json` из post-session анализа `buyer`;
+  - `evaluation.json` recommendations из `eval_service`;
+  - drift/regression signals;
+  - ручные предложения разработчика или оператора.
+- Candidate lifecycle: `draft -> reviewed -> active|rejected -> archived`.
+- Runtime `buyer` может использовать только `active` candidates с exact scope. Draft/reviewed/rejected candidates не попадают в prompt, script registry или tool policy.
+- Active knowledge в prompt передается как data-блок и не может отменять hard invariants: запрет реального платежа, SberPay-only policy, запрет auth-секретов в памяти/профиле и CAPTCHA-only-through-handoff.
+- Prompt evolution допускается через GEPA/DSPy-like offline optimization по eval traces, но результат должен пройти regression suite и human approval.
+- Script/skill evolution допускается только в sandbox/replay/eval окружении. Публикация script candidate для реального магазина требует human approval и domain-specific verifier.
+- Автоматическая активация изменений payment boundary, auth, handoff, CAPTCHA, checkout safety или SberPay verifier запрещена.
+- Для каждого active candidate должен существовать rollback path и provenance: source run/eval, evidence refs, reviewer, activation timestamp и validation report.
+
 ## Наблюдаемость, релиз и операционные ограничения
 
 - Observability v1: только `logs + metrics`.
