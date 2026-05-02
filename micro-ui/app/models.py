@@ -54,6 +54,7 @@ class SessionSummary(BaseModel):
     ask_asked_at: datetime | None = None
     order_id: str | None = None
     order_id_host: str | None = None
+    payment_provider: str | None = None
     status: str | None = None
     novnc_url: str | None = None
     updated_at: datetime

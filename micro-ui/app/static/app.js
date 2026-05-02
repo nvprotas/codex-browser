@@ -48,6 +48,7 @@ const KNOWN_EVENT_TYPES = [
   'handoff_requested',
   'handoff_resumed',
   'payment_ready',
+  'payment_unverified',
   'scenario_finished',
 ];
 
@@ -412,7 +413,7 @@ function meta(label, value) {
 
 function statusClass(status) {
   const normalized = String(status || 'running').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-  const known = new Set(['running', 'waiting_user', 'failed', 'error', 'completed', 'success']);
+  const known = new Set(['running', 'waiting_user', 'unverified', 'failed', 'error', 'completed', 'success']);
   return known.has(normalized) ? normalized : 'unknown';
 }
 
@@ -423,13 +424,21 @@ function isWaitingSession(session) {
 function isErrorSession(session) {
   const status = String(session.status || '').toLowerCase();
   const eventType = String(session.last_event_type || '').toLowerCase();
-  return status === 'failed' || status === 'error' || eventType.includes('failed') || eventType.includes('error');
+  return (
+    status === 'failed'
+    || status === 'error'
+    || status === 'unverified'
+    || eventType.includes('failed')
+    || eventType.includes('error')
+  );
 }
 
 function updateMetrics(sessions) {
   metricSessionsNode.textContent = formatMetric(sessions.length);
   metricWaitingNode.textContent = formatMetric(sessions.filter(isWaitingSession).length);
-  metricOrdersNode.textContent = formatMetric(sessions.filter((item) => item.order_id).length);
+  metricOrdersNode.textContent = formatMetric(
+    sessions.filter((item) => item.order_id && String(item.status || '').toLowerCase() !== 'unverified').length,
+  );
   metricErrorsNode.textContent = formatMetric(sessions.filter(isErrorSession).length);
   sessionsCountNode.textContent = `${sessions.length} ACTIVE`;
 }
@@ -456,6 +465,7 @@ function createSessionItem(session, sessions) {
     meta('reply_id', session.waiting_reply_id),
     meta('order_id', session.order_id),
     meta('order_id_host', session.order_id_host),
+    meta('provider', session.payment_provider),
     meta('Обновлено', fmtDate(session.updated_at)),
   );
 

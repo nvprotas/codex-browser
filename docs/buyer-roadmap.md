@@ -40,7 +40,7 @@
 | 5 | [MON-16](https://linear.app/monaco-dev/issue/MON-16/buyer-phase-1-artifact-i-trace-manifest) | Artifact и trace manifest |
 | 6 | [MON-17](https://linear.app/monaco-dev/issue/MON-17/buyer-phase-2-reviewactivation-flow-dlya-knowledge-analysis) | Review/activation flow для knowledge-analysis |
 | 7 | [MON-18](https://linear.app/monaco-dev/issue/MON-18/buyer-phase-2-lifecycle-dlya-scriptplaybook-candidates) | Lifecycle для script/playbook candidates |
-| 8 | [MON-20](https://linear.app/monaco-dev/issue/MON-20/buyer-phase-2-minimalnyj-verifier-dlya-payment-ready-i-purchase-script) | Минимальный verifier для payment_ready и purchase-script result |
+| 8 | [MON-20](https://linear.app/monaco-dev/issue/MON-20/buyer-phase-2-minimalnyj-verifier-dlya-payment-ready-i-purchase-script) | Минимальный verifier для payment_ready и payment evidence |
 | 8.1 | [MON-28](https://linear.app/monaco-dev/issue/MON-28/buyer-phase-2-llm-judge-eval-loop-i-dashboard) | LLM Judge eval loop и dashboard |
 | 9 | [MON-21](https://linear.app/monaco-dev/issue/MON-21/buyer-phase-2-formalnaya-model-task-step-attempt) | Формальная модель Task -> Step -> Attempt |
 | 10 | [MON-19](https://linear.app/monaco-dev/issue/MON-19/buyer-phase-2-buyer-worker-separation) | Buyer worker separation |
@@ -138,7 +138,7 @@
 **Value:** 5
 **Effort:** 1
 **V/E:** 5.00
-**Статус:** planned
+**Статус:** implemented in code
 **Зависимости:** нет.
 **Linear:** [MON-29](https://linear.app/monaco-dev/issue/MON-29/buyer-phase-1-udalit-ruchnuyu-peredachu-auth-paketov-cherez)
 
@@ -339,7 +339,7 @@
 
 Для часто используемых магазинов `buyer` сможет переходить от generic flow к быстрым и стабильным сценариям. При этом `openclaw` не столкнется с внезапным использованием непроверенного скрипта.
 
-#### 8. Минимальный verifier для payment_ready и purchase-script result
+#### 8. Минимальный verifier для payment_ready и payment evidence
 
 **Value:** 5  
 **Effort:** 3  
@@ -349,7 +349,7 @@
 
 **Что сделать:**
 
-- Зафиксирован текущий safety gate: `payment_ready` разрешен только после domain-specific verifier; реализован узкий verifier для `litres.ru`, остальные домены временно не могут завершаться success без отдельного verifier.
+- Зафиксирован текущий safety gate: `payment_ready` разрешен только после domain-specific verifier; реализованы узкие verifier для `litres.ru` и `brandshop.ru`, остальные домены уходят в `payment_unverified` при matching provider evidence.
 - Добавить architecture decision: как расширять formal verifier за пределы `litres.ru`.
 - Начать не с общего verifier всех шагов, а с узкой проверки финальных результатов:
   - `orderId` найден;
@@ -357,8 +357,8 @@
   - финальная кнопка оплаты не нажималась;
   - SberPay выбран или доступен;
   - артефакты не содержат одноразовые платежные секреты.
-- Для purchase scripts требовать structured verification block в output.
-- При неуспешной верификации не отправлять `payment_ready`, а продолжать generic flow или просить handoff.
+- Для будущих явных custom scripts требовать structured verification block в output и не подключать их как скрытый pre-generic путь.
+- При неуспешной merchant-верификации не отправлять `payment_ready`, а завершать `failed` или `payment_unverified` в зависимости от provider evidence.
 - Покрыть тестами false-positive сценарии: найден похожий id не на платежной странице, страница корзины без checkout, ошибка оплаты, order token в URL.
 
 **Value для `openclaw`:**

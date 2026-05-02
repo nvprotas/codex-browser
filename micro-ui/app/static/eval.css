@@ -379,6 +379,12 @@ details[open] .eval-callbacks-summary::before {
   border-color: rgba(184, 100, 9, 0.22);
 }
 
+.eval-status.unverified {
+  color: var(--warn);
+  background: rgba(184, 100, 9, 0.12);
+  border-color: rgba(184, 100, 9, 0.24);
+}
+
 .eval-status.payment_ready,
 .eval-status.finished,
 .eval-status.judged {

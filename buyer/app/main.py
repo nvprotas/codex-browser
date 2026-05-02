@@ -6,6 +6,7 @@ from .auth_scripts import SberIdScriptRunner, parse_allowlist
 from .callback import CallbackClient
 from .external_auth import ExternalSberCookiesClient
 from .knowledge_analyzer import PostSessionKnowledgeAnalyzer
+from .logging_config import configure_component_logging
 from .models import (
     SessionDetail,
     SessionReplyRequest,
@@ -14,7 +15,6 @@ from .models import (
     TaskCreateRequest,
     TaskCreateResponse,
 )
-from .purchase_scripts import PurchaseScriptRunner
 from .persistence import PostgresSessionRepository
 from .runner import AgentRunner
 from .service import BuyerService
@@ -28,6 +28,9 @@ from .state import (
     SessionStore,
 )
 from .url_policy import UrlPolicyError, parse_url_allowlist, validate_callback_url, validate_start_url
+
+
+configure_component_logging()
 
 
 def _build_session_store(settings: Settings) -> SessionStore:
@@ -57,12 +60,6 @@ auth_script_runner = SberIdScriptRunner(
     timeout_sec=settings.auth_script_timeout_sec,
     trace_dir=settings.buyer_trace_dir,
 )
-purchase_script_runner = PurchaseScriptRunner(
-    scripts_dir=settings.auth_scripts_dir,
-    cdp_endpoint=settings.browser_cdp_endpoint,
-    timeout_sec=settings.purchase_script_timeout_sec,
-    trace_dir=settings.buyer_trace_dir,
-)
 external_auth_client = None
 if settings.sber_auth_source == 'external_cookies_api':
     external_auth_client = ExternalSberCookiesClient(
@@ -81,8 +78,6 @@ service = BuyerService(
     sberid_allowlist=parse_allowlist(settings.sberid_allowlist),
     sberid_auth_retry_budget=settings.sberid_auth_retry_budget,
     auth_script_runner=auth_script_runner,
-    purchase_script_allowlist=parse_allowlist(settings.purchase_script_allowlist),
-    purchase_script_runner=purchase_script_runner,
     knowledge_analyzer=knowledge_analyzer,
     buyer_user_info_path=settings.buyer_user_info_path,
     external_auth_client=external_auth_client,

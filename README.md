@@ -25,8 +25,11 @@ OpenAPI-контракт callback-событий buyer: `docs/callbacks.openapi.
 - Трассировка шагов `codex`: сохраняются prompt, stdout/stderr tail, итог шага и лог браузерных команд.
 - SberId `scripts-first` для allowlist-доменов с retry auth-пакета и fallback в эвристику/handoff.
 - Локальный runtime auth-скриптов в `buyer/scripts` (`tsx + playwright-core` через `npm ci` в image).
-- Инфраструктура быстрых purchase-скриптов сохранена для будущих доменов, но текущий registry и default allowlist пустые.
+- Static-инструкции generic buyer-agent вынесены в `docs/buyer-agent/*`; per-step prompt является коротким bootstrap с manifest-ами файлов.
+- Динамический контекст generic-agent пишется в trace step dir как стабильный набор `task.json`, `metadata.json`, `memory.json`, `latest-user-reply.md`, `user-profile.md` и sanitized `auth-state.json`; scalar-строки проходят redaction, пустые файлы означают отсутствие optional данных.
+- Скрытый automatic purchase-script путь не настраивается в app runtime: после SberId-подготовки покупка идет через generic Codex-agent.
 - Litres и Brandshop покупаются через generic Codex-agent после SberId-подготовки; `payment_ready` разрешен только после domain-specific verifier.
+- Payment verifier разделяет provider parsers PayEcom/YooMoney и merchant policy; outcome бывает `accepted`, `rejected` или `unverified`.
 - Persistent state в Postgres для сессий, событий, ответов, agent memory, auth metadata и ссылок на артефакты.
 - Структурные CDP-команды (`exists`, `attr`, `links`, `snapshot`) и ограничение raw HTML, чтобы не отправлять мегабайтные DOM-дампы в модель.
 - Ограничение MVP: только 1 активная сессия одновременно.
@@ -52,14 +55,9 @@ USER_BUYER_INFO_PATH=
 # Для CDP-доступа к browser-sidecar используйте danger-full-access.
 # CODEX_SANDBOX_MODE=danger-full-access
 
-# Быстрый режим Codex CLI: no reasoning + отключенный image generation tool.
-# CODEX_REASONING_EFFORT=none
+# Режим Codex CLI для generic buyer-flow: low reasoning + отключенный image generation tool.
+# CODEX_REASONING_EFFORT=low
 # CODEX_IMAGE_GENERATION=disabled
-
-# Опционально: стратегия модели generic buyer-flow.
-# BUYER_MODEL_STRATEGY=single
-# BUYER_FAST_CODEX_MODEL=gpt-5.4-mini
-# BUYER_STRONG_CODEX_MODEL=
 
 # Опционально: окно/интервал CDP recovery (hotfix устойчивости)
 # CDP_RECOVERY_WINDOW_SEC=20
@@ -82,11 +80,6 @@ USER_BUYER_INFO_PATH=
 # AUTH_SCRIPTS_DIR=/app/scripts
 # AUTH_SCRIPT_TIMEOUT_SEC=90
 
-# Быстрые purchase-скрипты до generic codex-flow.
-# По умолчанию registry/default allowlist пустые; Litres и Brandshop идут через generic-agent.
-# PURCHASE_SCRIPT_ALLOWLIST=
-# PURCHASE_SCRIPT_TIMEOUT_SEC=120
-
 # Долговременное состояние buyer
 # STATE_BACKEND=postgres
 # DATABASE_URL=postgresql://buyer:buyer@postgres:5432/buyer
@@ -97,7 +90,7 @@ USER_BUYER_INFO_PATH=
 
 `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` только на этапе runtime и не попадает в image.
 `USER_BUYER_INFO_PATH` монтируется в `buyer` только на этапе runtime и не попадает в image.
-`buyer` читает `user-buyer-info.md` на каждом агентном шаге и добавляет его содержимое в prompt как отдельный блок постоянной информации о пользователе.
+`buyer` читает `user-buyer-info.md` на каждом агентном шаге и передает его generic-agent через dynamic context file, а не как большой inline-блок prompt-а.
 Если агент возвращает `profile_updates`, `buyer` дописывает эти новые факты в конец `user-buyer-info.md`.
 
 Auth-профили для `eval_service` монтируются из host-директории `EVAL_AUTH_PROFILES_HOST_DIR` в `/run/eval/auth-profiles`.
@@ -200,7 +193,7 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 goto --url https://
 
 С host-машины CDP `9223` по умолчанию недоступен. Для диагностики запускайте CDP-команды из контейнера `buyer` или используйте одноразовый override, который также привязывает порт только к `127.0.0.1`.
 
-Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
+Доступные команды CLI: `goto`, `click`, `fill`, `press`, `wait`, `wait-url`, `wait-selector`, `text`, `title`, `url`, `exists`, `attr`, `links`, `snapshot`, `screenshot`, `html`.
 
 Для анализа DOM предпочтительны структурные команды:
 
@@ -225,9 +218,12 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 
 Если `buyer` получает transient CDP-failure от агента, он не завершает сессию мгновенно: в пределах recovery-окна шаг перезапускается с системным маркером `[CDP_RECOVERY_RESTART_FROM_START_URL]`, и агент должен начать шаг заново с `goto start_url`.
 
-Файлы observability по шагам пишутся в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`:
+Файлы observability по шагам пишутся в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`; per-step context files лежат в поддиректории конкретного шага `step-XXX/`:
 
-- `step-XXX-prompt.txt` — prompt, с которым запущен `codex`.
+- `auth-script-litres-trace.jsonl` / `auth-script-brandshop-trace.jsonl` — trace SberId auth-скрипта, включая auth-навигации и cleanup-закрытия page/context/browser.
+- `auth-script-result-attempt-XX-<uuid>.json` — JSON-результат конкретной попытки auth-скрипта.
+- `step-XXX-prompt.txt` — bootstrap prompt, с которым запущен `codex`: hard rules, task, CDP endpoint и manifest-ы файлов.
+- `step-XXX/task.json`, `step-XXX/metadata.json`, `step-XXX/memory.json`, `step-XXX/latest-user-reply.md`, `step-XXX/user-profile.md`, `step-XXX/auth-state.json` — dynamic context files текущего шага; `auth-state.json` содержит только sanitized summary.
 - `step-XXX-browser-actions.jsonl` — действия браузера (`goto/click/fill/...`) от `cdp_tool.py`.
 - `step-XXX-trace.json` — сводка шага (`preflight`, команда `codex`, модель/стратегия, длительность, tails stdout/stderr, хвост browser actions) и агрегаты `command_duration_ms`, `inter_command_idle_ms`, `browser_busy_union_ms`, `post_browser_idle_ms`, `command_errors`, `codex_tokens_used`, `html_commands`, `html_bytes`, `command_breakdown`.
 - `knowledge-analysis-prompt.txt` — отдельный prompt post-session analyzer после финального callback.
@@ -236,17 +232,21 @@ python /app/tools/cdp_tool.py --endpoint http://browser:9223 attr --selector 'a[
 
 Post-session анализ не отправляет дополнительный callback в `middle`, не влияет на `SessionStatus` и не должен сохранять auth-пакеты, cookies, `storageState`, токены или одноразовые платежные данные. Все кандидаты знаний имеют статус `draft` и не используются автоматически в следующих прогонах.
 
-## Быстрые purchase-скрипты
+## Generic покупка и verifier
 
-После SberId-подготовки `buyer` проверяет `PURCHASE_SCRIPT_ALLOWLIST`, но текущий purchase script registry пустой и default allowlist тоже пустой. Это означает, что ни один домен не получает scripts-first покупку по умолчанию.
+После SberId-подготовки app-wired `buyer` не запускает скрытый automatic purchase script: `main.py` не настраивает purchase runner/allowlist, а `PURCHASE_SCRIPT_ALLOWLIST` не является runtime setting. Generic Codex-agent управляет браузером через CDP tool, читает static-инструкции из `docs/buyer-agent/*` и dynamic context files из текущей trace step dir.
 
-Litres и Brandshop сейчас проходят покупку через generic Codex-agent. Для успешного `payment_ready` результат generic-agent должен пройти доменный verifier: Litres принимает только PayEcom iframe с `orderId`, Brandshop принимает только YooMoney SberPay contract URL с `orderId`.
+Для успешного `payment_ready` результат generic-agent должен пройти verifier со статусом `accepted`: Litres принимает только PayEcom iframe с `orderId`, Brandshop принимает только YooMoney SberPay contract URL с `orderId`. Если provider evidence PayEcom/YooMoney выглядит валидным, но merchant policy для домена неизвестна, `buyer` отправляет `payment_unverified` и `scenario_finished.status=unverified` без payment CTA.
 
 Чтобы смотреть это в реальном времени в логах контейнера:
 
 ```bash
 docker compose logs -f buyer | grep -E "codex_step|agent_step|agent_stream|session_|payment_ready"
 ```
+
+Строки логов `buyer` начинаются с имени logger-а в квадратных скобках, например `[app.service]` или `[app.runner]`, чтобы было видно, какой компонент пишет событие.
+
+Ошибки auth-навигаций и закрытий дополнительно попадают в логи контейнера как `auth_script_stderr ...`; полный успешный auth trace остается в JSONL-файлах внутри dated trace-директории.
 
 `micro-ui` также показывает live-поток `agent_stream_event` через общий SSE `/api/events/stream`: туда попадают JSONL-события `codex exec --json`, stderr-диагностика и новые записи `step-XXX-browser-actions.jsonl`. UI обновляется по callback-событиям от `buyer`; периодический polling для списка сессий и событий не используется.
 MVP `micro-ui` не добавляет отдельную аутентификацию на SSE endpoint; compose публикует UI только на `127.0.0.1`, а удаленный доступ предполагает trusted контур через VPN/SSH tunnel/authenticated reverse proxy.
@@ -276,7 +276,10 @@ MVP `micro-ui` не добавляет отдельную аутентифика
 - `handoff_requested`
 - `handoff_resumed`
 - `payment_ready`
+- `payment_unverified`
 - `scenario_finished`
+
+`payment_ready` появляется только после verifier status `accepted`. `payment_unverified` означает review-needed/non-success: provider evidence распознан, но merchant policy не подтвердила домен; `micro-ui` и eval не должны показывать платежный CTA или считать такой outcome успешным.
 
 ## Важные ограничения MVP
 

@@ -421,6 +421,7 @@ def _is_wait_or_terminal(state: CaseRunState) -> bool:
 def _is_terminal_case_state(state: CaseRunState) -> bool:
     return state in {
         CaseRunState.SKIPPED_AUTH_MISSING,
+        CaseRunState.UNVERIFIED,
         CaseRunState.FINISHED,
         CaseRunState.FAILED,
         CaseRunState.TIMEOUT,

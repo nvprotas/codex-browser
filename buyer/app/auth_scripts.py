@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -20,9 +21,9 @@ from .script_runtime import (
     script_stdio_artifacts,
     unique_script_output_path,
 )
-from ._utils import remove_file_quietly, tail_text
+from ._utils import remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 
 AUTH_OK = 'auth_ok'
@@ -150,10 +151,14 @@ class SberIdScriptRunner:
                 },
             )
 
-        session_dir = self._trace_dir.expanduser() / session_id
+        trace_root = self._trace_dir.expanduser()
+        session_dir = _auth_trace_session_dir(trace_root=trace_root, session_id=session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         remove_script_output(session_dir / 'auth-script-result.json')
         remove_script_output(session_dir / f'auth-script-result-attempt-{attempt:02d}.json')
+        legacy_session_dir = trace_root / session_id
+        remove_script_output(legacy_session_dir / 'auth-script-result.json')
+        remove_script_output(legacy_session_dir / f'auth-script-result-attempt-{attempt:02d}.json')
         output_path = unique_script_output_path(session_dir, f'auth-script-result-attempt-{attempt:02d}')
         remove_script_output(output_path)
         storage_path = _write_storage_state_tempfile(storage_state, session_id=session_id, attempt=attempt)
@@ -203,12 +208,13 @@ class SberIdScriptRunner:
                 resolved_endpoint,
             )
             logger.info(
-                'auth_script_started session_id=%s domain=%s attempt=%s script=%s lifecycle=%s',
+                'auth_script_started session_id=%s domain=%s attempt=%s script=%s lifecycle=%s trace_dir=%s',
                 session_id,
                 normalized_domain,
                 attempt,
                 script_path,
                 spec.lifecycle,
+                session_dir,
             )
 
             try:
@@ -246,6 +252,14 @@ class SberIdScriptRunner:
 
             stdout_text = stdout_raw.decode('utf-8', errors='ignore').strip()
             stderr_text = stderr_raw.decode('utf-8', errors='ignore').strip()
+            if stderr_text:
+                logger.warning(
+                    'auth_script_stderr session_id=%s domain=%s attempt=%s stderr=%s',
+                    session_id,
+                    normalized_domain,
+                    attempt,
+                    tail_text(stderr_text, limit=1200),
+                )
             parsed_payload = read_script_result_payload(output_path, stdout_text)
             stdio_artifacts = script_stdio_artifacts(stdout_text, stderr_text)
 
@@ -308,6 +322,57 @@ class SberIdScriptRunner:
             )
         finally:
             remove_file_quietly(str(storage_path))
+
+
+def _auth_trace_session_dir(*, trace_root: Path, session_id: str) -> Path:
+    existing = _find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
+    if existing is not None:
+        return existing
+
+    trace_date = trace_date_dir_name()
+    trace_time = trace_time_dir_name()
+    for candidate_date, candidate_time in _candidate_trace_dir_names(trace_date=trace_date, trace_time=trace_time):
+        candidate = trace_root / candidate_date / candidate_time / session_id
+        if not candidate.exists():
+            return candidate
+    return trace_root / trace_date / trace_time / session_id
+
+
+def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
+    if not trace_root.is_dir():
+        return None
+
+    matches: list[Path] = []
+    try:
+        date_dirs = [item for item in trace_root.iterdir() if item.is_dir()]
+    except OSError:
+        return None
+
+    for date_dir in date_dirs:
+        try:
+            time_dirs = [item for item in date_dir.iterdir() if item.is_dir()]
+        except OSError:
+            continue
+        for time_dir in time_dirs:
+            candidate = time_dir / session_id
+            if candidate.is_dir():
+                matches.append(candidate)
+
+    if not matches:
+        return None
+    return sorted(matches)[-1]
+
+
+def _candidate_trace_dir_names(*, trace_date: str, trace_time: str) -> list[tuple[str, str]]:
+    candidates = [(trace_date, trace_time)]
+    try:
+        base = datetime.strptime(f'{trace_date} {trace_time}', '%Y-%m-%d %H-%M-%S')
+    except ValueError:
+        return candidates
+    for offset_seconds in range(1, 60):
+        current = base + timedelta(seconds=offset_seconds)
+        candidates.append((current.strftime('%Y-%m-%d'), current.strftime('%H-%M-%S')))
+    return candidates
 
 
 def _write_storage_state_tempfile(storage_state: dict[str, Any], *, session_id: str, attempt: int) -> Path:

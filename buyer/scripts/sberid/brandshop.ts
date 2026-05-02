@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Locator, type Page } from 'playwrig
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
+import { tracedBrowserClose, tracedContextClose, tracedGoto, tracedPageClose } from './auth-trace.ts';
 
 const SCRIPT_NAME = 'brandshop';
 const BRANDSHOP_DOMAIN = 'brandshop.ru';
@@ -71,20 +72,16 @@ function isSberIdHost(host: string): boolean {
   return host === 'id.sber.ru' || host.endsWith('.id.sber.ru');
 }
 
-function authVerificationUrl(startUrl: string): string {
-  const url = new URL(startUrl);
-  if (isSameOrSubdomain(normalizeHost(url.hostname), BRANDSHOP_DOMAIN)) {
-    url.hostname = BRANDSHOP_DOMAIN;
-  }
-  url.pathname = '/account/';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-}
-
-export function verifyBrandshopAuthSnapshot(rawUrl: string, bodyText: string | null | undefined): AuthVerification {
+export function verifyBrandshopAuthSnapshot(
+  rawUrl: string,
+  bodyText: string | null | undefined,
+  avatarSeen = false,
+): AuthVerification {
   const text = String(bodyText || '').replace(/\s+/g, ' ').trim();
   const markers: string[] = [];
+  if (avatarSeen) {
+    markers.push('header-authorize__avatar');
+  }
   if (/Личный кабинет/iu.test(text)) {
     markers.push('Личный кабинет');
   }
@@ -122,9 +119,11 @@ export function verifyBrandshopAuthSnapshot(rawUrl: string, bodyText: string | n
   const hasProfile = markers.includes('Профиль') || markers.includes('Личный кабинет');
   const hasOrders = markers.includes('Мои заказы');
   const hasAccountUserInfo = markers.includes('Личные данные');
-  const hasStrongAuthenticatedMarker = hasOrders || hasLogout || hasAccountUserInfo;
+  const hasAuthorizedAvatar = markers.includes('header-authorize__avatar');
+  const hasStrongAuthenticatedMarker = hasAuthorizedAvatar || hasOrders || hasLogout || hasAccountUserInfo;
   return {
-    verified: !loginFormSeen && hasStrongAuthenticatedMarker && (hasProfile || hasLogout || hasAccountUserInfo),
+    verified:
+      hasAuthorizedAvatar || (!loginFormSeen && hasStrongAuthenticatedMarker && (hasProfile || hasLogout || hasAccountUserInfo)),
     markers,
     login_form_seen: loginFormSeen,
     account_url_seen: accountUrlSeen,
@@ -232,9 +231,18 @@ async function pageBodyText(page: Page): Promise<string> {
     .catch(() => '');
 }
 
+async function hasBrandshopAuthorizedAvatar(page: Page): Promise<boolean> {
+  return page
+    .locator('.header-authorize__avatar')
+    .first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+}
+
 async function verifyAuthPage(page: Page, tracePath: string, event: string): Promise<AuthVerification> {
   const bodyText = await pageBodyText(page);
-  const verification = verifyBrandshopAuthSnapshot(page.url(), bodyText);
+  const avatarSeen = await hasBrandshopAuthorizedAvatar(page);
+  const verification = verifyBrandshopAuthSnapshot(page.url(), bodyText, avatarSeen);
   appendTrace(tracePath, {
     ts: new Date().toISOString(),
     event,
@@ -248,22 +256,44 @@ async function verifyAuthPage(page: Page, tracePath: string, event: string): Pro
   return verification;
 }
 
-async function verifyCurrentOrAccountPage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
-  let verification = await verifyAuthPage(page, tracePath, 'auth_verify_current');
+async function verifyAuthPageWithSettling(
+  page: Page,
+  tracePath: string,
+  event: string,
+  settleTimeoutMs: number,
+): Promise<AuthVerification> {
+  const deadline = Date.now() + settleTimeoutMs;
+  let verification = await verifyAuthPage(page, tracePath, event);
+  while (!verification.verified && Date.now() < deadline) {
+    await page.waitForTimeout(500);
+    verification = await verifyAuthPage(page, tracePath, event);
+  }
+  return verification;
+}
+
+async function verifyCurrentOrEntryPage(page: Page, startUrl: string, tracePath: string): Promise<AuthVerification> {
+  let verification = await verifyAuthPageWithSettling(page, tracePath, 'auth_verify_current', 2500);
   if (verification.verified) {
     return verification;
   }
 
-  await page.goto(authVerificationUrl(startUrl), { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
-  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
-  verification = await verifyAuthPage(page, tracePath, 'auth_verify_account');
-  if (verification.verified) {
+  const targetHost = hostFromUrl(startUrl);
+  const expectedHost = isSameOrSubdomain(targetHost, BRANDSHOP_DOMAIN) ? BRANDSHOP_DOMAIN : targetHost;
+  const currentHost = hostFromUrl(page.url());
+  if (isSameOrSubdomain(currentHost, expectedHost)) {
     return verification;
   }
 
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await tracedGoto(
+    page,
+    tracePath,
+    'auth_verify_entry',
+    authEntryUrl(startUrl),
+    { waitUntil: 'domcontentloaded', timeout: 12000 },
+    true,
+  );
   await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
-  return verifyAuthPage(page, tracePath, 'auth_verify_start_url');
+  return verifyAuthPageWithSettling(page, tracePath, 'auth_verify_entry', 2500);
 }
 
 async function clickFirstVisible(
@@ -495,14 +525,14 @@ async function main(): Promise<void> {
     }
     const contextsToClose = existingContexts.length > 1 ? existingContexts.slice(1) : [];
     for (const existingContext of contextsToClose) {
-      await existingContext.close().catch(() => undefined);
+      await tracedContextClose(existingContext, tracePath, 'cleanup_extra_context', 'extra_existing_context');
     }
     const cookiesLoaded = cookieCount(storageState);
     await context.addCookies(storageCookies(storageState));
     const existingPages = context.pages();
     const page = existingPages[0] ?? (await context.newPage());
     for (const extraPage of existingPages.slice(1)) {
-      await extraPage.close().catch(() => undefined);
+      await tracedPageClose(extraPage, tracePath, 'cleanup_extra_page', 'extra_existing_page');
     }
     await page.setViewportSize({ width: 1440, height: 900 }).catch(() => undefined);
     appendTrace(tracePath, {
@@ -529,7 +559,7 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
-    const existingAuth = await verifyCurrentOrAccountPage(page, startUrl, tracePath);
+    const existingAuth = await verifyCurrentOrEntryPage(page, startUrl, tracePath);
     if (existingAuth.verified) {
       const currentUrl = page.url();
       const currentHost = hostFromUrl(currentUrl);
@@ -572,7 +602,7 @@ async function main(): Promise<void> {
         auth_entry_url: entryUrl,
       },
     });
-    await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await tracedGoto(page, tracePath, 'auth_entry', entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     const entryReadyStartedAt = Date.now();
     const entryReadyTarget = await waitForFirstVisible(page, authEntryReadyTargets(), 4000);
     appendTrace(tracePath, {
@@ -729,7 +759,7 @@ async function main(): Promise<void> {
       finalHost = hostFromUrl(finalUrl);
 
       if (isSameOrSubdomain(finalHost, expectedHost) && (sberLoops > 0 || finalUrl !== entryUrl)) {
-        const verification = await verifyCurrentOrAccountPage(authPage, startUrl, tracePath);
+        const verification = await verifyCurrentOrEntryPage(authPage, startUrl, tracePath);
         finalUrl = authPage.url();
         finalHost = hostFromUrl(finalUrl);
         lastAuthVerification = verification;
@@ -823,10 +853,10 @@ async function main(): Promise<void> {
     });
   } finally {
     if (context && createdContext && !keepAuthContext) {
-      await context.close().catch(() => undefined);
+      await tracedContextClose(context, tracePath, 'final_cleanup_created_context', 'auth_context_not_reused');
     }
     if (browser) {
-      await browser.close().catch(() => undefined);
+      await tracedBrowserClose(browser, tracePath, 'final_cleanup_browser', 'auth_script_finished');
     }
   }
 }
