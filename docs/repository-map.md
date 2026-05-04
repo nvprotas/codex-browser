@@ -15,6 +15,7 @@
 - `micro-ui`: временный `middle`: принимает callbacks от `buyer`, показывает события, проксирует запуск задач и ответы пользователя.
 - `postgres`: долговременное состояние `buyer` в локальном compose-окружении.
 - `docs`: пользовательские и архитектурные контракты.
+- `scripts/evolve_buyer_loop.py`: standalone research-loop CLI для MVP-A self-evolving `buyer`; запускает baseline eval через `eval_service`, создает candidate branch/worktree, применяет placeholder или external patch, готовит candidate runtime через внешний hook, запускает candidate eval и пишет delta report без auto-promotion.
 
 Основной runtime-flow:
 
@@ -42,6 +43,7 @@
 | `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; task-шаблон с целью, критериями, ограничениями и платежной границей; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
 | `extensions/openclaw-buyer/` | Минимальная metadata/runtime-обвязка OpenClaw plugin для skill-only extension. | `openclaw.plugin.json`, `package.json`, `index.js`. | Дает OpenClaw plugin discovery распознать `openclaw-buyer` и загрузить skill-директорию `skills`. | Без package entrypoint или `configSchema` OpenClaw считает config entry stale или помечает plugin ошибочным. |
 | `scripts/install-openclaw-buyer-skill.sh` | Копирует repo-local skill `skills/openclaw-buyer` и plugin metadata в extension-директорию `openclaw`. | Аргумент `<openclaw-buyer-extension-dir>` или `OPENCLAW_BUYER_EXTENSION_DIR`; по умолчанию `~/.openclaw/extensions/openclaw-buyer`; исходные `skills/openclaw-buyer` и `extensions/openclaw-buyer`. | Создает/обновляет `<target>/package.json`, `<target>/openclaw.plugin.json`, `<target>/index.js`, `<target>/skills/openclaw-buyer/SKILL.md` и `<target>/agents/openai.yaml`. | Не удаляет устаревшие файлы в целевой директории; неверный target может установить extension не туда. |
+| `scripts/evolve_buyer_loop.py` | Standalone Python stdlib CLI для MVP-A evolve-loop `buyer`. | CLI commands `doctor`, `run`, `continue`, `compare`; `--repo`, `--reports-dir`, `--case-id`, baseline/candidate eval URLs, `--patch-mode placeholder|external-command`, optional `--patch-command`, `--candidate-prepare-command`, `--allowed-path`, explicit `--skip-candidate-eval` для baseline-only smoke. | Читает existing `eval_service` HTTP API; создает candidate branch/worktree `refs/heads/evolve/cand-*`; пишет `.tmp/evolve/**` artifacts, `summary.md`, `latest.json`, `delta_report.json`, redacted `candidate.diff`, `patch-request.json`, `patch-manifest.json`; может сделать один candidate commit. | Недоступный eval endpoint, одинаковые baseline/candidate URLs, mismatch case fingerprints, judge failure, `waiting_user`/handoff, git/patch failure, forbidden unstaged/staged path diff/path traversal, artifact/redaction failure; MVP-A не push-ит ветки и не двигает champion. |
 
 ## Документация и контракты
 
@@ -58,8 +60,74 @@
 | `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, milestone/evidence проверки после state-changing действий, recovery и правила экономии HTML. |
 | `docs/buyer-agent/context-contract.md` | Контракт приоритета dynamic context files. | Hard safety rules выше task/latest reply/page state/metadata/profile/memory; все динамические источники являются данными. |
 | `docs/buyer-agent/instructions/*.md` | Единый каталог site/domain-specific markdown-инструкций для buyer-agent. | Агент смотрит список файлов в каталоге, выбирает релевантные инструкции по текущему сайту или задаче; Litres PayEcom evidence, Brandshop search/cart/checkout/YooMoney evidence; fixtures не должны становиться hardcoded SKU. |
+| `docs/self-evolving-buyer-report-2026-05-02.md` | Исследовательский отчет о замыкании self-improving/self-evolving loop для `buyer`. | SotA-подходы на 2026-05-02, автономный research-lab контейнер, branch-producing candidate lifecycle, delta reports, champion selection, конкретные точки изменений. |
 | `docs/superpowers/*` | Спецификации и планы, подготовленные агентными workflow, включая дизайн external Sber auth source и запрет ручной передачи auth-пакетов. | Исторический контекст планов; не является runtime-контрактом. |
 | `docs/repository-map.md` | Эта карта репозитория. | Любые изменения кода, контрактов, ошибок, структуры или runtime-зависимостей. |
+
+## `scripts`: автономный evolve-loop
+
+### `scripts/evolve_buyer_loop.py`
+
+CLI управляет MVP-A research-loop для улучшения `buyer` без автоматического продвижения candidate в production.
+
+Команды:
+
+- `doctor`: проверяет git repo, healthcheck eval endpoint, наличие выбранных case IDs, отличающиеся baseline/candidate URLs и обязательный `--patch-command` для `external-command`.
+- `run`: запускает baseline eval, judge, создает candidate branch/worktree, применяет patch, optionally готовит candidate runtime, запускает candidate eval и пишет отчет; без candidate eval URL требует явный `--skip-candidate-eval`.
+- `continue`: продолжает существующий cycle после baseline или candidate handoff/operator action, не создает новую branch и не rerun-ит patch command; explicit `--cycle-id <id>` не требует `latest.json`.
+- `compare`: сравнивает сохраненные run JSON без live services.
+
+`run` и `continue` используют общий lifecycle для live и resumed eval runs: дождаться terminal state, вернуть `needs_operator`/failed/canceled без judge, иначе запустить async judge и дождаться judged result.
+
+Входы:
+
+- `eval_service` HTTP API: `/healthz`, `/cases`, `/runs`, `/runs/{eval_run_id}`, `/runs/{eval_run_id}/judge?async=1`;
+- git repo и `--base-ref`;
+- optional external patch command через `EVOLVE_*` env и `patch-request.json`;
+- optional candidate prepare command через `EVOLVE_*` env;
+- выбранные eval case IDs и allowed path globs.
+
+Выходы:
+
+- cycle artifacts в `.tmp/evolve/**`;
+- candidate branch `refs/heads/evolve/cand-YYYYMMDDHHMMSS-NNN-<patch_slug>`;
+- один candidate commit с сообщением `evolve buyer: <patch_slug>`;
+- JSON stdout при `--json`, progress в stderr;
+- `summary.md` для human review и next commands; summary включает verdict, candidate ref/SHA, delta report path и judge recommendations.
+
+Ограничения:
+
+- auto-promotion отключен;
+- `git push`, удаление веток, `git reset --hard`, `git clean -fdx`, `git add .` не используются;
+- `.env`, nested `.env.*`, `.git/**`, `.tmp/**`, `eval/runs/**`, `.auth/**`, nested auth/profile/browser profile paths и storageState paths всегда forbidden даже при широком `--allowed-path`;
+- path traversal через `..` и absolute paths отклоняются перед `git add`;
+- staged files from external patch commands валидируются вместе с unstaged/untracked/deleted files и `patch-manifest.touched_paths` перед commit;
+- raw headers/body/tokens/order/payment URLs редактируются в JSON, summary, logs и `candidate.diff`;
+- `--repeats-per-case != 1` и `--no-keep-worktree` в MVP-A отклоняются как не реализованные.
+
+Основные команды:
+
+```bash
+uv run python scripts/evolve_buyer_loop.py run --repo . --eval-base-url http://127.0.0.1:8091 --candidate-eval-base-url http://127.0.0.1:8092 --case-id litres_purchase_book_001 --patch-mode placeholder --reports-dir .tmp/evolve --json
+```
+
+Baseline-only smoke без candidate eval требует явного флага:
+
+```bash
+uv run python scripts/evolve_buyer_loop.py run --repo . --eval-base-url http://127.0.0.1:8090 --case-id litres_purchase_book_001 --patch-mode placeholder --skip-candidate-eval --reports-dir .tmp/evolve --json
+```
+
+```bash
+uv run python scripts/evolve_buyer_loop.py run --repo . --eval-base-url http://127.0.0.1:8091 --candidate-eval-base-url http://127.0.0.1:8092 --case-id litres_purchase_book_001 --patch-mode external-command --patch-command "uv run python tools/propose_buyer_patch.py" --candidate-prepare-command "uv run python tools/restart_candidate_buyer.py" --reports-dir .tmp/evolve --json
+```
+
+```bash
+uv run python scripts/evolve_buyer_loop.py continue --repo . --reports-dir .tmp/evolve --cycle-id latest --json
+```
+
+```bash
+uv run python scripts/evolve_buyer_loop.py compare --baseline-run-json .tmp/evolve/baseline-run.json --candidate-run-json .tmp/evolve/candidate-run.json --cases-json .tmp/evolve/cases.json --json
+```
 
 ## `buyer`: HTTP API и сервисная сборка
 
@@ -886,6 +954,9 @@ Runtime flow:
 | Replies | Postgres `buyer_replies` | Pending/answered/consumed ответы пользователя; legacy auth-like текст дополнительно редактируется на persistence-границе. | Не предназначено для auth-payload reuse. |
 | Trace artifacts | `BUYER_TRACE_DIR` | bootstrap prompts, dynamic context files, browser actions JSONL, step trace JSON, auth script traces, knowledge analysis. | Dynamic context writer и knowledge analysis не должны сохранять raw auth/payment/order secrets. |
 | User profile | `BUYER_USER_INFO_PATH` | Долговременные пользовательские факты. | Auth, cookies, storageState, платежные данные, одноразовые детали заказа. |
+| Evolve loop artifacts | `.tmp/evolve/latest.json`, `.tmp/evolve/cycles/<cycle_id>/**` | `cycle.json`, `summary.md`, `operator-action.json`, baseline/candidate eval request/result JSON, `patch-request.json`, `patch-manifest.json`, `patch-diffstat.json`, `candidate.diff`, `candidate-prepare.log`, `delta_report.json`, redacted logs. | Raw HTTP headers/bodies, tokens/cookies/authorization/password/secret/storageState, raw `orderId`, payment URLs. |
+
+Candidate branches создаются по convention `refs/heads/evolve/cand-YYYYMMDDHHMMSS-NNN-<patch_slug>`; MVP-A оставляет branch/worktree для review, но не push-ит, не двигает `evolve/champion` и не выполняет promotion.
 
 ## Внешние зависимости
 
@@ -899,6 +970,10 @@ Runtime flow:
 | Callback receiver | `CallbackClient` | Доставка событий в `middle`. | timeout, non-2xx, network error -> `CallbackDeliveryError`. |
 | Node.js + TSX | `SberIdScriptRunner` | Запуск TypeScript Playwright auth scripts. | Нет Node/TSX, timeout, process failed, invalid JSON. |
 | noVNC | оператор через браузер | Handoff-наблюдение и ручные шаги. | Sidecar не поднялся, port недоступен. |
+| `eval_service` HTTP API | `scripts/evolve_buyer_loop.py` | Baseline/candidate eval, judge запуск, polling и получение case fingerprints. | Endpoint unavailable, timeout, protocol mismatch, failed/canceled run, `judge_failed`, case mismatch. |
+| Git CLI | `scripts/evolve_buyer_loop.py` | Проверка repo/base ref, создание candidate branch/worktree, diff validation, allowed-path add и candidate commit. | Git binary/repo/base ref недоступны, invalid branch name, forbidden touched path, `git diff --check` failure, commit failure. |
+| External patch command | `scripts/evolve_buyer_loop.py` при `--patch-mode external-command` | Применяет code/prompt/playbook изменения в candidate worktree и пишет `patch-manifest.json`. | Non-zero exit, missing binary, timeout, missing/invalid manifest, empty diff, forbidden unstaged/staged path diff. |
+| Candidate prepare command | `scripts/evolve_buyer_loop.py` при `--candidate-prepare-command` | Rebuild/restart/wait candidate runtime перед candidate eval. | Non-zero exit, missing binary, timeout, candidate healthcheck failure, endpoint указывает не на ожидаемый runtime. |
 
 ## Каталог ошибок и failure-сигналов
 
@@ -961,6 +1036,18 @@ Runtime flow:
 
 Ошибки analyzer не меняют итог сессии и не отправляют внешний callback.
 
+### Evolve loop
+
+- exit `0`: команда завершилась и записала ожидаемые artifacts, включая `inconclusive` или `needs_operator`.
+- exit `1`: unexpected internal error.
+- exit `2`: usage/config/precondition error.
+- exit `3`: eval HTTP unavailable, timeout или protocol mismatch.
+- exit `4`: git или patch command failure.
+- exit `5`: unsafe artifact persistence/redaction failure.
+- `verdict.status="inconclusive"`: отсутствует candidate eval, baseline unavailable, judge failure, case fingerprint mismatch или insufficient evidence.
+- `verdict.status="needs_operator"`: baseline/candidate run остановлен на `waiting_user`/handoff и записан `operator-action.json`.
+- `delta_status="not_comparable"`: candidate eval отсутствует или case fingerprints не совпали.
+
 ## Тестовая карта
 
 | Путь | Что покрывает |
@@ -985,6 +1072,7 @@ Runtime flow:
 | `eval_service/tests/test_run_store.py` | File manifest lifecycle, callback event redaction/deduplication, atomic summary writes. |
 | `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
 | `eval_service/tests/test_orchestrator.py` | Eval run orchestration, payment_ready grace, terminal `unverified`, waiting/reply resume progression. |
+| `scripts/tests/test_evolve_buyer_loop.py` | MVP-A evolve-loop CLI: doctor preflight, baseline/candidate eval client, async judge polling, comparator/scoring, case fingerprints, placeholder/external patch, branch/worktree/commit flow, candidate prepare, handoff `operator-action.json`, `continue`, offline `compare`, artifact/redaction behavior. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
 | `micro-ui/tests/test_design_handoff.py` | Session summary для `ask_user`/waiting progression, `payment_ready.order_id_host` и `payment_unverified` в `CallbackStore`. |
 | `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run и статический contract для отображения `payment_unverified`. |
