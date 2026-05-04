@@ -52,6 +52,7 @@ async def index(request: Request) -> HTMLResponse:
         context={
             'poll_interval_ms': settings.ui_poll_interval_sec * 1000,
             'eval_service_public_base_url': '/api/eval',
+            'micro_ui_enable_eval_stubs': settings.micro_ui_enable_eval_stubs,
         },
     )
 

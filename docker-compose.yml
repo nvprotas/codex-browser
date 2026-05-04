@@ -104,6 +104,7 @@ services:
     environment:
       BUYER_BASE_URL: http://buyer:8000
       EVAL_SERVICE_BASE_URL: ${EVAL_SERVICE_BASE_URL:-http://eval_service:8090}
+      MICRO_UI_ENABLE_EVAL_STUBS: ${MICRO_UI_ENABLE_EVAL_STUBS:-false}
       UI_POLL_INTERVAL_SEC: "3"
     ports:
       - "127.0.0.1:8080:8080"

@@ -12,7 +12,7 @@
 
 - `buyer`: FastAPI-сервис, который принимает задачу покупки, ведет состояние сессии, управляет агентным шагом `codex exec`, запускает Playwright-скрипты, отправляет callbacks и пишет trace-артефакты.
 - `browser`: sidecar-контейнер с Chromium, Xvfb, x11vnc, noVNC и CDP endpoint для управления браузером.
-- `micro-ui`: временный `middle`: принимает callbacks от `buyer`, показывает события, проксирует запуск задач и ответы пользователя.
+- `micro-ui`: дополнительный debug-модуль/локальный observer: принимает callbacks от `buyer`, показывает события, проксирует запуск задач и ответы пользователя; не является production `middle`.
 - `postgres`: долговременное состояние `buyer` в локальном compose-окружении.
 - `docs`: пользовательские и архитектурные контракты.
 - `scripts/evolve_buyer_loop.py`: standalone research-loop CLI для MVP-A self-evolving `buyer`; запускает baseline eval через `eval_service`, создает candidate branch/worktree, применяет placeholder или external patch, готовит candidate runtime через внешний hook, запускает candidate eval и пишет delta report без auto-promotion.
@@ -36,8 +36,8 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы, external cookies env и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` как `/run/codex/host-auth`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
-| `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и временного `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, `MICRO_UI_ENABLE_EVAL_STUBS`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` как `/run/codex/host-auth`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`; eval stubs в debug `micro-ui` включаются только при `MICRO_UI_ENABLE_EVAL_STUBS=true`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
+| `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и debug-модуля `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
 | `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; task-шаблон с целью, критериями, ограничениями и платежной границей; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
@@ -886,7 +886,7 @@ Judge flow:
 
 ## `micro-ui`
 
-`micro-ui` временно выполняет роль `middle` для локального MVP.
+`micro-ui` является дополнительным debug-модулем для локального MVP: он наблюдает callbacks, проксирует ручные действия и eval-запросы, но не является production `middle`.
 
 ### `micro-ui/app/main.py`
 
@@ -928,13 +928,13 @@ In-memory callback store.
 
 ### `micro-ui/app/models.py` и `settings.py`
 
-Pydantic-модели callback, task proxy, reply proxy и session summary. `SessionSummary` хранит `payment_provider` для непроверенного платежного шага. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`.
+Pydantic-модели callback, task proxy, reply proxy и session summary. `SessionSummary` хранит `payment_provider` для непроверенного платежного шага. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`. `MICRO_UI_ENABLE_EVAL_STUBS=false` по умолчанию; локальные eval stubs во frontend включаются только этим явным флагом и не используются как неявный fallback при проблемах с `eval_service`.
 
 ### Frontend assets
 
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state; знает `payment_unverified`, показывает `unverified` как неуспешный/review-needed статус и выводит provider в summary.
-- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке.
+- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке. Встроенные stub-данные используются только при `window.MICRO_UI_ENABLE_EVAL_STUBS === true`.
 - `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
@@ -1113,7 +1113,7 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `scripts/tests/test_evolve_buyer_loop.py` | MVP-A evolve-loop CLI: doctor preflight, baseline/candidate eval client, async judge polling, comparator/scoring, case fingerprints, placeholder/external patch, branch/worktree/commit flow, candidate prepare, handoff `operator-action.json`, `continue`, offline `compare`, artifact/redaction behavior. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
 | `micro-ui/tests/test_design_handoff.py` | Session summary для `ask_user`/waiting progression, `payment_ready.order_id_host` и `payment_unverified` в `CallbackStore`. |
-| `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run и статический contract для отображения `payment_unverified`. |
+| `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run, явный флаг eval stubs и статический contract для отображения `payment_unverified`. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.
 

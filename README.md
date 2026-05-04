@@ -4,7 +4,7 @@
 
 - `buyer` (FastAPI): принимает задачу от `openclaw`, запускает `codex exec`, оркестрирует шаги и отправляет callback-события.
 - `browser` (отдельный sidecar): держит Chromium + Xvfb + x11vnc + noVNC и отдает CDP endpoint для Playwright.
-- `micro-ui` (FastAPI + HTML/JS): временный `middle`, принимает callbacks, показывает ленту событий, noVNC и форму ответа пользователя (`reply_id`).
+- `micro-ui` (FastAPI + HTML/JS): дополнительный debug-модуль/локальный observer, принимает callbacks, показывает ленту событий, noVNC и форму ответа пользователя (`reply_id`).
 - `postgres`: хранит durable состояние `buyer`.
 - `eval_service`: запускает eval-кейсы, принимает callbacks от `buyer` и готовит judge/dashboard артефакты.
 
@@ -106,7 +106,7 @@ cp /Users/nikolay/Desktop/sber-cookies.json /Users/nikolay/Desktop/eval-auth-pro
 docker compose up --build
 ```
 
-Для развертывания рядом с `openclaw` без eval-сервиса и временного `micro-ui` используйте отдельный compose-файл. Он поднимает только `postgres`, `browser` и `buyer`; callbacks уходят во внешний `middle` по `MIDDLE_CALLBACK_URL`.
+Для развертывания рядом с `openclaw` без eval-сервиса и debug-модуля `micro-ui` используйте отдельный compose-файл. Он поднимает только `postgres`, `browser` и `buyer`; callbacks уходят во внешний `middle` по `MIDDLE_CALLBACK_URL`.
 
 ```bash
 MIDDLE_CALLBACK_URL=https://middle.example/callbacks \
@@ -290,4 +290,4 @@ MVP `micro-ui` не добавляет отдельную аутентифика
 - `buyer` ожидает доступность CLI `codex` внутри контейнера (`CODEX_BIN`, по умолчанию `codex`).
 - `buyer` и LLM-judge в `eval_service` требуют авторизацию `codex`: либо `OPENAI_API_KEY`, либо `CODEX_AUTH_JSON_PATH` с OAuth `auth.json`.
 - Режим sandbox для `codex` в `buyer` управляется `CODEX_SANDBOX_MODE` (по умолчанию `danger-full-access` для стабильного CDP-доступа к `browser-sidecar`).
-- Полноценный `middle` не поднимается, его роль выполняет `micro-ui`.
+- Полноценный `middle` не поднимается; `micro-ui` остается debug-модулем для локального наблюдения и ручной отладки.

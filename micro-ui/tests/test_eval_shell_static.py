@@ -27,6 +27,7 @@ class EvalShellStaticTests(unittest.TestCase):
         app_js = (BASE_DIR / 'app' / 'static' / 'app.js').read_text(encoding='utf-8')
         eval_js = (BASE_DIR / 'app' / 'static' / 'eval.js').read_text(encoding='utf-8')
         eval_css = (BASE_DIR / 'app' / 'static' / 'eval.css').read_text(encoding='utf-8')
+        index_html = (BASE_DIR / 'app' / 'templates' / 'index.html').read_text(encoding='utf-8')
 
         self.assertIn("'payment_unverified'", app_js)
         self.assertIn("'unverified'", app_js)
@@ -34,4 +35,7 @@ class EvalShellStaticTests(unittest.TestCase):
         self.assertIn("item.order_id && String(item.status || '').toLowerCase() !== 'unverified'", app_js)
         self.assertIn("['judged', 'judge_failed', 'unverified'].includes(item.runtime_status)", eval_js)
         self.assertIn("status = 'unverified'", eval_js)
+        self.assertIn('window.MICRO_UI_ENABLE_EVAL_STUBS', index_html)
+        self.assertIn('window.MICRO_UI_ENABLE_EVAL_STUBS === true', eval_js)
+        self.assertIn('Eval service base URL не настроен', eval_js)
         self.assertIn('.eval-status.unverified', eval_css)
