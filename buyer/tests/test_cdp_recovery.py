@@ -16,11 +16,11 @@ from buyer.app.runner import (
     _AgentStreamPublisher,
     _collect_process_streams,
     _read_process_stream,
-    _trace_date_dir_name,
 )
 from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
+from buyer.app._utils import trace_date_dir_name
 
 
 class _FakeProcess:
@@ -219,7 +219,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
             expected_session_dir = Path(tmpdir) / trace['trace_date'] / trace['trace_time'] / 'session-123'
             self.assertEqual(trace['session_dir'], expected_session_dir)
-            self.assertEqual(trace['trace_date'], _trace_date_dir_name())
+            self.assertEqual(trace['trace_date'], trace_date_dir_name())
             self.assertRegex(trace['trace_time'], r'^\d{2}-\d{2}-\d{2}$')
             self.assertTrue(expected_session_dir.is_dir())
             self.assertEqual(trace['prompt_path'], expected_session_dir / 'step-007-prompt.txt')

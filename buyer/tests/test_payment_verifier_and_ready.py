@@ -376,22 +376,20 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(scenario_finished_events), 1)
                 self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
-    async def test_litres_ignores_legacy_purchase_script_shaped_artifacts(self) -> None:
+    async def test_litres_ignores_legacy_artifact_payment_evidence(self) -> None:
         final_state = await self._run_single_output(
             start_url='https://www.litres.ru/',
             output=AgentOutput(
                 status='completed',
-                message='Legacy script-shaped artifacts не должны подтверждать payment_ready',
+                message='Legacy artifacts не должны подтверждать payment_ready',
                 order_id='order-789',
                 payment_evidence=None,
                 artifacts={
-                    'purchase_script': {
-                        'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-789',
-                        'payment_evidence': {
-                            'source': 'litres_payecom_iframe',
-                            'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                        },
-                    }
+                    'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-789',
+                    'payment_evidence': {
+                        'source': 'litres_payecom_iframe',
+                        'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+                    },
                 },
             ),
         )

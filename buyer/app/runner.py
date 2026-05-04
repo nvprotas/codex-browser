@@ -17,14 +17,13 @@ from uuid import uuid4
 from ._utils import (
     duration_ms_since as _duration_ms_since,
     tail_text as _tail_text,
-    trace_date_dir_name as _trace_date_dir_name,
-    trace_time_dir_name as _trace_time_dir_name,
 )
 from .models import AgentOutput, TaskAuthPayload
 from .agent_context_files import write_agent_context_files
 from .agent_instruction_manifest import build_agent_instruction_manifest
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
+from .trace_session import resolve_trace_session_dir
 from .user_profile import load_user_profile
 
 logger = logging.getLogger(__name__)
@@ -496,14 +495,7 @@ class AgentRunner:
 
     def _prepare_trace_context(self, *, session_id: str, step_index: int) -> dict[str, Any]:
         trace_root = Path(self._settings.buyer_trace_dir).expanduser()
-        session_dir = _find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
-        if session_dir is None:
-            trace_date = _trace_date_dir_name()
-            trace_time = _trace_time_dir_name()
-            session_dir = trace_root / trace_date / trace_time / session_id
-        else:
-            trace_time = session_dir.parent.name
-            trace_date = session_dir.parent.parent.name
+        trace_date, trace_time, session_dir = resolve_trace_session_dir(trace_root=trace_root, session_id=session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         step_tag = f'step-{step_index:03d}'
         return {
@@ -589,32 +581,6 @@ class AgentRunner:
             )
         }
 
-
-def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
-    if not trace_root.is_dir():
-        return None
-
-    matches: list[Path] = []
-    try:
-        date_dirs = [item for item in trace_root.iterdir() if item.is_dir()]
-    except OSError:
-        return None
-
-    for date_dir in date_dirs:
-        try:
-            time_dirs = [item for item in date_dir.iterdir() if item.is_dir()]
-        except OSError:
-            continue
-        for time_dir in time_dirs:
-            candidate = time_dir / session_id
-            if candidate.is_dir():
-                matches.append(candidate)
-
-    if not matches:
-        return None
-    return sorted(matches)[-1]
-
-
 def _preview_text(text: str, *, limit: int) -> str:
     if limit <= 0:
         return ''
@@ -672,11 +638,6 @@ def _slim_codex_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]
         if slim:
             slim_attempts.append(slim)
     return slim_attempts
-
-
-def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
-    total, items, _ = _read_browser_actions_log(path, limit=limit)
-    return total, items
 
 
 def _read_browser_actions_log(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]], dict[str, Any]]:
@@ -1380,24 +1341,6 @@ def _extract_cdp_error_tail(*, stdout_text: str, stderr_text: str) -> str:
 
     source = parsed_error or stderr_text or stdout_text or 'unknown error'
     return _tail_text(source)
-
-
-def _build_redacted_auth_payload(auth: TaskAuthPayload | None) -> dict[str, Any] | None:
-    if auth is None:
-        return None
-
-    storage_state = auth.storage_state if isinstance(auth.storage_state, dict) else None
-    cookies = storage_state.get('cookies') if storage_state is not None else None
-    origins = storage_state.get('origins') if storage_state is not None else None
-
-    return {
-        'provider': (auth.provider or '').strip().lower() or 'sberid',
-        'has_storage_state': storage_state is not None,
-        'storage_state_stats': {
-            'cookies_count': len(cookies) if isinstance(cookies, list) else 0,
-            'origins_count': len(origins) if isinstance(origins, list) else 0,
-        },
-    }
 
 
 def _build_agent_auth_state(

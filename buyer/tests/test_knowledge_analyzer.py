@@ -384,8 +384,8 @@ class KnowledgeAnalyzerTests(unittest.TestCase):
 
             self.assertIsNone(find_existing_trace_session_dir(trace_root=trace_root, session_id='session-1'))
 
-            with patch('buyer.app.knowledge_analyzer.trace_date_dir_name', return_value='2026-04-24'):
-                with patch('buyer.app.knowledge_analyzer.trace_time_dir_name', return_value='10-20-30'):
+            with patch('buyer.app.trace_session.trace_date_dir_name', return_value='2026-04-24'):
+                with patch('buyer.app.trace_session.trace_time_dir_name', return_value='10-20-30'):
                     trace = prepare_knowledge_analysis_context(trace_root=trace_root, session_id='session-1')
 
             session_dir = trace['session_dir']

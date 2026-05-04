@@ -6,13 +6,11 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
-import httpx
-
+from .cdp_endpoint import resolve_cdp_endpoint
 from .script_runtime import (
     ScriptSpec,
     read_script_result_payload,
@@ -21,7 +19,8 @@ from .script_runtime import (
     script_stdio_artifacts,
     unique_script_output_path,
 )
-from ._utils import remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
+from ._utils import remove_file_quietly, tail_text
+from .trace_session import resolve_trace_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -319,54 +318,8 @@ class SberIdScriptRunner:
 
 
 def _auth_trace_session_dir(*, trace_root: Path, session_id: str) -> Path:
-    existing = _find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
-    if existing is not None:
-        return existing
-
-    trace_date = trace_date_dir_name()
-    trace_time = trace_time_dir_name()
-    for candidate_date, candidate_time in _candidate_trace_dir_names(trace_date=trace_date, trace_time=trace_time):
-        candidate = trace_root / candidate_date / candidate_time / session_id
-        if not candidate.exists():
-            return candidate
-    return trace_root / trace_date / trace_time / session_id
-
-
-def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
-    if not trace_root.is_dir():
-        return None
-
-    matches: list[Path] = []
-    try:
-        date_dirs = [item for item in trace_root.iterdir() if item.is_dir()]
-    except OSError:
-        return None
-
-    for date_dir in date_dirs:
-        try:
-            time_dirs = [item for item in date_dir.iterdir() if item.is_dir()]
-        except OSError:
-            continue
-        for time_dir in time_dirs:
-            candidate = time_dir / session_id
-            if candidate.is_dir():
-                matches.append(candidate)
-
-    if not matches:
-        return None
-    return sorted(matches)[-1]
-
-
-def _candidate_trace_dir_names(*, trace_date: str, trace_time: str) -> list[tuple[str, str]]:
-    candidates = [(trace_date, trace_time)]
-    try:
-        base = datetime.strptime(f'{trace_date} {trace_time}', '%Y-%m-%d %H-%M-%S')
-    except ValueError:
-        return candidates
-    for offset_seconds in range(1, 60):
-        current = base + timedelta(seconds=offset_seconds)
-        candidates.append((current.strftime('%Y-%m-%d'), current.strftime('%H-%M-%S')))
-    return candidates
+    _, _, session_dir = resolve_trace_session_dir(trace_root=trace_root, session_id=session_id)
+    return session_dir
 
 
 def _write_storage_state_tempfile(storage_state: dict[str, Any], *, session_id: str, attempt: int) -> Path:
@@ -382,70 +335,3 @@ def _write_storage_state_tempfile(storage_state: dict[str, Any], *, session_id: 
         os.chmod(storage_path, 0o600)
         json.dump(storage_state, handle, ensure_ascii=False)
     return storage_path
-
-
-def _build_endpoint_candidates(endpoint: str) -> list[str]:
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {'http', 'https'}:
-        return [endpoint]
-
-    port = parsed.port
-    if port is None:
-        port = 443 if parsed.scheme == 'https' else 80
-
-    candidates: list[str] = []
-
-    def add_candidate(raw: str) -> None:
-        if raw not in candidates:
-            candidates.append(raw)
-
-    add_candidate(endpoint)
-
-    if parsed.hostname not in {'localhost', '127.0.0.1'}:
-        add_candidate(f'{parsed.scheme}://localhost:{port}')
-        add_candidate(f'{parsed.scheme}://127.0.0.1:{port}')
-
-    if parsed.hostname != 'host.docker.internal':
-        add_candidate(f'{parsed.scheme}://host.docker.internal:{port}')
-
-    return candidates
-
-
-async def _resolve_single_http_endpoint(endpoint: str, *, client: httpx.AsyncClient) -> str:
-    parsed = urlparse(endpoint)
-    host_header = f'localhost:{parsed.port}' if parsed.port else 'localhost'
-    version_url = endpoint.rstrip('/') + '/json/version'
-    response = await client.get(version_url, headers={'Host': host_header})
-    response.raise_for_status()
-    payload = response.json()
-
-    raw_ws = payload.get('webSocketDebuggerUrl')
-    if not isinstance(raw_ws, str) or not raw_ws:
-        raise RuntimeError('CDP endpoint не вернул webSocketDebuggerUrl.')
-
-    ws_parsed = urlparse(raw_ws)
-    return urlunparse((ws_parsed.scheme, parsed.netloc, ws_parsed.path, ws_parsed.params, ws_parsed.query, ws_parsed.fragment))
-
-
-async def resolve_cdp_endpoint(endpoint: str) -> str:
-    parsed = urlparse(endpoint)
-    if parsed.scheme in {'ws', 'wss'}:
-        return endpoint
-
-    if parsed.scheme not in {'http', 'https'}:
-        return endpoint
-
-    candidates = _build_endpoint_candidates(endpoint)
-    failures: list[str] = []
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for candidate in candidates:
-            try:
-                return await _resolve_single_http_endpoint(candidate, client=client)
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f'{candidate}: {exc}')
-
-    details = '; '.join(failures[:4])
-    raise RuntimeError(
-        'Не удалось подключиться к browser-sidecar ни по одному CDP endpoint. '
-        f'Пробовали: {", ".join(candidates)}. Ошибки: {details}'
-    )

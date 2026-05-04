@@ -180,6 +180,22 @@ Lifecycle:
 - Internal callback по http разрешен только при точном совпадении scheme/host/port/path с `MIDDLE_CALLBACK_URL` или `TRUSTED_CALLBACK_URLS`; query/fragment в default/trusted entries запрещены и не участвуют в allowlist.
 - Секрет callback receiver передается отдельно как ephemeral `callback_token`, а не в persisted `callback_url`. Legacy query-token может приниматься входящим eval receiver, но `buyer` такой callback URL не allowlist-ит.
 
+### `buyer/app/cdp_endpoint.py`
+
+Общий resolver CDP endpoint для Python browser tooling.
+
+Поведение:
+
+- `ws://`/`wss://` endpoint возвращается без изменений;
+- HTTP(S) endpoint резолвится через `/json/version` в `webSocketDebuggerUrl`;
+- если исходный HTTP(S) hostname недоступен из текущего процесса, пробуются fallback hostnames `localhost`, `127.0.0.1`, `host.docker.internal` с тем же scheme/port;
+- websocket URL из `/json/version` возвращается с netloc фактически сработавшего HTTP endpoint, чтобы `auth_scripts.py` и `cdp_tool.py` одинаково работали из контейнера и локального окружения.
+
+Ошибки:
+
+- `RuntimeError('CDP endpoint не вернул webSocketDebuggerUrl.')`, если `/json/version` не содержит websocket URL;
+- `RuntimeError('Не удалось подключиться к browser-sidecar ни по одному CDP endpoint...')`, если все кандидаты недоступны.
+
 ### `buyer/app/models.py`
 
 Pydantic-контракты API и внутренних результатов.
@@ -251,7 +267,7 @@ Pydantic-контракты API и внутренних результатов.
 
 - Provider parser `parse_payecom_payment_url()` принимает только точный HTTPS URL `https://payecom.ru/pay_ru?orderId=<order_id>` без port/path params и с ровно одним непустым `orderId`.
 - Provider parser `parse_yoomoney_payment_url()` принимает только точный HTTPS URL `https://yoomoney.ru/checkout/payments/v2/contract?orderId=<order_id>` без port/path params и с ровно одним непустым `orderId`.
-- Для Litres merchant policy принимает только `order_id`, подтвержденный `payment_evidence`/`payment_frame_src` с PayEcom provider evidence и совпадающим `orderId`; accepted result возвращает `order_id_host="payecom.ru"`.
+- Для Litres merchant policy принимает только `order_id`, подтвержденный top-level `payment_evidence.source="litres_payecom_iframe"` с PayEcom provider evidence и совпадающим `orderId`; legacy evidence из `artifacts.payment_frame_src`/`artifacts.payment_evidence` игнорируется; accepted result возвращает `order_id_host="payecom.ru"`.
 - `http://payecom.ru`, subdomain вроде `evil.payecom.ru`, port/path params, path prefix вроде `/pay_ru_malicious`, несколько `orderId` или mismatch `orderId` отклоняются.
 - Для Brandshop merchant policy принимает только `order_id`, подтвержденный `payment_evidence.source="brandshop_yoomoney_sberpay_redirect"` и YooMoney provider evidence с совпадающим `orderId`; accepted result возвращает `order_id_host="yoomoney.ru"`.
 - Для доменов без merchant policy валидный provider evidence PayEcom/YooMoney со совпадающим top-level `order_id` возвращает `unverified`, а не success; битый/mismatch evidence возвращает `rejected`.
@@ -338,7 +354,7 @@ Postgres repository и inline migrations.
 
 - `_sanitize_auth_context` удаляет `storageState`, cookies, localStorage, auth/token/password-like ключи.
 - `_sanitize_persistent_metadata` дополнительно удаляет stdout/stderr/prompt preview.
-- `_sanitize_reply_or_memory_text` и legacy helper `summarize_sberid_auth_reply` остаются защитным редактированием на persistence-границе, но `BuyerService` больше не запрашивает и не принимает auth-пакеты через пользовательский reply.
+- `_sanitize_reply_or_memory_text` остается защитным редактированием на persistence-границе, но `BuyerService` больше не запрашивает и не принимает auth-пакеты через пользовательский reply.
 - `_iter_artifact_paths` не сохраняет path к `storageState`/cookies/localStorage.
 
 ### `buyer/app/external_auth.py`
@@ -467,7 +483,7 @@ HTTP-клиент доставки callback-событий.
 
 Внутренний flow:
 
-1. Подготавливает trace context: `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/step-XXX-*`.
+1. Подготавливает trace context через `trace_session`: `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/step-XXX-*`.
 2. Делает CDP preflight через `/app/tools/cdp_tool.py url`.
 3. Загружает user profile.
 4. Пишет dynamic context files в trace step dir через `agent_context_files`.
@@ -524,6 +540,19 @@ HTTP-клиент доставки callback-событий.
 Небольшие helpers: `tail_text`, `head_text`, безопасное удаление файла, duration ms, имена trace date/time.
 
 Ошибки: `remove_file_quietly` гасит `FileNotFoundError`; остальные функции ошибок обычно не генерируют.
+
+### `buyer/app/trace_session.py`
+
+Общий helper для trace session directories.
+
+Поведение:
+
+- ищет существующую dated session dir в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>` и возвращает последнюю подходящую;
+- отбрасывает date/time/session entries с неподходящим именем, symlink или выходом за `trace_root`;
+- для новой сессии подбирает безопасный timestamp directory, при collision пробует следующие секунды в пределах минуты;
+- используется `AgentRunner`, `SberIdScriptRunner` и `PostSessionKnowledgeAnalyzer`, чтобы trace lookup и symlink-политика были одинаковыми.
+
+Ошибки: при невозможности подобрать безопасный путь выбрасывает `ValueError` с русскоязычным описанием.
 
 ## `buyer`: SberId auth scripts and TypeScript helpers
 
@@ -582,8 +611,7 @@ Reason codes:
 - любой non-zero exit code: `auth_failed_invalid_session`; JSON payload из output/stdout может сохраняться только как диагностический `script_result_payload` в artifacts и не может стать успешным `auth_ok`.
 - process failed без валидного payload: `auth_failed_invalid_session`.
 - невалидный JSON payload: `auth_failed_invalid_session`.
-- `_resolve_single_http_endpoint` может поднять `RuntimeError`, если `/json/version` не содержит `webSocketDebuggerUrl`.
-- `resolve_cdp_endpoint` может поднять `RuntimeError`, если не удалось подключиться ни к одному fallback endpoint.
+- CDP endpoint резолвится через общий `buyer/app/cdp_endpoint.py`; ошибки resolver переходят в `auth_failed_invalid_session`.
 
 ### Automatic purchase scripts
 
@@ -674,8 +702,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 
 Поведение:
 
-- HTTP endpoint резолвится через `/json/version` в websocket endpoint.
-- При недоступном hostname пробуются fallback: `localhost`, `127.0.0.1`, `host.docker.internal`.
+- HTTP endpoint резолвится через общий `buyer/app/cdp_endpoint.py`: `/json/version` переводит его в websocket endpoint, а при недоступном hostname пробуются fallback `localhost`, `127.0.0.1`, `host.docker.internal`.
 - `ensure_page()` выбирает существующую не пустую страницу нейтрально: сначала HTTP(S), затем прочие non-blank, а среди равных кандидатов последнюю по `context_index/page_index`; hardcoded доменного приоритета нет.
 - `goto --url` до подключения к Playwright валидирует URL той же public http/https policy, что `start_url`: без userinfo, loopback/private/link-local/metadata hosts, `host.docker.internal` и внутренних suffixes.
 - После подключения к странице `cdp_tool` ставит Playwright `context.route("**/*", ...)` guard на время команды: document/navigation requests, включая redirects и iframe-навигации, проходят через ту же URL policy и при нарушении abort-ятся `blockedbyclient`; ненавигационные asset/XHR requests не блокируются этим guard.
@@ -832,7 +859,7 @@ Callback state rules:
 
 ### `eval_service/app/api.py`
 
-HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Run detail дополнительно sanitizes callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
+HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Handler-ы отвечают за чтение run artifacts, HTTP-ошибки и judge orchestration; сборка outward payload вынесена в `api_presenters.py`.
 
 Judge flow:
 
@@ -845,6 +872,17 @@ Judge flow:
 - после успешной schema/identity validation `JudgeRunner` перезаписывает `judge_metadata` серверными значениями `backend=codex_exec` и `model=EVAL_JUDGE_MODEL`, чтобы metadata не зависела от сгенерированного model output;
 - при timeout, non-zero exit, невалидном JSON/schema mismatch или identity mismatch пишется fallback evaluation со skipped/failed checks.
 - async judge-job пишет промежуточный `judge_input` в `artifact_paths`, после каждого judge-eligible case обновляет state на `judged`/`judge_failed`, пересчитывает `summary.json`, а повторный запуск пропускает уже `judged` cases с валидным evaluation artifact и `unverified` cases как review-needed terminal.
+
+### `eval_service/app/api_presenters.py`
+
+Чистая сборка payload для eval UI.
+
+Отвечает за:
+
+- case/run summary items, run detail cases и placeholder case для неизвестного registry entry;
+- outward evaluation items: renderable checks, artifact/evidence refs, runtime status, duration/tokens/recommendation counts;
+- dashboard rows для cases/hosts с micro-ui friendly fields;
+- sanitization callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
 
 ## `micro-ui`
 
@@ -1057,6 +1095,7 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `buyer/tests/test_auth_reply_removal.py` | MON-29 regression: inline invalid auth уходит в guest без `ask_user`, auth-script refresh/failure уходит в heuristic без запроса auth-пакета, parser reply-auth удален. |
 | `buyer/tests/test_external_auth.py` | MON-30 regression: external cookies payload validation, httpx `MockTransport`, timeout mapping, source priority inline over external и guest fallback с `auth_external_*` reason-code. |
 | `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, persistence redaction legacy auth-like replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
+| `buyer/tests/test_cdp_endpoint.py` | Общий CDP endpoint resolver: fallback-кандидаты, passthrough websocket endpoint и rewrite websocket netloc под сработавший HTTP endpoint. |
 | `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout и устойчивость к невалидному output-файлу. |
 | `buyer/tests/test_prompt_externalization.py` | Review TODO hygiene, instruction manifest, dynamic context files, bootstrap prompt и отсутствие raw auth/profile/memory/CDP preflight blobs в prompt. |
 | `buyer/tests/test_sberid_auth_idempotency.py` | Litres/Brandshop auth snapshot helpers и source-order regression для already-authenticated precheck до entry navigation/Sber ID clicks. |
