@@ -22,7 +22,7 @@ from buyer.app.runner import (
     _read_new_jsonl_records,
 )
 from buyer.app.service import _log_step_result_to_container, _summarize_browser_action_for_container_log
-from buyer.app.settings import Settings
+from buyer.app.settings import DEFAULT_CODEX_MODEL, Settings
 from buyer.tools.cdp_tool import (
     HTML_STDOUT_LIMIT,
     LINKS_DEFAULT_LIMIT,
@@ -1078,8 +1078,13 @@ class BrowserActionMetricsTests(unittest.TestCase):
     def test_settings_default_codex_model_is_gpt_55(self) -> None:
         settings = Settings(_env_file=None)
 
-        self.assertEqual(settings.codex_model, 'gpt-5.5')
+        self.assertEqual(settings.codex_model, DEFAULT_CODEX_MODEL)
         self.assertEqual(settings.codex_reasoning_effort, 'low')
+
+    def test_settings_blank_codex_model_uses_default(self) -> None:
+        settings = Settings(_env_file=None, codex_model='  ')
+
+        self.assertEqual(settings.codex_model, DEFAULT_CODEX_MODEL)
 
     def test_codex_tokens_used_sums_multiple_attempts(self) -> None:
         tokens = _extract_codex_tokens_used(stdout_text='tokens used 10', stderr_text='tokens used 1,250')

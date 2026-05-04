@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DEFAULT_CODEX_MODEL = 'gpt-5.5'
 
 
 class Settings(BaseSettings):
@@ -18,7 +21,7 @@ class Settings(BaseSettings):
     cdp_recovery_interval_ms: int = Field(default=500, ge=1)
 
     codex_bin: str = 'codex'
-    codex_model: str | None = 'gpt-5.5'
+    codex_model: str = DEFAULT_CODEX_MODEL
     codex_timeout_sec: int = 1800
     codex_workdir: str = '/workspace'
     codex_skip_git_repo_check: bool = True
@@ -55,6 +58,15 @@ class Settings(BaseSettings):
     max_active_sessions: int = 1
 
     status_ttl_sec: int = Field(default=86400, ge=60)
+
+    @field_validator('codex_model', mode='before')
+    @classmethod
+    def _default_blank_codex_model(cls, value: Any) -> Any:
+        if value is None:
+            return DEFAULT_CODEX_MODEL
+        if isinstance(value, str):
+            return value.strip() or DEFAULT_CODEX_MODEL
+        return value
 
 
 @lru_cache

@@ -41,7 +41,7 @@ AgentStreamCallback = Callable[[dict[str, Any]], Awaitable[None]]
 @dataclass(frozen=True)
 class _CodexAttemptSpec:
     role: str
-    model: str | None
+    model: str
 
 
 @dataclass
@@ -192,7 +192,7 @@ class AgentRunner:
             env=env,
             attempt_spec=_CodexAttemptSpec(
                 role='single',
-                model=(self._settings.codex_model or '').strip() or 'gpt-5.5',
+                model=self._settings.codex_model,
             ),
             stream_callback=stream_callback,
         )
@@ -206,7 +206,7 @@ class AgentRunner:
                 session_id,
                 step_index,
                 latest_attempt.result.status,
-                latest_attempt.spec.model or 'default',
+                latest_attempt.spec.model,
             )
         elif normalized == 'failed':
             latest_attempt.failure_reason = 'agent_reported_failed'
@@ -255,7 +255,7 @@ class AgentRunner:
                 if isinstance(result.artifacts.get('trace'), dict)
                 else None
             ),
-            latest_attempt.spec.model or 'default',
+            latest_attempt.spec.model,
             model_strategy,
         )
         return result
@@ -306,7 +306,7 @@ class AgentRunner:
             'codex_step_exec step=%s prompt_path=%s model=%s role=%s attempt_id=%s sandbox=%s',
             step_index,
             trace['prompt_path'],
-            attempt_spec.model or 'default',
+            attempt_spec.model,
             attempt_spec.role,
             attempt_id,
             self._settings.codex_sandbox_mode,
@@ -353,7 +353,7 @@ class AgentRunner:
                 'codex_step_timeout step=%s role=%s model=%s timeout_sec=%s duration_ms=%s',
                 step_index,
                 attempt_spec.role,
-                attempt_spec.model or 'default',
+                attempt_spec.model,
                 self._settings.codex_timeout_sec,
                 attempt.duration_ms,
             )
@@ -365,7 +365,7 @@ class AgentRunner:
             'codex_step_process_finished step=%s role=%s model=%s returncode=%s duration_ms=%s stdout_len=%s stderr_len=%s',
             step_index,
             attempt_spec.role,
-            attempt_spec.model or 'default',
+            attempt_spec.model,
             attempt.codex_returncode,
             attempt.duration_ms,
             len(attempt.stdout_text),

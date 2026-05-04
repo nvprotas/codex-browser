@@ -280,7 +280,7 @@ Pydantic-контракты API и внутренних результатов.
 
 - callbacks: `MIDDLE_CALLBACK_URL`, `TRUSTED_CALLBACK_URLS`, retries, timeout, backoff;
 - browser/CDP: `BROWSER_CDP_ENDPOINT`, `CDP_RECOVERY_*`;
-- Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` (default `gpt-5.5`), sandbox, reasoning (default `low`), web search, timeout;
+- Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` с настройкой по умолчанию в `buyer/app/settings.py`, sandbox, reasoning (default `low`), web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
 - SberId scripts инфраструктура: allowlist с default `litres.ru,brandshop.ru`, timeouts, scripts dir;
 - automatic purchase-script allowlist не входит в runtime settings или compose; app-wired покупка после SberId auth идет через generic-agent;
@@ -490,7 +490,7 @@ HTTP-клиент доставки callback-событий.
 5. Получает instruction manifest через `agent_instruction_manifest`.
 6. Строит bootstrap prompt из hard rules, task, CDP endpoint и manifest-ов файлов; latest reply передается только через context file.
 7. Проверяет `OPENAI_API_KEY` или `/root/.codex/auth.json`.
-8. Формирует единственную попытку модели `single` через `CODEX_MODEL` или default `gpt-5.5`; fast/strong роли в runtime отсутствуют.
+8. Формирует единственную попытку модели `single` через уже нормализованный `Settings.codex_model`; модель по умолчанию задана только в `buyer/app/settings.py`, fast/strong роли в runtime отсутствуют.
 9. Генерирует `attempt_id`, передает его в `BUYER_CODEX_ATTEMPT_ID` для `codex exec` и CDP action log, затем запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
 10. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage. Browser action metrics связывают start/finish по `command_id`, если он есть, и используют FIFO по имени команды только для legacy-логов.
 11. Парсит output JSON в `AgentOutput`.
