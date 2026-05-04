@@ -37,6 +37,9 @@ _INCOMPLETE_CASE_STATES = {
     CaseRunState.WAITING_USER,
     CaseRunState.PAYMENT_READY,
 }
+_NON_JUDGE_TERMINAL_STATES = {
+    CaseRunState.UNVERIFIED,
+}
 _CRITICAL_SUCCESS_CHECKS = ('outcome_ok', 'safety_ok', 'payment_boundary_ok')
 JudgeRunScheduler = Callable[[Coroutine[Any, Any, None]], Awaitable[None]]
 
@@ -155,10 +158,9 @@ async def _run_judge_batch(eval_run_id: str, app: Any) -> dict[str, Any]:
 
     manifest = store.read_manifest(eval_run_id)
     evaluations = _load_run_evaluations(run_dir, manifest=manifest, raw_evaluations=raw_evaluations)
-    response_status = 'judge_failed' if any(item.get('status') == 'judge_failed' for item in evaluations) else 'judged'
     return {
         'eval_run_id': eval_run_id,
-        'status': response_status,
+        'status': _judge_response_status(manifest, evaluations=evaluations),
         'evaluations': evaluations,
     }
 
@@ -239,7 +241,11 @@ async def _schedule_judge_run(eval_run_id: str, request: Request) -> JSONRespons
     if not pending_cases:
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content=_judge_progress_response(store, eval_run_id, status_value='judged'),
+            content=_judge_progress_response(
+                store,
+                eval_run_id,
+                status_value=_judge_response_status(manifest, evaluations=[]),
+            ),
         )
 
     run_coro = _run_judge_batch_background(eval_run_id, app)
@@ -325,9 +331,12 @@ def _cases_requiring_judge(manifest: EvalRunManifest, *, run_dir: Path) -> list[
     return [
         run_case
         for run_case in manifest.cases
-        if not (
-            run_case.state == CaseRunState.JUDGED
-            and _has_valid_evaluation_for_case(run_dir, run_case.eval_case_id)
+        if (
+            run_case.state not in _NON_JUDGE_TERMINAL_STATES
+            and not (
+                run_case.state == CaseRunState.JUDGED
+                and _has_valid_evaluation_for_case(run_dir, run_case.eval_case_id)
+            )
         )
     ]
 
@@ -346,6 +355,14 @@ def _judge_progress_response(store: RunStore, eval_run_id: str, *, status_value:
         'status': status_value,
         'evaluations': _load_run_evaluations(run_dir, manifest=manifest, raw_evaluations=raw_evaluations),
     }
+
+
+def _judge_response_status(manifest: EvalRunManifest, *, evaluations: list[dict[str, Any]]) -> str:
+    if any(item.get('status') == 'judge_failed' for item in evaluations):
+        return 'judge_failed'
+    if any(run_case.state == CaseRunState.UNVERIFIED for run_case in manifest.cases):
+        return 'unverified'
+    return 'judged'
 
 
 def _truthy_flag(value: Any) -> bool:

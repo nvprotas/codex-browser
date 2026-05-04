@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Locator, type Page } from 'playwrig
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
+import { tracedBrowserClose, tracedContextClose, tracedGoto, tracedPageClose } from './auth-trace.ts';
 
 type ScriptResult = {
   status: 'completed' | 'failed';
@@ -215,14 +216,28 @@ async function verifyCurrentOrProfilePage(page: Page, startUrl: string, tracePat
     return verification;
   }
 
-  await page.goto(authVerificationUrl(startUrl), { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await tracedGoto(
+    page,
+    tracePath,
+    'auth_verify_profile',
+    authVerificationUrl(startUrl),
+    { waitUntil: 'domcontentloaded', timeout: 12000 },
+    true,
+  );
   await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
   verification = await verifyAuthPage(page, tracePath, 'auth_verify_profile');
   if (verification.verified) {
     return verification;
   }
 
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => undefined);
+  await tracedGoto(
+    page,
+    tracePath,
+    'auth_verify_start_url',
+    startUrl,
+    { waitUntil: 'domcontentloaded', timeout: 12000 },
+    true,
+  );
   await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => undefined);
   return verifyAuthPage(page, tracePath, 'auth_verify_start_url');
 }
@@ -482,14 +497,14 @@ async function main(): Promise<void> {
     }
     const contextsToClose = existingContexts.length > 1 ? existingContexts.slice(1) : [];
     for (const existingContext of contextsToClose) {
-      await existingContext.close().catch(() => undefined);
+      await tracedContextClose(existingContext, tracePath, 'cleanup_extra_context', 'extra_existing_context');
     }
     const cookiesLoaded = cookieCount(storageState);
     await context.addCookies(storageCookies(storageState));
     const existingPages = context.pages();
     const page = existingPages[0] ?? (await context.newPage());
     for (const extraPage of existingPages.slice(1)) {
-      await extraPage.close().catch(() => undefined);
+      await tracedPageClose(extraPage, tracePath, 'cleanup_extra_page', 'extra_existing_page');
     }
     await page.setViewportSize({ width: 1440, height: 900 }).catch(() => undefined);
     appendTrace(tracePath, {
@@ -516,6 +531,38 @@ async function main(): Promise<void> {
     });
 
     const entryUrl = authEntryUrl(startUrl);
+    const existingAuth = await verifyCurrentOrProfilePage(page, startUrl, tracePath);
+    if (existingAuth.verified) {
+      const currentUrl = page.url();
+      const currentHost = hostFromUrl(currentUrl);
+      save(outputPath, {
+        status: 'completed',
+        reason_code: 'auth_ok',
+        message: 'SberId-сессия Litres уже активна; повторный вход пропущен.',
+        artifacts: {
+          script: 'litres',
+          final_url: currentUrl,
+          final_host: currentHost,
+          auth_entry_url: entryUrl,
+          cookies_loaded: cookiesLoaded,
+          trace_path: tracePath,
+          sber_loops: sberLoops,
+          already_authenticated: true,
+          already_authenticated_diagnostic: {
+            callback_seen: existingAuth.callback_seen,
+            markers: existingAuth.markers,
+            login_form_seen: existingAuth.login_form_seen,
+          },
+          auth_verified: true,
+          auth_verified_url: currentUrl,
+          auth_markers: existingAuth.markers,
+          context_prepared_for_reuse: true,
+        },
+      });
+      keepAuthContext = true;
+      return;
+    }
+
     appendTrace(tracePath, {
       ts: new Date().toISOString(),
       event: 'goto_auth_entry',
@@ -526,7 +573,7 @@ async function main(): Promise<void> {
         auth_entry_url: entryUrl,
       },
     });
-    await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await tracedGoto(page, tracePath, 'auth_entry', entryUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     const entryReadyStartedAt = Date.now();
     const entryReadyTarget = await waitForFirstVisible(page, authEntryReadyTargets(), 2500);
     appendTrace(tracePath, {
@@ -820,10 +867,10 @@ async function main(): Promise<void> {
     });
   } finally {
     if (context && createdContext && !keepAuthContext) {
-      await context.close().catch(() => undefined);
+      await tracedContextClose(context, tracePath, 'final_cleanup_created_context', 'auth_context_not_reused');
     }
     if (browser) {
-      await browser.close().catch(() => undefined);
+      await tracedBrowserClose(browser, tracePath, 'final_cleanup_browser', 'auth_script_finished');
     }
   }
 }

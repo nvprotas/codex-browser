@@ -460,6 +460,34 @@ def test_waiting_user_state_is_preserved_and_run_stays_running(tmp_path: Path) -
     assert pending_case.state == CaseRunState.PENDING
 
 
+def test_unverified_case_is_terminal_and_does_not_block_next_case(tmp_path: Path) -> None:
+    def finish_or_mark_unverified(call: dict[str, Any]) -> None:
+        if call['metadata']['eval_case_id'] == 'case-unverified':
+            _append_payment_unverified(store, call)
+            return
+        _append_payment_ready(store, call)
+
+    client, store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[
+            _case('case-unverified'),
+            _case('case-after-unverified'),
+        ],
+        on_create=finish_or_mark_unverified,
+    )
+
+    response = client.post('/runs', json={})
+
+    assert response.status_code == 200
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.status == EvalRunStatus.FINISHED
+    assert [call['metadata']['eval_case_id'] for call in buyer.calls] == [
+        'case-unverified',
+        'case-after-unverified',
+    ]
+    assert [case.state for case in manifest.cases] == [CaseRunState.UNVERIFIED, CaseRunState.FINISHED]
+
+
 def test_operator_reply_resumes_waiting_case_finishes_payment_ready_and_continues_until_next_wait(
     tmp_path: Path,
 ) -> None:
@@ -851,7 +879,11 @@ def _append_payment_ready(store: RunStore, call: dict[str, Any]) -> None:
         event_type=CallbackEventType.PAYMENT_READY,
         occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
         idempotency_key=f'idem-payment-{call["session_id"]}',
-        payload={'order_id': f'order-{call["session_id"]}'},
+        payload={
+            'order_id': f'order-{call["session_id"]}',
+            'order_id_host': 'payecom.ru',
+            'message': 'Открыт SberPay.',
+        },
         eval_run_id=metadata['eval_run_id'],
         eval_case_id=metadata['eval_case_id'],
     )
@@ -861,6 +893,36 @@ def _append_payment_ready(store: RunStore, call: dict[str, Any]) -> None:
         envelope,
         state=CaseRunState.PAYMENT_READY,
         waiting_reply_id=None,
+    )
+
+
+def _append_payment_unverified(store: RunStore, call: dict[str, Any]) -> None:
+    metadata = call['metadata']
+    finished_at = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    envelope = BuyerCallbackEnvelope(
+        event_id=f'event-unverified-{call["session_id"]}',
+        session_id=call['session_id'],
+        event_type=CallbackEventType.PAYMENT_UNVERIFIED,
+        occurred_at=finished_at,
+        idempotency_key=f'idem-unverified-{call["session_id"]}',
+        payload={
+            'order_id': f'order-{call["session_id"]}',
+            'order_id_host': 'yoomoney.ru',
+            'provider': 'yoomoney',
+            'message': 'Платежная граница найдена, но merchant policy не подтвердила SberPay.',
+            'reason': 'merchant_policy_not_allowlisted',
+        },
+        eval_run_id=metadata['eval_run_id'],
+        eval_case_id=metadata['eval_case_id'],
+    )
+    store.append_callback_event(
+        metadata['eval_run_id'],
+        metadata['eval_case_id'],
+        envelope,
+        state=CaseRunState.UNVERIFIED,
+        finished_at=finished_at,
+        waiting_reply_id=None,
+        error='payment unverified: merchant_policy_not_allowlisted',
     )
 
 

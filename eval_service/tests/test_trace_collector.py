@@ -82,6 +82,8 @@ def test_write_judge_input_writes_sanitized_case_artifact(tmp_path: Path) -> Non
         eval_case_id='litres_book_odyssey_001',
         payload={
             'message': 'Получен orderId ORDER-999, платежный шаг готов.',
+            'order_id': 'ORDER-999',
+            'order_id_host': 'payecom.ru',
             'orderId': 'ORDER-999',
             'payment_url': 'https://pay.example/sberpay/order/ORDER-999?token=one-time-token',
         },

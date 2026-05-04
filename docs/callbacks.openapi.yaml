@@ -37,6 +37,8 @@ paths:
             examples:
               paymentReady:
                 $ref: '#/components/examples/PaymentReadyCallback'
+              paymentUnverified:
+                $ref: '#/components/examples/PaymentUnverifiedCallback'
       responses:
         '200':
           description: Callback принят или распознан как дубль.
@@ -71,7 +73,22 @@ components:
         idempotency_key: 8b69d854-2d5d-4fb3-9946-d09736c8a461:payment_ready:payment-ready
         payload:
           order_id: '1585051118'
+          order_id_host: payecom.ru
           message: Получен orderId, шаг оплаты готов.
+    PaymentUnverifiedCallback:
+      summary: Callback `payment_unverified`.
+      value:
+        event_id: 6f1e9494-6b8f-4a1a-94b4-40d53d6ed0bf
+        session_id: 8b69d854-2d5d-4fb3-9946-d09736c8a461
+        event_type: payment_unverified
+        occurred_at: '2026-05-01T09:12:01.123456Z'
+        idempotency_key: 8b69d854-2d5d-4fb3-9946-d09736c8a461:payment_unverified:payment-unverified
+        payload:
+          order_id: unknown-order-123
+          order_id_host: yoomoney.ru
+          provider: yoomoney
+          message: Платежная граница найдена, но merchant policy не подтвердила SberPay.
+          reason: merchant_policy_not_allowlisted
 
   schemas:
     JsonValue:
@@ -108,6 +125,7 @@ components:
       enum:
         - completed
         - failed
+        - unverified
 
     AuthReasonCode:
       type: string
@@ -138,6 +156,7 @@ components:
         - handoff_requested
         - handoff_resumed
         - payment_ready
+        - payment_unverified
         - scenario_finished
 
     CallbackEventEnvelope:
@@ -174,6 +193,8 @@ components:
         Используется `anyOf`, потому что некоторые payload-формы имеют пересекающиеся
         поля (`message`, `status`, `order_id`) и не должны ломать валидацию при
         появлении дополнительных совместимых полей.
+        Runtime receiver дополнительно валидирует event_type-dependent required
+        fields; одного прохождения `anyOf` недостаточно для acceptance.
       anyOf:
         - $ref: '#/components/schemas/SessionStartedPayload'
         - $ref: '#/components/schemas/AgentStepStartedPayload'
@@ -183,6 +204,7 @@ components:
         - $ref: '#/components/schemas/HandoffRequestedPayload'
         - $ref: '#/components/schemas/HandoffResumedPayload'
         - $ref: '#/components/schemas/PaymentReadyPayload'
+        - $ref: '#/components/schemas/PaymentUnverifiedPayload'
         - $ref: '#/components/schemas/ScenarioFinishedPayload'
 
     SessionStartedPayload:
@@ -335,12 +357,47 @@ components:
       type: object
       required:
         - order_id
+        - order_id_host
         - message
       properties:
         order_id:
           type: string
+        order_id_host:
+          type: string
+          minLength: 1
+          description: Verifier-approved host страницы или iframe, где найден `order_id`.
         message:
           type: string
+      additionalProperties:
+        $ref: '#/components/schemas/JsonValue'
+
+    PaymentUnverifiedPayload:
+      type: object
+      required:
+        - order_id
+        - order_id_host
+        - provider
+        - message
+        - reason
+      properties:
+        order_id:
+          type: string
+          description: '`order_id`, найденный в provider evidence, но не подтвержденный merchant policy.'
+        order_id_host:
+          type: string
+          minLength: 1
+          description: Host provider evidence, где найден `order_id`.
+        provider:
+          type: string
+          description: Provider evidence, например `payecom` или `yoomoney`.
+        message:
+          type: string
+        reason:
+          type: string
+          description: Машинно-читаемая причина review-needed статуса.
+        failure_reason:
+          type: string
+          description: Человекочитаемое объяснение verifier, если доступно.
       additionalProperties:
         $ref: '#/components/schemas/JsonValue'
 
@@ -373,32 +430,22 @@ components:
       type: object
       description: Усеченный trace, который buyer прикладывает к `agent_step_finished`.
       properties:
+        step:
+          type: integer
+          minimum: 1
         trace_date:
           type: string
         trace_time:
-          type: string
-        prompt_path:
           type: string
         prompt_sha256:
           type: string
         trace_file:
           type: string
-        browser_actions_log_path:
-          type: string
+          description: Локальная ссылка на полный trace-файл для eval/debug-инструментов.
         browser_actions_total:
           type: integer
         duration_ms:
           type: number
-        command_duration_ms:
-          type: number
-        inter_command_idle_ms:
-          type: number
-        browser_busy_union_ms:
-          type: number
-        post_browser_idle_ms:
-          type: number
-        command_errors:
-          type: integer
         codex_tokens_used:
           type: integer
         codex_model:
@@ -409,22 +456,9 @@ components:
           type: string
         codex_returncode:
           type: integer
-        prompt_preview:
-          type: string
-        stdout_tail:
-          type: string
-        stderr_tail:
-          type: string
-        browser_actions_tail:
-          type: array
-          items:
-            $ref: '#/components/schemas/JsonObject'
-        top_idle_gaps:
-          type: array
-          items:
-            $ref: '#/components/schemas/JsonObject'
         codex_attempts:
           type: array
+          description: Усеченные attempts без stdout/stderr, output paths и timing arrays.
           items:
             $ref: '#/components/schemas/JsonObject'
       additionalProperties:

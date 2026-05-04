@@ -94,7 +94,11 @@ def test_write_judge_input_preserves_redacted_payload_and_adds_trace_file_refs(t
                 'event_type': 'payment_ready',
                 'occurred_at': '2026-04-29T12:00:02Z',
                 'session_id': 'session-123',
-                'payload': {'message': 'SberPay открыт', 'order_id': 'order-secret'},
+                'payload': {
+                    'message': 'SberPay открыт',
+                    'order_id': 'order-secret',
+                    'order_id_host': 'payecom.ru',
+                },
             },
         ],
         metrics={'duration_ms': 1234},

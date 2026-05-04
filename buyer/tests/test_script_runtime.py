@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 from buyer.app.purchase_scripts import PURCHASE_SCRIPT_FAILED, PurchaseScriptRunner
-from buyer.app.script_runtime import read_script_result_payload
+from buyer.app.script_runtime import ScriptSpec, read_script_result_payload
 
 
 class ScriptRuntimeTests(unittest.TestCase):
@@ -83,8 +83,38 @@ exit 7
         self.assertEqual(result.artifacts['script_result_payload']['status'], 'completed')
         self.assertIn('fatal playwright error', result.artifacts['stderr_tail'])
 
+    async def test_runner_reports_missing_registered_fixture_script(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scripts_dir = root / 'scripts'
+            trace_dir = root / 'trace'
+            runner = self._runner(scripts_dir=scripts_dir, trace_dir=trace_dir)
+
+            result = await self._run_with_resolved_cdp(runner, session_id='session-missing')
+
+        self.assertEqual(result.status, PURCHASE_SCRIPT_FAILED)
+        self.assertEqual(result.reason_code, 'purchase_script_missing')
+        self.assertIsNone(result.order_id)
+        self.assertEqual(result.artifacts['domain'], 'example.test')
+        self.assertEqual(result.artifacts['script'], str(scripts_dir / 'purchase' / 'example.ts'))
+
+    async def test_runner_reports_unpublished_registered_fixture_script(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            scripts_dir = root / 'scripts'
+            trace_dir = root / 'trace'
+            runner = self._runner(scripts_dir=scripts_dir, trace_dir=trace_dir, lifecycle='draft')
+
+            result = await self._run_with_resolved_cdp(runner, session_id='session-draft')
+
+        self.assertEqual(result.status, PURCHASE_SCRIPT_FAILED)
+        self.assertEqual(result.reason_code, 'purchase_script_not_published')
+        self.assertIsNone(result.order_id)
+        self.assertEqual(result.artifacts['domain'], 'example.test')
+        self.assertEqual(result.artifacts['lifecycle'], 'draft')
+
     def _write_fake_script_tree(self, scripts_dir: Path, *, tsx_body: str) -> None:
-        script_path = scripts_dir / 'purchase' / 'litres.ts'
+        script_path = scripts_dir / 'purchase' / 'example.ts'
         tsx_path = scripts_dir / 'node_modules' / '.bin' / 'tsx'
         script_path.parent.mkdir(parents=True)
         tsx_path.parent.mkdir(parents=True)
@@ -92,13 +122,21 @@ exit 7
         tsx_path.write_text('#!/usr/bin/env bash\nset -u\n' + tsx_body, encoding='utf-8')
         tsx_path.chmod(0o755)
 
-    def _runner(self, *, scripts_dir: Path, trace_dir: Path) -> PurchaseScriptRunner:
-        return PurchaseScriptRunner(
+    def _runner(self, *, scripts_dir: Path, trace_dir: Path, lifecycle: str = 'publish') -> PurchaseScriptRunner:
+        runner = PurchaseScriptRunner(
             scripts_dir=str(scripts_dir),
             cdp_endpoint='http://browser:9223',
             timeout_sec=5,
             trace_dir=str(trace_dir),
         )
+        runner._registry = {  # type: ignore[attr-defined]
+            'example.test': ScriptSpec(
+                domain='example.test',
+                lifecycle=lifecycle,
+                relative_path='purchase/example.ts',
+            )
+        }
+        return runner
 
     async def _run_with_resolved_cdp(self, runner: PurchaseScriptRunner, *, session_id: str) -> Any:
         async def fake_resolve_cdp_endpoint(_: str) -> str:
@@ -107,7 +145,7 @@ exit 7
         with patch('buyer.app.purchase_scripts.resolve_cdp_endpoint', new=fake_resolve_cdp_endpoint):
             return await runner.run(
                 session_id=session_id,
-                domain='litres.ru',
-                start_url='https://www.litres.ru/',
-                task='Открой litres. Ищи книгу одиссея гомера',
+                domain='example.test',
+                start_url='https://example.test/',
+                task='Открой магазин и дойди до SberPay.',
             )

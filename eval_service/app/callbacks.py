@@ -244,13 +244,28 @@ def _state_updates_for_callback(envelope: BuyerCallbackEnvelope, case: EvalRunCa
             'state': CaseRunState.PAYMENT_READY,
             'waiting_reply_id': None,
         }
+    if envelope.event_type == CallbackEventType.PAYMENT_UNVERIFIED:
+        return {
+            'state': CaseRunState.UNVERIFIED,
+            'finished_at': envelope.occurred_at,
+            'waiting_reply_id': None,
+            'error': _payment_unverified_error(envelope),
+        }
     if envelope.event_type == CallbackEventType.SCENARIO_FINISHED:
-        if _payload_status(envelope) == 'failed':
+        scenario_status = _payload_status(envelope)
+        if scenario_status == 'failed':
             return {
                 'state': CaseRunState.FAILED,
                 'finished_at': envelope.occurred_at,
                 'waiting_reply_id': None,
                 'error': _scenario_failure_error(envelope),
+            }
+        if scenario_status == 'unverified':
+            return {
+                'state': CaseRunState.UNVERIFIED,
+                'finished_at': envelope.occurred_at,
+                'waiting_reply_id': None,
+                'error': _scenario_unverified_error(envelope),
             }
         return {
             'state': CaseRunState.FINISHED,
@@ -345,16 +360,41 @@ def _payload_status(envelope: BuyerCallbackEnvelope) -> str | None:
 def _validate_callback_payload(envelope: BuyerCallbackEnvelope) -> None:
     if envelope.event_type == CallbackEventType.PAYMENT_READY:
         _payload_string(envelope, 'order_id')
+        _payload_string(envelope, 'order_id_host')
         _payload_string(envelope, 'message')
+        return
+    if envelope.event_type == CallbackEventType.PAYMENT_UNVERIFIED:
+        _payload_string(envelope, 'order_id')
+        _payload_string(envelope, 'order_id_host')
+        _payload_string(envelope, 'provider')
+        _payload_string(envelope, 'message')
+        _payload_string(envelope, 'reason')
         return
     if envelope.event_type == CallbackEventType.SCENARIO_FINISHED:
         scenario_status = _payload_status(envelope)
-        if scenario_status not in {'completed', 'failed'}:
+        if scenario_status not in {'completed', 'failed', 'unverified'}:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail='callback scenario_finished должен содержать payload.status=completed|failed',
+                detail='callback scenario_finished должен содержать payload.status=completed|failed|unverified',
             )
         _payload_string(envelope, 'message')
+
+
+def _payment_unverified_error(envelope: BuyerCallbackEnvelope) -> str:
+    reason = envelope.payload.get('reason')
+    message = envelope.payload.get('message')
+    if isinstance(reason, str) and reason:
+        if isinstance(message, str) and message:
+            return f'payment unverified: {reason}: {message}'
+        return f'payment unverified: {reason}'
+    return f'payment unverified: {envelope.payload}'
+
+
+def _scenario_unverified_error(envelope: BuyerCallbackEnvelope) -> str:
+    message = envelope.payload.get('message')
+    if isinstance(message, str) and message:
+        return f'payment unverified: {message}'
+    return f'payment unverified: {envelope.payload}'
 
 
 def _scenario_failure_error(envelope: BuyerCallbackEnvelope) -> str:
@@ -384,6 +424,7 @@ def _require_case_value(value: str | None, name: str) -> str:
 def _is_terminal_case_state(state: CaseRunState) -> bool:
     return state in {
         CaseRunState.SKIPPED_AUTH_MISSING,
+        CaseRunState.UNVERIFIED,
         CaseRunState.FINISHED,
         CaseRunState.FAILED,
         CaseRunState.TIMEOUT,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from buyer.app.models import EventEnvelope, SessionStatus, TaskAuthPayload
 from buyer.app.persistence import (
@@ -261,6 +261,40 @@ class PersistentStateStoreTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertNotEqual(created.session_id, next_state.session_id)
+
+    async def test_unverified_status_is_terminal_for_runtime_slot_and_ttl_cleanup(self) -> None:
+        repository = InMemorySessionRepository()
+        current_time = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+
+        def clock() -> datetime:
+            return current_time
+
+        store = SessionStore(repository=repository, max_active_sessions=1, status_ttl_sec=1, clock=clock)
+        created = await store.create_session(
+            task='Купить товар',
+            start_url='https://example-shop.test/',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+
+        await store.set_status(created.session_id, SessionStatus.UNVERIFIED)
+        second = await store.create_session(
+            task='Следующая задача',
+            start_url='https://example-shop.test/next',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+
+        self.assertNotEqual(created.session_id, second.session_id)
+
+        current_time = current_time + timedelta(seconds=2)
+        sessions = await store.list_sessions()
+
+        self.assertEqual([session.session_id for session in sessions], [second.session_id])
 
     @unittest.skipUnless(os.environ.get('BUYER_TEST_DATABASE_URL'), 'BUYER_TEST_DATABASE_URL не задан')
     async def test_postgres_repository_restores_state_between_store_instances(self) -> None:

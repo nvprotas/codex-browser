@@ -11,8 +11,13 @@ from typing import Any
 from unittest.mock import patch
 
 from buyer.app.models import AgentOutput, EventEnvelope, SessionStatus
-from buyer.app.purchase_scripts import PurchaseScriptResult
-from buyer.app.runner import AgentRunner, _AgentStreamPublisher, _read_process_stream, _trace_date_dir_name
+from buyer.app.runner import (
+    AgentRunner,
+    _AgentStreamPublisher,
+    _collect_process_streams,
+    _read_process_stream,
+    _trace_date_dir_name,
+)
 from buyer.app.service import BuyerService, _looks_like_transient_cdp_failure
 from buyer.app.settings import Settings
 from buyer.app.state import SessionStore
@@ -61,6 +66,30 @@ class _StreamingFakeProcess:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+class _BlockingLineReader:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def readline(self) -> bytes:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return b''
+
+
+class _BlockingStreamingProcess:
+    def __init__(self) -> None:
+        self.returncode = None
+        self.stdout = _BlockingLineReader()
+        self.stderr = _BlockingLineReader()
+
+    async def wait(self) -> int:
+        await asyncio.sleep(3600)
+        return 0
 
 
 class _SequenceRunner:
@@ -123,71 +152,6 @@ class _NoopAuthScriptRunner:
 
     async def run(self, **_: Any) -> Any:
         return None
-
-
-class _CompletedPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт дошел до оплаты',
-            order_id='order-456',
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-456',
-            },
-        )
-
-
-class _InvalidCompletedPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт ошибочно принял оплату',
-            order_id='order-456',
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': 'https://www.litres.ru/purchase/ppd/?order=order-456&method=sbp&system=sbersbp',
-            },
-        )
-
-
-class _UnavailableSberPayPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='failed',
-            reason_code='purchase_script_sberpay_unavailable',
-            message='SberPay не найден, доступен только СБП.',
-            order_id=None,
-            artifacts={
-                'source': 'purchase-script-test',
-                'observed_payment_methods': ['СБП', 'Российская карта'],
-            },
-        )
-
-
-class _CompletedPurchaseScriptRunnerWithFrame:
-    def __init__(self, frame_src: str, *, order_id: str = 'order-456') -> None:
-        self.frame_src = frame_src
-        self.order_id = order_id
-
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        return PurchaseScriptResult(
-            status='completed',
-            reason_code='purchase_ready',
-            message='Скрипт дошел до оплаты',
-            order_id=self.order_id,
-            artifacts={
-                'source': 'purchase-script-test',
-                'payment_frame_src': self.frame_src,
-            },
-        )
-
-
-class _ThrowingPurchaseScriptRunner:
-    async def run(self, **_: Any) -> PurchaseScriptResult:
-        raise OSError('purchase runtime unavailable')
 
 
 class _RecordingKnowledgeAnalyzer:
@@ -310,17 +274,17 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-test',
-                buyer_model_strategy='single',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
+            attempt_env_ids: list[str] = []
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
-                _ = kwargs
                 calls.append(cmd)
+                attempt_env_ids.append(kwargs['env']['BUYER_CODEX_ATTEMPT_ID'])
                 output_path = Path(cmd[cmd.index('-o') + 1])
                 output_path.write_text(
                     json.dumps({'status': 'completed', 'message': 'ok', 'order_id': None, 'artifacts': {}}),
@@ -344,6 +308,10 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     memory=[],
                     latest_user_reply=None,
                 )
+                full_trace = json.loads(Path(result.artifacts['trace']['trace_file']).read_text(encoding='utf-8'))
+                output_path = Path(full_trace['codex_output_path'])
+                output_path_exists = output_path.is_file()
+                output_status = json.loads(output_path.read_text(encoding='utf-8'))['status']
 
         self.assertEqual(result.status, 'completed')
         self.assertEqual(len(calls), 1)
@@ -352,7 +320,11 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace['model_strategy'], 'single')
         self.assertEqual(trace['codex_model'], 'gpt-test')
         self.assertEqual(trace['codex_tokens_used'], 123)
+        self.assertRegex(attempt_env_ids[0], r'^step-001-single-[0-9a-f]{8}$')
+        self.assertEqual(trace['codex_attempts'][0]['attempt_id'], attempt_env_ids[0])
         self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
+        self.assertTrue(output_path_exists)
+        self.assertEqual(output_status, 'completed')
 
     async def test_run_step_streams_codex_stdout_json_and_browser_actions(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -360,7 +332,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-test',
-                buyer_model_strategy='single',
             )
             runner = AgentRunner(settings)
             stream_events: list[dict[str, Any]] = []
@@ -461,34 +432,50 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(output), len(oversized_line))
         self.assertIn('[truncated stream text:', output)
 
-    async def test_run_step_fast_then_strong_retries_clean_failed_attempt(self) -> None:
+    async def test_collect_process_streams_cleans_reader_tasks_on_cancellation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            process = _BlockingStreamingProcess()
+            publisher = _AgentStreamPublisher(
+                session_id='session-cancel',
+                step_index=1,
+                callback=None,
+            )
+            task = asyncio.create_task(
+                _collect_process_streams(
+                    process,
+                    publisher=publisher,
+                    browser_actions_log_path=Path(tmpdir) / 'actions.jsonl',
+                    browser_actions_offset=0,
+                )
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertTrue(process.stdout.cancelled)
+        self.assertTrue(process.stderr.cancelled)
+
+    async def test_run_step_reports_agent_failure_without_fallback_attempt(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = Settings(
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-strong',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-mini',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 _ = kwargs
                 calls.append(cmd)
                 output_path = Path(cmd[cmd.index('-o') + 1])
-                status = 'failed' if len(calls) == 1 else 'completed'
                 output_path.write_text(
-                    json.dumps({'status': status, 'message': status, 'order_id': None, 'artifacts': {}}),
+                    json.dumps({'status': 'failed', 'message': 'agent stopped on checkout', 'order_id': None, 'artifacts': {}}),
                     encoding='utf-8',
                 )
                 return _FakeProcess(returncode=0, stderr_text=f'tokens used {len(calls) * 10}')
@@ -496,7 +483,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -510,37 +496,44 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     memory=[],
                     latest_user_reply=None,
                 )
+                full_trace = json.loads(Path(result.artifacts['trace']['trace_file']).read_text(encoding='utf-8'))
+                full_attempt = full_trace['codex_attempts'][0]
+                trace_output_path_exists = Path(full_trace['codex_output_path']).is_file()
+                attempt_output_path_exists = Path(full_attempt['output_path']).is_file()
 
-        self.assertEqual(result.status, 'completed')
-        self.assertEqual(reset_calls, 1)
-        self.assertEqual(len(calls), 2)
-        self.assertIn('gpt-mini', calls[0])
-        self.assertIn('gpt-strong', calls[1])
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(result.message, 'agent stopped on checkout')
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn('gpt-mini', calls[0])
+        self.assertIn('gpt-strong', calls[0])
         trace = result.artifacts['trace']
-        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_strong', 'strong'])
-        self.assertEqual(trace['codex_tokens_used'], 30)
+        self.assertEqual(trace['model_strategy'], 'single')
+        self.assertEqual(trace['model_fallback_reason'], 'agent_reported_failed')
+        self.assertEqual(len(trace['codex_attempts']), 1)
+        self.assertRegex(trace['codex_attempts'][0]['attempt_id'], r'^step-001-single-[0-9a-f]{8}$')
+        self.assertEqual(trace['codex_attempts'][0]['role'], 'single')
+        self.assertEqual(trace['codex_attempts'][0]['model'], 'gpt-strong')
+        self.assertEqual(trace['codex_attempts'][0]['status'], 'failed')
+        self.assertEqual(trace['codex_attempts'][0]['failure_reason'], 'agent_reported_failed')
+        self.assertEqual(trace['codex_attempts'][0]['failure_message'], 'agent stopped on checkout')
+        self.assertEqual(full_attempt['failure_reason'], 'agent_reported_failed')
+        self.assertEqual(full_attempt['failure_message'], 'agent stopped on checkout')
+        self.assertTrue(trace_output_path_exists)
+        self.assertTrue(attempt_output_path_exists)
+        self.assertEqual(trace['codex_tokens_used'], 10)
 
-    async def test_run_step_retries_same_model_when_failed_without_browser_mutation(self) -> None:
+    async def test_run_step_does_not_retry_same_model_when_failed_without_browser_mutation(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = Settings(
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-same',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-same',
-                buyer_strong_codex_model='gpt-same',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 calls.append(cmd)
@@ -564,7 +557,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -579,13 +571,12 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     latest_user_reply=None,
                 )
 
-        self.assertEqual(result.status, 'completed')
-        self.assertEqual(reset_calls, 1)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(len(calls), 1)
         self.assertIn('gpt-same', calls[0])
-        self.assertIn('gpt-same', calls[1])
         trace = result.artifacts['trace']
-        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['fast', 'reset_before_same_model', 'same_model_retry'])
+        self.assertEqual([item['role'] for item in trace['codex_attempts'] if 'role' in item], ['single'])
+        self.assertEqual(trace['model_fallback_reason'], 'agent_reported_failed')
 
     async def test_run_step_does_not_retry_same_model_when_failed_after_browser_mutation(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -593,21 +584,12 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 buyer_trace_dir=tmpdir,
                 codex_workdir=tmpdir,
                 codex_model='gpt-same',
-                buyer_model_strategy='fast_then_strong',
-                buyer_fast_codex_model='gpt-same',
-                buyer_strong_codex_model='gpt-same',
             )
             runner = AgentRunner(settings)
             calls: list[tuple[Any, ...]] = []
-            reset_calls = 0
 
             async def fake_probe(*_: Any, **__: Any) -> tuple[bool, str]:
                 return True, 'OK'
-
-            async def fake_reset(*_: Any, **__: Any) -> tuple[bool, str]:
-                nonlocal reset_calls
-                reset_calls += 1
-                return True, 'reset_ok'
 
             async def fake_create_subprocess_exec(*cmd: Any, **kwargs: Any) -> _FakeProcess:
                 calls.append(cmd)
@@ -625,7 +607,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict(os.environ, {'OPENAI_API_KEY': 'test-key'}),
                 patch.object(runner, '_probe_browser_sidecar', new=fake_probe),
-                patch.object(runner, '_reset_browser_to_start_url', new=fake_reset),
                 patch('buyer.app.runner.asyncio.create_subprocess_exec', new=fake_create_subprocess_exec),
             ):
                 result = await runner.run_step(
@@ -641,7 +622,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(result.status, 'failed')
-        self.assertEqual(reset_calls, 0)
         self.assertEqual(len(calls), 1)
 
     async def test_stream_event_delivery_failure_is_best_effort_and_saved(self) -> None:
@@ -948,14 +928,19 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
-    async def test_purchase_script_completion_skips_generic_runner(self) -> None:
+    async def test_unverified_payment_boundary_finishes_without_completed_analysis(self) -> None:
         callback_client = _RecordingCallbackClient()
+        analyzer = _RecordingKnowledgeAnalyzer(callback_client=callback_client)
         runner = _SequenceRunner([
             AgentOutput(
-                status='failed',
-                message='generic runner should not be called',
-                order_id=None,
-                artifacts={},
+                status='completed',
+                message='Found YooMoney contract URL',
+                order_id='unknown-order-123',
+                payment_evidence={
+                    'source': 'brandshop_yoomoney_sberpay_redirect',
+                    'url': 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123',
+                },
+                artifacts={'source': 'generic'},
             ),
         ])
         store = SessionStore(max_active_sessions=1)
@@ -970,8 +955,53 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             sberid_allowlist=set(),
             sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_CompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
+            knowledge_analyzer=analyzer,  # type: ignore[arg-type]
+        )
+
+        state = await service.create_session(
+            task='test-task',
+            start_url='https://example-shop.test/',
+            callback_url='http://callback',
+            metadata={},
+            auth=None,
+        )
+        await state.task_ref
+        await service.wait_for_post_session_analysis()
+
+        final_state = await store.get(state.session_id)
+        self.assertEqual(final_state.status, SessionStatus.UNVERIFIED)
+        self.assertEqual(analyzer.snapshots, [])
+        self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
+        scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
+        self.assertEqual(len(scenario_finished_events), 1)
+        self.assertEqual(scenario_finished_events[0].payload.get('status'), 'unverified')
+
+    async def test_litres_uses_generic_runner_with_default_purchase_settings(self) -> None:
+        callback_client = _RecordingCallbackClient()
+        runner = _SequenceRunner([
+            AgentOutput(
+                status='completed',
+                message='Generic runner дошел до Litres SberPay iframe',
+                order_id='order-789',
+                payment_evidence={
+                    'source': 'litres_payecom_iframe',
+                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+                },
+                artifacts={'source': 'generic'},
+            ),
+        ])
+        store = SessionStore(max_active_sessions=1)
+        service = BuyerService(
+            store=store,
+            callback_client=callback_client,  # type: ignore[arg-type]
+            runner=runner,  # type: ignore[arg-type]
+            novnc_url='http://novnc',
+            default_callback_url='http://callback',
+            cdp_recovery_window_sec=0.2,
+            cdp_recovery_interval_ms=1,
+            sberid_allowlist=set(),
+            sberid_auth_retry_budget=1,
+            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
         state = await service.create_session(
@@ -985,13 +1015,13 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         final_state = await store.get(state.session_id)
         self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 0)
+        self.assertEqual(runner.calls, 1)
 
         payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']
         self.assertEqual(len(payment_ready_events), 1)
-        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-456')
+        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-789')
 
-    async def test_litres_rejects_non_exact_payecom_payment_evidence(self) -> None:
+    async def test_litres_generic_runner_rejects_non_exact_payecom_payment_evidence(self) -> None:
         cases = [
             'http://payecom.ru/pay_ru?orderId=order-456',
             'https://evil.payecom.ru/pay_ru?orderId=order-456',
@@ -1004,10 +1034,14 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 callback_client = _RecordingCallbackClient()
                 runner = _SequenceRunner([
                     AgentOutput(
-                        status='failed',
-                        message='generic runner did not recover payment boundary',
-                        order_id=None,
-                        artifacts={},
+                        status='completed',
+                        message='Generic runner дошел до Litres payment boundary',
+                        order_id='order-456',
+                        payment_evidence={
+                            'source': 'litres_payecom_iframe',
+                            'url': frame_src,
+                        },
+                        artifacts={'source': 'generic'},
                     ),
                 ])
                 store = SessionStore(max_active_sessions=1)
@@ -1022,8 +1056,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     sberid_allowlist=set(),
                     sberid_auth_retry_budget=1,
                     auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-                    purchase_script_allowlist={'litres.ru'},
-                    purchase_script_runner=_CompletedPurchaseScriptRunnerWithFrame(frame_src),  # type: ignore[arg-type]
                 )
 
                 state = await service.create_session(
@@ -1083,7 +1115,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
         self.assertIn('order_id', scenario_finished_events[0].payload.get('message', ''))
 
-    async def test_unsupported_domain_completed_with_order_id_is_not_success(self) -> None:
+    async def test_brandshop_completed_with_order_id_without_valid_evidence_is_not_success(self) -> None:
         callback_client = _RecordingCallbackClient()
         runner = _SequenceRunner([
             AgentOutput(
@@ -1122,140 +1154,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         scenario_finished_events = [event for event in final_state.events if event.event_type == 'scenario_finished']
         self.assertEqual(len(scenario_finished_events), 1)
         self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
-        self.assertIn('не поддерживается verifier', scenario_finished_events[0].payload.get('message', ''))
-
-    async def test_invalid_completed_purchase_script_falls_back_to_generic_runner(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='completed',
-                message='Generic runner дошел до Litres SberPay iframe',
-                order_id='order-789',
-                payment_evidence={
-                    'source': 'litres_payecom_iframe',
-                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                },
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_InvalidCompletedPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 1)
-
-        payment_ready_events = [event for event in final_state.events if event.event_type == 'payment_ready']
-        self.assertEqual(len(payment_ready_events), 1)
-        self.assertEqual(payment_ready_events[0].payload.get('order_id'), 'order-789')
-
-    async def test_unavailable_sberpay_purchase_script_falls_back_without_payment_ready(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='failed',
-                message='Generic runner тоже не нашел SberPay.',
-                order_id=None,
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_UnavailableSberPayPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.FAILED)
-        self.assertEqual(runner.calls, 1)
-        self.assertEqual([event.event_type for event in final_state.events if event.event_type == 'payment_ready'], [])
-
-    async def test_purchase_script_exception_falls_back_to_generic_runner(self) -> None:
-        callback_client = _RecordingCallbackClient()
-        runner = _SequenceRunner([
-            AgentOutput(
-                status='completed',
-                message='Generic runner completed',
-                order_id='order-789',
-                payment_evidence={
-                    'source': 'litres_payecom_iframe',
-                    'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                },
-                artifacts={'source': 'generic'},
-            ),
-        ])
-        store = SessionStore(max_active_sessions=1)
-        service = BuyerService(
-            store=store,
-            callback_client=callback_client,  # type: ignore[arg-type]
-            runner=runner,  # type: ignore[arg-type]
-            novnc_url='http://novnc',
-            default_callback_url='http://callback',
-            cdp_recovery_window_sec=0.2,
-            cdp_recovery_interval_ms=1,
-            sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
-            auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
-            purchase_script_allowlist={'litres.ru'},
-            purchase_script_runner=_ThrowingPurchaseScriptRunner(),  # type: ignore[arg-type]
-        )
-
-        state = await service.create_session(
-            task='Открой litres. Ищи книгу одиссея гомера',
-            start_url='https://www.litres.ru/',
-            callback_url='http://callback',
-            metadata={},
-            auth=None,
-        )
-        await state.task_ref
-
-        final_state = await store.get(state.session_id)
-        self.assertEqual(final_state.status, SessionStatus.COMPLETED)
-        self.assertEqual(runner.calls, 1)
-
-        memory = await store.get_agent_memory(state.session_id)
-        self.assertTrue(any('[PURCHASE_SCRIPT_FALLBACK]' in item['text'] for item in memory))
+        self.assertIn('Brandshop completed result rejected', scenario_finished_events[0].payload.get('message', ''))
 
     async def test_profile_updates_are_appended_to_user_info_file(self) -> None:
         callback_client = _RecordingCallbackClient()

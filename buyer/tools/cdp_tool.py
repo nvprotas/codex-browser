@@ -5,11 +5,13 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
 import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -27,7 +29,21 @@ LINKS_DEFAULT_LIMIT = 50
 SNAPSHOT_DEFAULT_LIMIT = 60
 SNAPSHOT_TEXT_LIMIT = 160
 SNAPSHOT_OPTION_TAGS = ('div', 'span', 'li')
-SNAPSHOT_OPTION_CLASS_HINTS = ('product-plate', 'size', 'variant', 'option', 'sku', 'swatch')
+SNAPSHOT_OPTION_CLASS_HINTS = (
+    'product-plate',
+    'size',
+    'variant',
+    'option',
+    'sku',
+    'swatch',
+    'search',
+    'filter',
+    'product-card',
+    'cart-item',
+    'cart-product',
+    'checkout-address',
+    'radio-list',
+)
 SNAPSHOT_OPTION_DATA_ATTRIBUTES = ('data-size', 'data-value', 'data-variant', 'data-sku', 'data-color', 'data-option')
 SNAPSHOT_OPTION_STATE_ATTRIBUTES = ('aria-selected', 'aria-checked', 'aria-disabled', 'disabled')
 REQUEST_GUARD_ROUTE_PATTERN = '**/*'
@@ -53,6 +69,10 @@ class _CdpArgumentParser(argparse.ArgumentParser):
         parsed = super().parse_args(args, namespace)
         if getattr(parsed, 'command', None) == 'wait' and getattr(parsed, 'seconds', None) is None:
             self.error('wait requires --seconds or compatibility alias --timeout-ms')
+        if getattr(parsed, 'command', None) == 'wait-url' and not (
+            getattr(parsed, 'contains', None) or getattr(parsed, 'regex', None)
+        ):
+            self.error('wait-url requires --contains or --regex')
         return parsed
 
 
@@ -75,6 +95,9 @@ def parser() -> argparse.ArgumentParser:
 
     click = sub.add_parser('click')
     click.add_argument('--selector', required=True)
+    click.add_argument('--wait-url-contains')
+    click.add_argument('--wait-url-regex')
+    click.add_argument('--wait-selector')
     _add_timeout_alias(click)
 
     fill = sub.add_parser('fill')
@@ -89,6 +112,15 @@ def parser() -> argparse.ArgumentParser:
     wait_cmd = sub.add_parser('wait')
     wait_cmd.add_argument('--seconds', type=float, required=False)
     wait_cmd.add_argument('--timeout-ms', dest='timeout_ms', type=int, action=_WaitTimeoutMsAction, default=argparse.SUPPRESS)
+
+    wait_url = sub.add_parser('wait-url')
+    wait_url.add_argument('--contains')
+    wait_url.add_argument('--regex')
+    _add_timeout_alias(wait_url)
+
+    wait_selector = sub.add_parser('wait-selector')
+    wait_selector.add_argument('--selector', required=True)
+    _add_timeout_alias(wait_selector)
 
     text = sub.add_parser('text')
     text.add_argument('--selector', required=True)
@@ -226,13 +258,29 @@ def _extract_command_details_for_log(args: argparse.Namespace) -> dict[str, Any]
     if command == 'goto':
         return {'url': args.url}
     if command == 'click':
-        return {'selector': args.selector}
+        details = {'selector': args.selector}
+        if args.wait_url_contains:
+            details['wait_url_contains'] = args.wait_url_contains
+        if args.wait_url_regex:
+            details['wait_url_regex'] = args.wait_url_regex
+        if args.wait_selector:
+            details['wait_selector'] = args.wait_selector
+        return details
     if command == 'fill':
         return {'selector': args.selector, 'value_length': len(args.value)}
     if command == 'press':
         return {'key': args.key}
     if command == 'wait':
         return {'seconds': args.seconds}
+    if command == 'wait-url':
+        details = {}
+        if args.contains:
+            details['contains'] = args.contains
+        if args.regex:
+            details['regex'] = args.regex
+        return details
+    if command == 'wait-selector':
+        return {'selector': args.selector}
     if command == 'text':
         return {'selector': args.selector, 'max_chars': args.max_chars, 'full': args.full}
     if command == 'exists':
@@ -280,6 +328,22 @@ def _append_action_log(event_type: str, payload: dict[str, Any]) -> None:
             fh.write('\n')
     except OSError:
         return
+
+
+def _command_log_correlation() -> dict[str, Any]:
+    correlation: dict[str, Any] = {'command_id': uuid4().hex}
+    attempt_id = os.getenv('BUYER_CODEX_ATTEMPT_ID', '').strip()
+    if attempt_id:
+        correlation['attempt_id'] = attempt_id
+    return correlation
+
+
+def _command_log_payload(correlation: dict[str, Any], event_sequence: int, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **correlation,
+        'sequence': event_sequence,
+        **payload,
+    }
 
 
 def _page_priority(page: Any) -> int:
@@ -497,7 +561,13 @@ async def run_read_command_with_retry(*, playwright, args: argparse.Namespace) -
                 return await _collect_links(page, args)
             if args.command == 'snapshot':
                 return await _collect_snapshot(page, args)
+            if args.command == 'wait-url':
+                return await _wait_for_url(page, args)
+            if args.command == 'wait-selector':
+                return await _wait_for_selector(page, args)
             return await _collect_text(page, args)
+        except PlaywrightTimeoutError:
+            raise
         except Exception as exc:  # noqa: BLE001 - приводим transient-ошибки к единому формату
             last_error = normalize_error_text(exc)
             if not is_transient_context_error(last_error):
@@ -561,8 +631,9 @@ async def _collect_text(page: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, Any]:
     limit = _normalize_limit(args.limit, default=SNAPSHOT_DEFAULT_LIMIT, maximum=500)
-    items = await page.locator(args.selector).evaluate(
-        """(root, options) => {
+    try:
+        items = await page.locator(args.selector).evaluate(
+            """(root, options) => {
             const limit = options.limit;
             const textLimit = options.textLimit;
             const optionTags = options.optionTags;
@@ -673,16 +744,81 @@ async def _collect_snapshot(page: Any, args: argparse.Namespace) -> dict[str, An
             }
             return result;
         }""",
-        {
-            'limit': limit,
-            'textLimit': SNAPSHOT_TEXT_LIMIT,
-            'optionTags': list(SNAPSHOT_OPTION_TAGS),
-            'optionClassHints': list(SNAPSHOT_OPTION_CLASS_HINTS),
-            'optionDataAttributes': list(SNAPSHOT_OPTION_DATA_ATTRIBUTES),
-            'optionStateAttributes': list(SNAPSHOT_OPTION_STATE_ATTRIBUTES),
-        },
-    )
+            {
+                'limit': limit,
+                'textLimit': SNAPSHOT_TEXT_LIMIT,
+                'optionTags': list(SNAPSHOT_OPTION_TAGS),
+                'optionClassHints': list(SNAPSHOT_OPTION_CLASS_HINTS),
+                'optionDataAttributes': list(SNAPSHOT_OPTION_DATA_ATTRIBUTES),
+                'optionStateAttributes': list(SNAPSHOT_OPTION_STATE_ATTRIBUTES),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - добавляем контекст к strict-mode ошибкам Playwright
+        error_text = normalize_error_text(exc)
+        if 'strict mode violation' in error_text.lower():
+            raise RuntimeError(
+                'snapshot strict mode violation: '
+                f'selector={args.selector!r}; url={getattr(page, "url", "")}; error={error_text}'
+            ) from exc
+        raise
     return {'ok': True, 'selector': args.selector, 'limit': limit, 'items': items, 'url': page.url}
+
+
+def _wait_deadline(args: argparse.Namespace, explicit_deadline: float | None = None) -> float:
+    loop_time = asyncio.get_running_loop().time()
+    timeout_deadline = loop_time + max(args.timeout_ms, 1) / 1000.0
+    if explicit_deadline is None:
+        return timeout_deadline
+    return min(timeout_deadline, explicit_deadline)
+
+
+def _url_matches_conditions(url: str, *, contains: str | None, regex: str | None) -> dict[str, str]:
+    matched: dict[str, str] = {}
+    if contains and contains in url:
+        matched['contains'] = contains
+    if regex and re.search(regex, url):
+        matched['regex'] = regex
+    return matched
+
+
+async def _wait_for_url(page: Any, args: argparse.Namespace, deadline: float | None = None) -> dict[str, Any]:
+    contains = getattr(args, 'contains', None) or getattr(args, 'wait_url_contains', None)
+    regex = getattr(args, 'regex', None) or getattr(args, 'wait_url_regex', None)
+    end = _wait_deadline(args, deadline)
+    interval_sec = recovery_interval_sec(args)
+    final_url = str(getattr(page, 'url', '') or '')
+
+    while True:
+        final_url = str(getattr(page, 'url', '') or '')
+        matched = _url_matches_conditions(final_url, contains=contains, regex=regex)
+        if matched:
+            return {'ok': True, 'url': final_url, 'matched': matched}
+        if asyncio.get_running_loop().time() >= end:
+            expected: dict[str, str] = {}
+            if contains:
+                expected['contains'] = contains
+            if regex:
+                expected['regex'] = regex
+            raise PlaywrightTimeoutError(f'wait-url timeout: expected={expected}; final_url={final_url}')
+        await asyncio.sleep(interval_sec)
+
+
+async def _wait_for_selector(page: Any, args: argparse.Namespace, deadline: float | None = None) -> dict[str, Any]:
+    end = _wait_deadline(args, deadline)
+    interval_sec = recovery_interval_sec(args)
+    selector = args.selector if args.command == 'wait-selector' else args.wait_selector
+    count = 0
+    visible = False
+
+    while True:
+        locator = page.locator(selector)
+        count = await locator.count()
+        if count > 0:
+            visible = await locator.first.is_visible()
+            return {'ok': True, 'selector': selector, 'url': page.url, 'count': count, 'visible': visible}
+        if asyncio.get_running_loop().time() >= end:
+            raise PlaywrightTimeoutError(f'wait-selector timeout: selector={selector!r}; url={page.url}; count={count}; visible={visible}')
+        await asyncio.sleep(interval_sec)
 
 
 def _log_command_finished(
@@ -690,51 +826,61 @@ def _log_command_finished(
     started: float,
     command_details: dict[str, Any],
     result: dict[str, Any],
+    correlation: dict[str, Any],
 ) -> None:
     _append_action_log(
         'browser_command_finished',
-        {
-            'command': args.command,
-            'ok': bool(result.get('ok')),
-            'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-            'details': command_details,
-            'result': _sanitize_result_for_log(result),
-        },
+        _command_log_payload(
+            correlation,
+            2,
+            {
+                'command': args.command,
+                'ok': bool(result.get('ok')),
+                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                'details': command_details,
+                'result': _sanitize_result_for_log(result),
+            },
+        ),
     )
 
 
 async def run_command(args: argparse.Namespace) -> dict:
     started = asyncio.get_running_loop().time()
     command_details = _extract_command_details_for_log(args)
+    correlation = _command_log_correlation()
     _append_action_log(
         'browser_command_started',
-        {
-            'command': args.command,
-            'endpoint': args.endpoint,
-            'details': command_details,
-        },
+        _command_log_payload(
+            correlation,
+            1,
+            {
+                'command': args.command,
+                'endpoint': args.endpoint,
+                'details': command_details,
+            },
+        ),
     )
 
     if args.recovery_window_sec < 0:
         result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-window-sec не может быть отрицательным.'}
-        _log_command_finished(args, started, command_details, result)
+        _log_command_finished(args, started, command_details, result, correlation)
         return result
     if args.recovery_interval_ms <= 0:
         result = {'ok': False, 'error': 'CDP_CONFIG_ERROR: --recovery-interval-ms должен быть > 0.'}
-        _log_command_finished(args, started, command_details, result)
+        _log_command_finished(args, started, command_details, result, correlation)
         return result
     if args.command == 'goto':
         policy_error = _navigation_url_policy_error(args.url)
         if policy_error is not None:
             result = {'ok': False, 'error': f'CDP_COMMAND_ERROR: {policy_error}'}
-            _log_command_finished(args, started, command_details, result)
+            _log_command_finished(args, started, command_details, result, correlation)
             return result
 
     playwright = await async_playwright().start()
     try:
-        if args.command in {'title', 'text', 'url', 'exists', 'attr', 'links', 'snapshot'}:
+        if args.command in {'title', 'text', 'url', 'exists', 'attr', 'links', 'snapshot', 'wait-url', 'wait-selector'}:
             result = await run_read_command_with_retry(playwright=playwright, args=args)
-            _log_command_finished(args, started, command_details, result)
+            _log_command_finished(args, started, command_details, result, correlation)
             return result
 
         deadline = asyncio.get_running_loop().time() + max(args.recovery_window_sec, 0.0)
@@ -744,31 +890,37 @@ async def run_command(args: argparse.Namespace) -> dict:
             if args.command == 'goto':
                 await page.goto(args.url, wait_until='domcontentloaded')
                 result = {'ok': True, 'url': page.url, 'title': await page.title()}
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'click':
                 await page.click(args.selector)
                 result = {'ok': True, 'selector': args.selector, 'url': page.url}
-                _log_command_finished(args, started, command_details, result)
+                if args.wait_url_contains or args.wait_url_regex:
+                    result['wait_url'] = await _wait_for_url(page, args)
+                    result['url'] = result['wait_url']['url']
+                if args.wait_selector:
+                    result['wait_selector'] = await _wait_for_selector(page, args)
+                    result['url'] = result['wait_selector']['url']
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'fill':
                 await page.fill(args.selector, args.value)
                 result = {'ok': True, 'selector': args.selector, 'url': page.url}
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'press':
                 await page.keyboard.press(args.key)
                 result = {'ok': True, 'key': args.key, 'url': page.url}
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'wait':
                 await asyncio.sleep(args.seconds)
                 result = {'ok': True, 'seconds': args.seconds, 'url': page.url}
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'screenshot':
@@ -776,7 +928,7 @@ async def run_command(args: argparse.Namespace) -> dict:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(path), full_page=True)
                 result = {'ok': True, 'path': str(path), 'url': page.url}
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             if args.command == 'html':
@@ -786,15 +938,17 @@ async def run_command(args: argparse.Namespace) -> dict:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding='utf-8')
                     result = {'ok': True, 'path': str(path), 'size': len(content), 'url': page.url}
-                    _log_command_finished(args, started, command_details, result)
+                    _log_command_finished(args, started, command_details, result, correlation)
                     return result
                 result = _format_html_result(content=content, url=page.url, max_chars=args.max_chars, full=args.full)
-                _log_command_finished(args, started, command_details, result)
+                _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
             result = {'ok': False, 'error': f'Неизвестная команда: {args.command}'}
-            _log_command_finished(args, started, command_details, result)
+            _log_command_finished(args, started, command_details, result, correlation)
             return result
+        except PlaywrightTimeoutError:
+            raise
         except Exception as exc:  # noqa: BLE001 - унифицируем текст ошибок на уровне CLI
             normalized = normalize_error_text(exc)
             if is_transient_context_error(normalized):
@@ -808,12 +962,16 @@ async def run_command(args: argparse.Namespace) -> dict:
     except Exception as exc:  # noqa: BLE001 - единая запись в аудит при любой ошибке
         _append_action_log(
             'browser_command_failed',
-            {
-                'command': args.command,
-                'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
-                'details': command_details,
-                'error': normalize_error_text(exc),
-            },
+            _command_log_payload(
+                correlation,
+                2,
+                {
+                    'command': args.command,
+                    'duration_ms': int((asyncio.get_running_loop().time() - started) * 1000),
+                    'details': command_details,
+                    'error': normalize_error_text(exc),
+                },
+            ),
         )
         raise
     finally:

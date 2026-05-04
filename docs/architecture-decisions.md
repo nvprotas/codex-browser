@@ -67,11 +67,10 @@
 - Критерий auth success: редирект обратно на магазин + маркер авторизованного состояния.
 - Redirect loop guard на `id.sber.ru`: максимум 2 цикла.
 - Retry budget auth-скрипта по умолчанию: 1 повтор; новый auth-пакет не запрашивается через пользовательский reply.
-- Для ускорения известных сценариев допускается `purchase scripts-first` после подготовки auth-контекста.
-  - Охват первого шага: только `litres.ru`.
-  - Успех purchase-скрипта: найден `orderId` на странице SberPay без выполнения платежа.
+- Решение 2026-05-01: скрытый `purchase scripts-first` runtime path retired. После auth покупку выполняет generic `codex exec` buyer-agent через CDP tool, а `payment_ready`/`payment_unverified` решает только verifier.
+  - `PurchaseScriptRunner` и registry могут оставаться как изолированная инфраструктура для будущих явных инструментов или тестов, но не подключаются через settings/compose и не являются pre-generic shortcut.
   - SberPay не взаимозаменяем с СБП, Системой быстрых платежей, SBP или FPS; такие способы оплаты не считаются успешным платежным шагом.
-  - Ошибка или неуверенный результат purchase-скрипта не завершает сессию и ведет в generic `codex exec` fallback.
+  - Любой будущий custom script обязан возвращать evidence через общий `AgentOutput`/tool contract и проходить merchant/provider verifier.
 - В v1 не выполняются:
   - пост-логин проверка, что это ожидаемый аккаунт;
   - фильтрация доменов входящего `storageState`.

@@ -22,3 +22,16 @@ class EvalShellStaticTests(unittest.TestCase):
         self.assertGreaterEqual(judge_timeout.read, 650.0)
         self.assertEqual(default_get_timeout.read, 60.0)
         self.assertEqual(default_post_timeout.read, 60.0)
+
+    def test_app_static_knows_payment_unverified_contract(self) -> None:
+        app_js = (BASE_DIR / 'app' / 'static' / 'app.js').read_text(encoding='utf-8')
+        eval_js = (BASE_DIR / 'app' / 'static' / 'eval.js').read_text(encoding='utf-8')
+        eval_css = (BASE_DIR / 'app' / 'static' / 'eval.css').read_text(encoding='utf-8')
+
+        self.assertIn("'payment_unverified'", app_js)
+        self.assertIn("'unverified'", app_js)
+        self.assertIn("meta('provider', session.payment_provider)", app_js)
+        self.assertIn("item.order_id && String(item.status || '').toLowerCase() !== 'unverified'", app_js)
+        self.assertIn("['judged', 'judge_failed', 'unverified'].includes(item.runtime_status)", eval_js)
+        self.assertIn("status = 'unverified'", eval_js)
+        self.assertIn('.eval-status.unverified', eval_css)

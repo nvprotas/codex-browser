@@ -17,7 +17,7 @@ from .script_runtime import (
 )
 from ._utils import tail_text
 
-logger = logging.getLogger('uvicorn.error')
+logger = logging.getLogger(__name__)
 
 PURCHASE_SCRIPT_COMPLETED = 'completed'
 PURCHASE_SCRIPT_FAILED = 'failed'
@@ -30,7 +30,6 @@ class PurchaseScriptResult:
     message: str
     order_id: str | None
     artifacts: dict[str, Any]
-
 
 class PurchaseScriptRunner:
     def __init__(
@@ -46,9 +45,7 @@ class PurchaseScriptRunner:
         self._cdp_endpoint = cdp_endpoint
         self._timeout_sec = max(timeout_sec, 5)
         self._trace_dir = Path(trace_dir)
-        self._registry: dict[str, ScriptSpec] = {
-            'litres.ru': ScriptSpec(domain='litres.ru', lifecycle='publish', relative_path='purchase/litres.ts'),
-        }
+        self._registry: dict[str, ScriptSpec] = {}
 
     def registry_snapshot(self) -> list[dict[str, str]]:
         return registry_snapshot(self._registry)
