@@ -85,7 +85,12 @@ class FinishingBuyerClient:
             event_type=CallbackEventType.PAYMENT_READY,
             occurred_at=datetime(2026, 4, 28, 12, 0, 30, tzinfo=UTC),
             idempotency_key='idem-payment-post-runs-1',
-            payload={'payment_method': 'sberpay'},
+            payload={
+                'payment_method': 'sberpay',
+                'order_id': 'order-post-runs-1',
+                'order_id_host': 'payecom.ru',
+                'message': 'Открыт SberPay.',
+            },
             eval_run_id=call['metadata']['eval_run_id'],
             eval_case_id=call['metadata']['eval_case_id'],
         )
@@ -604,6 +609,63 @@ def test_post_run_judge_skips_auth_missing_without_real_codex_or_state_mutation(
     assert summary['totals']['judge_skipped'] == 1
 
 
+def test_post_run_judge_preserves_unverified_case_without_judge(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-unverified')])
+    store.create_run(
+        'eval-run-001',
+        cases=[
+            EvalRunCase(
+                eval_case_id='case-unverified',
+                case_version='1',
+                state=CaseRunState.UNVERIFIED,
+                session_id='session-unverified',
+                error='payment unverified: merchant_policy_not_allowlisted',
+            )
+        ],
+        status=EvalRunStatus.FINISHED,
+    )
+
+    class ForbiddenJudgeRunner(FakeJudgeRunner):
+        def run(self, judge_input_path: Path | str) -> JudgeRunResult:
+            raise AssertionError('unverified case не должен отправляться в judge')
+
+    client.app.state.judge_runner = ForbiddenJudgeRunner()
+
+    response = client.post('/runs/eval-run-001/judge')
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'unverified'
+    assert response.json()['evaluations'] == []
+    manifest = store.read_manifest('eval-run-001')
+    assert manifest.cases[0].state == CaseRunState.UNVERIFIED
+    assert not (tmp_path / 'eval-run-001' / 'evaluations').exists()
+    summary = json.loads((tmp_path / 'eval-run-001' / 'summary.json').read_text(encoding='utf-8'))
+    assert summary['totals']['evaluations'] == 0
+
+
+def test_post_run_judge_async_preserves_unverified_case_without_pending_job(tmp_path: Path) -> None:
+    client, store = _client(tmp_path, cases=[_case('case-unverified')])
+    scheduled: list[Awaitable[None]] = []
+
+    async def capture_judge_job(coro: Awaitable[None]) -> None:
+        scheduled.append(coro)
+
+    client.app.state.judge_run_scheduler = capture_judge_job
+    store.create_run(
+        'eval-run-001',
+        cases=[EvalRunCase(eval_case_id='case-unverified', case_version='1', state=CaseRunState.UNVERIFIED)],
+        status=EvalRunStatus.FINISHED,
+    )
+
+    response = client.post('/runs/eval-run-001/judge', json={'async': True})
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'unverified'
+    assert response.json()['evaluations'] == []
+    assert scheduled == []
+    assert store.read_manifest('eval-run-001').cases[0].state == CaseRunState.UNVERIFIED
+
+
 def test_post_run_judge_returns_judge_failed_when_one_case_fails(tmp_path: Path) -> None:
     client, store = _client(tmp_path, cases=[_case('case-a'), _case('case-b')])
     store.create_run(
@@ -714,6 +776,7 @@ def test_get_run_detail_sanitizes_callbacks_and_artifact_paths(tmp_path: Path) -
             idempotency_key='secret-idempotency-key',
             payload={
                 'order_id': 'ORDER-1',
+                'order_id_host': 'payecom.ru',
                 'message': 'Payment token=secret-token',
                 'safe': 'visible',
             },

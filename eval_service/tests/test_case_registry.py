@@ -139,8 +139,9 @@ def test_repository_smoke_cases_are_loadable() -> None:
         'litres_purchase_book_001',
         'litres_purchase_book_002',
         'litres_purchase_book_003',
+        'brandshop_purchase_smoke_001',
     }
-    assert {case.host for case in cases} == {'litres.ru'}
+    assert {case.host for case in cases} == {'litres.ru', 'brandshop.ru'}
 
 
 def test_brandshop_repository_case_uses_st_search_parameter() -> None:

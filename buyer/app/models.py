@@ -13,6 +13,7 @@ class SessionStatus(StrEnum):
     WAITING_USER = 'waiting_user'
     COMPLETED = 'completed'
     FAILED = 'failed'
+    UNVERIFIED = 'unverified'
 
 
 class AuthProvider(StrEnum):
@@ -97,7 +98,12 @@ class SessionDetail(SessionView):
 class PaymentEvidence(BaseModel):
     model_config = ConfigDict(extra='ignore')
 
-    source: Literal['litres_payecom_iframe']
+    source: Literal[
+        'litres_payecom_iframe',
+        'brandshop_yoomoney_sberpay_redirect',
+        'payecom_payment_url',
+        'yoomoney_payment_url',
+    ]
     url: str = Field(min_length=1)
 
 

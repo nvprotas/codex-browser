@@ -167,6 +167,7 @@ def test_append_callback_event_redacts_payment_and_callback_secrets_on_disk(tmp_
         idempotency_key='sha256:ORDER-999-secret',
         payload={
             'order_id': 'ORDER-999',
+            'order_id_host': 'payecom.ru',
             'message': (
                 'Payment token=payment-token-secret order_id=ORDER-999 '
                 'url=https://pay.example/sberpay/order/ORDER-999?token=payment-token-secret'
@@ -182,6 +183,7 @@ def test_append_callback_event_redacts_payment_and_callback_secrets_on_disk(tmp_
     stored_event = json.loads(manifest_text)['cases'][0]['callback_events'][0]
     assert stored_event['idempotency_key'].startswith('sha256:')
     assert stored_event['payload'] == {
+        'order_id_host': 'payecom.ru',
         'message': 'Payment token=[redacted] order_id=[redacted] url=[redacted-payment-url]',
         'callback_url': 'http://eval.test/callbacks/buyer?token=[redacted]',
     }

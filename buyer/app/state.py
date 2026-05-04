@@ -133,7 +133,7 @@ class InMemorySessionRepository:
 
 
 class SessionStore:
-    _TERMINAL_STATUSES = {SessionStatus.COMPLETED, SessionStatus.FAILED}
+    _TERMINAL_STATUSES = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.UNVERIFIED}
 
     def __init__(
         self,

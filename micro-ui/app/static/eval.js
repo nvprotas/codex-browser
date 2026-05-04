@@ -302,6 +302,7 @@
       running: 'идет',
       waiting_user: 'ждет ответ',
       payment_ready: 'payment_ready',
+      unverified: 'unverified',
       finished: 'finished',
       timeout: 'timeout',
       judge_pending: 'judge_pending',
@@ -353,12 +354,20 @@
       nodes.judgeResult.textContent = JSON.stringify(judgeProgressPayload('judge_pending'), null, 2);
       return;
     }
-    const hasFinalJudgeState = asArray(state.activeRun?.cases).some((item) =>
-      ['judged', 'judge_failed'].includes(item.runtime_status),
+    const cases = asArray(state.activeRun?.cases);
+    const hasUnverified = state.activeRun?.status === 'unverified'
+      || cases.some((item) => item.runtime_status === 'unverified');
+    const hasFinalJudgeState = cases.some((item) =>
+      ['judged', 'judge_failed', 'unverified'].includes(item.runtime_status),
     );
     if (state.evaluations.length || (state.judgePollingActive && hasFinalJudgeState)) {
       state.judgePollingActive = false;
-      const status = state.evaluations.some((item) => item.status === 'judge_failed') ? 'judge_failed' : 'judged';
+      let status = 'judged';
+      if (state.evaluations.some((item) => item.status === 'judge_failed')) {
+        status = 'judge_failed';
+      } else if (hasUnverified) {
+        status = 'unverified';
+      }
       nodes.judgeResult.textContent = JSON.stringify(
         {
           eval_run_id: state.activeRun?.eval_run_id,
