@@ -636,7 +636,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=0,
             auth_script_runner=_NoopAuthScriptRunner(),
         )
         state = await store.create_session(
@@ -684,7 +683,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=0,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -722,7 +720,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=0,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -772,7 +769,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -821,7 +817,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
@@ -867,7 +862,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
@@ -908,7 +902,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
@@ -954,7 +947,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
             knowledge_analyzer=analyzer,  # type: ignore[arg-type]
         )
@@ -1001,7 +993,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -1055,7 +1046,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     cdp_recovery_window_sec=0.2,
                     cdp_recovery_interval_ms=1,
                     sberid_allowlist=set(),
-                    sberid_auth_retry_budget=1,
                     auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
                 )
 
@@ -1096,7 +1086,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -1136,7 +1125,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 
@@ -1184,7 +1172,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 cdp_recovery_window_sec=0.2,
                 cdp_recovery_interval_ms=1,
                 sberid_allowlist=set(),
-                sberid_auth_retry_budget=1,
                 auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
                 buyer_user_info_path=str(user_info_path),
             )
@@ -1229,7 +1216,6 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.001,
             cdp_recovery_interval_ms=2,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 

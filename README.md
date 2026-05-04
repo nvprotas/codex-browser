@@ -66,9 +66,8 @@ USER_BUYER_INFO_PATH=
 # Куда писать trace-логи buyer (примонтированная папка)
 # BUYER_TRACE_DIR=/workspace/.tmp/buyer-observability
 
-# Домены SberId allowlist и retry-бюджет auth-пакета
-# SBERID_ALLOWLIST=litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv
-# SBERID_AUTH_RETRY_BUDGET=1
+# Домены, где buyer пытается SberId scripts-first
+# SBERID_ALLOWLIST=litres.ru,brandshop.ru
 
 # Источник SberId cookies. Для развертывания рядом с openclaw включите внешний сервис.
 # SBER_AUTH_SOURCE=external_cookies_api

@@ -17,6 +17,13 @@ from eval_service.app.callback_urls import build_buyer_callback_token, build_buy
 from eval_service.app.case_registry import CaseRegistry
 from eval_service.app.models import CaseRunState, EvalCase, EvalRunCase, EvalRunManifest, EvalRunStatus, StrictBaseModel
 from eval_service.app.run_store import RunStore
+from eval_service.app.runtime_helpers import (
+    find_case as _find_case,
+    get_buyer_client as _get_buyer_client,
+    get_run_store as _get_run_store,
+    is_terminal_case_state as _is_terminal_case_state,
+    response_field as _response_field,
+)
 
 
 DEFAULT_CASE_TIMEOUT_SECONDS = 600.0
@@ -373,22 +380,6 @@ def get_run_orchestrator(request: Request) -> RunOrchestrator:
     )
 
 
-def _get_run_store(request: Request) -> RunStore:
-    store = getattr(request.app.state, 'run_store', None)
-    if store is None:
-        store = RunStore(request.app.state.settings.eval_runs_dir)
-        request.app.state.run_store = store
-    return store
-
-
-def _get_buyer_client(request: Request) -> BuyerClient:
-    client = getattr(request.app.state, 'buyer_client', None)
-    if client is None:
-        client = BuyerClient(request.app.state.settings.buyer_api_base_url)
-        request.app.state.buyer_client = client
-    return client
-
-
 def _select_cases(cases: Sequence[EvalCase], selected_case_ids: Sequence[str] | None) -> list[EvalCase]:
     if not selected_case_ids:
         return list(cases)
@@ -407,33 +398,8 @@ def _select_cases(cases: Sequence[EvalCase], selected_case_ids: Sequence[str] | 
     return selected
 
 
-def _find_case(cases: Sequence[EvalRunCase], eval_case_id: str) -> EvalRunCase:
-    for case in cases:
-        if case.eval_case_id == eval_case_id:
-            return case
-    raise KeyError(eval_case_id)
-
-
 def _is_wait_or_terminal(state: CaseRunState) -> bool:
     return state == CaseRunState.WAITING_USER or _is_terminal_case_state(state)
-
-
-def _is_terminal_case_state(state: CaseRunState) -> bool:
-    return state in {
-        CaseRunState.SKIPPED_AUTH_MISSING,
-        CaseRunState.UNVERIFIED,
-        CaseRunState.FINISHED,
-        CaseRunState.FAILED,
-        CaseRunState.TIMEOUT,
-        CaseRunState.JUDGED,
-        CaseRunState.JUDGE_FAILED,
-    }
-
-
-def _response_field(response: object, field_name: str) -> object:
-    if isinstance(response, dict):
-        return response[field_name]
-    return getattr(response, field_name)
 
 
 def _required_response_string(response: object, field_name: str) -> str:

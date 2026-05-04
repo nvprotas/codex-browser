@@ -25,6 +25,10 @@ from eval_service.app.models import (
 )
 from eval_service.app.redaction import sanitize_for_judge_input
 from eval_service.app.run_store import RunStore
+from eval_service.app.runtime_helpers import (
+    get_run_store as _get_run_store,
+    get_run_store_from_app as _get_run_store_from_app,
+)
 from eval_service.app.trace_collector import collect_trace_session
 
 
@@ -195,20 +199,8 @@ def _get_case_registry(request: Request) -> CaseRegistry:
     return _get_case_registry_from_app(request.app)
 
 
-def _get_run_store(request: Request) -> RunStore:
-    return _get_run_store_from_app(request.app)
-
-
 def _get_case_registry_from_app(app: Any) -> CaseRegistry:
     return getattr(app.state, 'case_registry', CaseRegistry(app.state.settings.eval_cases_dir))
-
-
-def _get_run_store_from_app(app: Any) -> RunStore:
-    store = getattr(app.state, 'run_store', None)
-    if store is None:
-        store = RunStore(app.state.settings.eval_runs_dir)
-        app.state.run_store = store
-    return store
 
 
 async def _judge_async_requested(request: Request) -> bool:

@@ -14,14 +14,11 @@ def build_agent_prompt(
     browser_cdp_endpoint: str,
     instruction_manifest: dict[str, object],
     context_file_manifest: dict[str, str],
-    latest_user_reply: str | None,
 ) -> str:
     instruction_dump = json.dumps(instruction_manifest, ensure_ascii=False, indent=2)
     context_dump = json.dumps(context_file_manifest, ensure_ascii=False, indent=2)
     task_dump = json.dumps(sanitize_agent_context_text(task), ensure_ascii=False)
     start_url_dump = json.dumps(sanitize_agent_context_text(start_url), ensure_ascii=False)
-    _ = latest_user_reply
-
     return f"""
 # Buyer Runtime Bootstrap
 

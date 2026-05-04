@@ -39,8 +39,7 @@ class Settings(BaseSettings):
     callback_backoff_sec: float = 0.8
     trusted_callback_urls: str = 'http://eval_service:8090/callbacks/buyer'
 
-    sberid_allowlist: str = 'litres.ru,brandshop.ru,kuper.ru,samokat.ru,okko.tv'
-    sberid_auth_retry_budget: int = Field(default=1, ge=0)
+    sberid_allowlist: str = 'litres.ru,brandshop.ru'
     sber_auth_source: Literal['inline_only', 'external_cookies_api'] = 'inline_only'
     sber_cookies_api_url: str = ''
     sber_cookies_api_timeout_sec: float = Field(default=5.0, ge=0.1)

@@ -136,9 +136,8 @@ class AgentRunner:
             task=task,
             start_url=start_url,
             browser_cdp_endpoint=self._settings.browser_cdp_endpoint,
-            instruction_manifest=build_agent_instruction_manifest(start_url=start_url),
+            instruction_manifest=build_agent_instruction_manifest(),
             context_file_manifest=context_file_manifest,
-            latest_user_reply=latest_user_reply,
         )
         trace['prompt_path'].write_text(prompt, encoding='utf-8')
         prompt_hash = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
@@ -184,50 +183,38 @@ class AgentRunner:
                 ),
             )
 
-        attempts = _build_model_attempt_specs(self._settings)
-        attempt_summaries: list[dict[str, Any]] = []
-        attempt_results: list[_CodexAttemptResult] = []
-        latest_attempt: _CodexAttemptResult | None = None
         codex_phase_started_at = datetime.now(timezone.utc)
         model_strategy = 'single'
 
-        for attempt_index, attempt_spec in enumerate(attempts, start=1):
-            _ = attempt_index
-            attempt = await self._run_codex_attempt(
-                trace=trace,
-                step_index=step_index,
-                prompt=prompt,
-                env=env,
-                attempt_spec=attempt_spec,
-                stream_callback=stream_callback,
+        latest_attempt = await self._run_codex_attempt(
+            trace=trace,
+            step_index=step_index,
+            prompt=prompt,
+            env=env,
+            attempt_spec=_CodexAttemptSpec(
+                role='single',
+                model=(self._settings.codex_model or '').strip() or 'gpt-5.5',
+            ),
+            stream_callback=stream_callback,
+        )
+
+        normalized = latest_attempt.result.status.strip().lower() if latest_attempt.result is not None else None
+        if normalized is not None and normalized not in {'needs_user_input', 'completed', 'failed'}:
+            latest_attempt.failure_reason = 'invalid_status'
+            latest_attempt.failure_message = f'codex вернул неподдерживаемый статус: {latest_attempt.result.status}'
+            logger.error(
+                'codex_step_invalid_status session_id=%s step=%s status=%s model=%s',
+                session_id,
+                step_index,
+                latest_attempt.result.status,
+                latest_attempt.spec.model or 'default',
             )
-            latest_attempt = attempt
-            attempt_results.append(attempt)
+        elif normalized == 'failed':
+            latest_attempt.failure_reason = 'agent_reported_failed'
+            latest_attempt.failure_message = latest_attempt.result.message or 'codex вернул статус failed.'
 
-            normalized = attempt.result.status.strip().lower() if attempt.result is not None else None
-            if normalized is not None and normalized not in {'needs_user_input', 'completed', 'failed'}:
-                attempt.failure_reason = 'invalid_status'
-                attempt.failure_message = f'codex вернул неподдерживаемый статус: {attempt.result.status}'
-                logger.error(
-                    'codex_step_invalid_status session_id=%s step=%s status=%s model=%s',
-                    session_id,
-                    step_index,
-                    attempt.result.status,
-                    attempt.spec.model or 'default',
-                )
-            elif normalized == 'failed':
-                attempt.failure_reason = 'agent_reported_failed'
-                attempt.failure_message = attempt.result.message or 'codex вернул статус failed.'
+        attempt_summaries = [_summarize_codex_attempt(latest_attempt)]
 
-            attempt_summaries.append(_summarize_codex_attempt(attempt))
-
-            break
-
-        if latest_attempt is None:
-            raise RuntimeError('codex step finished without attempts')
-
-        aggregate_stdout_text = '\n'.join(item.stdout_text for item in attempt_results if item.stdout_text)
-        aggregate_stderr_text = '\n'.join(item.stderr_text for item in attempt_results if item.stderr_text)
         trace_artifacts = self._build_trace_artifacts(
             trace=trace,
             preflight_summary=probe_summary,
@@ -235,8 +222,8 @@ class AgentRunner:
             prompt_preview=prompt_preview,
             command_for_log=latest_attempt.command_for_log,
             output_path=latest_attempt.output_path,
-            stdout_text=aggregate_stdout_text,
-            stderr_text=aggregate_stderr_text,
+            stdout_text=latest_attempt.stdout_text,
+            stderr_text=latest_attempt.stderr_text,
             codex_returncode=latest_attempt.codex_returncode,
             duration_ms=_duration_ms_since(codex_phase_started_at),
             codex_started_at=codex_phase_started_at,
@@ -880,10 +867,6 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
-def _build_model_attempt_specs(settings: Settings) -> list[_CodexAttemptSpec]:
-    return [_CodexAttemptSpec(role='single', model=_non_empty(settings.codex_model) or 'gpt-5.5')]
-
-
 def _build_codex_command(
     *,
     settings: Settings,
@@ -1353,13 +1336,6 @@ def _build_post_browser_idle_ms(
     if last_finished < codex_started_ms:
         return duration_ms
     return max(codex_finished_ms - last_finished, 0)
-
-
-def _non_empty(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
 
 
 def _write_json_safely(path: Path, payload: dict[str, Any]) -> None:

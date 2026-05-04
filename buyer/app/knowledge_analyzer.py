@@ -687,12 +687,7 @@ def candidate_session_file_paths(value: str, session_dir: Path) -> list[Path]:
     candidate = Path(raw_path)
     if candidate.is_absolute():
         return [candidate]
-
-    candidates = [session_dir / candidate]
-    legacy_session_dir = legacy_trace_session_dir(session_dir)
-    if legacy_session_dir is not None:
-        candidates.append(legacy_session_dir / candidate)
-    return candidates
+    return [session_dir / candidate]
 
 
 def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
@@ -701,7 +696,6 @@ def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
     except (OSError, RuntimeError):
         return []
     trace_root = dated_trace_root_for_session_dir(session_dir)
-    trace_root_resolved: Path | None = None
     if trace_root is not None:
         try:
             trace_root_resolved = trace_root.resolve(strict=False)
@@ -713,14 +707,6 @@ def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
             return []
 
     roots = [session_root]
-    legacy_session_dir = legacy_trace_session_dir(session_dir)
-    if (
-        legacy_session_dir is not None
-        and trace_root_resolved is not None
-        and is_safe_existing_trace_dir(legacy_session_dir, trace_root_resolved=trace_root_resolved)
-    ):
-        roots.append(legacy_session_dir.resolve(strict=False))
-
     deduped: list[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -738,13 +724,6 @@ def dated_trace_root_for_session_dir(session_dir: Path) -> Path | None:
     if not TRACE_DATE_DIR_RE.match(session_dir.parent.parent.name):
         return None
     return session_dir.parent.parent.parent
-
-
-def legacy_trace_session_dir(session_dir: Path) -> Path | None:
-    trace_root = dated_trace_root_for_session_dir(session_dir)
-    if trace_root is None:
-        return None
-    return trace_root / session_dir.name
 
 
 def is_relative_to_path(path: Path, base: Path) -> bool:

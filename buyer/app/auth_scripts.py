@@ -86,9 +86,6 @@ class SberIdScriptRunner:
         self._registry: dict[str, ScriptSpec] = {
             'brandshop.ru': ScriptSpec(domain='brandshop.ru', lifecycle='publish', relative_path='sberid/brandshop.ts'),
             'litres.ru': ScriptSpec(domain='litres.ru', lifecycle='publish', relative_path='sberid/litres.ts'),
-            'kuper.ru': ScriptSpec(domain='kuper.ru', lifecycle='draft', relative_path='sberid/kuper.ts'),
-            'samokat.ru': ScriptSpec(domain='samokat.ru', lifecycle='draft', relative_path='sberid/samokat.ts'),
-            'okko.tv': ScriptSpec(domain='okko.tv', lifecycle='draft', relative_path='sberid/okko.ts'),
         }
 
     def registry_snapshot(self) -> list[dict[str, str]]:
@@ -156,9 +153,6 @@ class SberIdScriptRunner:
         session_dir.mkdir(parents=True, exist_ok=True)
         remove_script_output(session_dir / 'auth-script-result.json')
         remove_script_output(session_dir / f'auth-script-result-attempt-{attempt:02d}.json')
-        legacy_session_dir = trace_root / session_id
-        remove_script_output(legacy_session_dir / 'auth-script-result.json')
-        remove_script_output(legacy_session_dir / f'auth-script-result-attempt-{attempt:02d}.json')
         output_path = unique_script_output_path(session_dir, f'auth-script-result-attempt-{attempt:02d}')
         remove_script_output(output_path)
         storage_path = _write_storage_state_tempfile(storage_state, session_id=session_id, attempt=attempt)

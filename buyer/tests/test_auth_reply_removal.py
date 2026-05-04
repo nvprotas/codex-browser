@@ -70,7 +70,6 @@ def _service(
     *,
     store: SessionStore,
     auth_script_runner: _RefreshRequestedAuthScriptRunner | None = None,
-    retry_budget: int = 1,
 ) -> BuyerService:
     return BuyerService(
         store=store,
@@ -81,7 +80,6 @@ def _service(
         cdp_recovery_window_sec=0,
         cdp_recovery_interval_ms=1,
         sberid_allowlist={'litres.ru'},
-        sberid_auth_retry_budget=retry_budget,
         auth_script_runner=auth_script_runner or _RefreshRequestedAuthScriptRunner(),  # type: ignore[arg-type]
     )
 
@@ -114,7 +112,7 @@ class AuthReplyRemovalTests(unittest.IsolatedAsyncioTestCase):
     async def test_auth_refresh_script_failure_falls_back_without_user_auth_reply(self) -> None:
         store = SessionStore()
         auth_runner = _RefreshRequestedAuthScriptRunner(reason_code=AUTH_FAILED_INVALID_SESSION)
-        service = _service(store=store, auth_script_runner=auth_runner, retry_budget=1)
+        service = _service(store=store, auth_script_runner=auth_runner)
         state = await store.create_session(
             task='Купить книгу',
             start_url='https://www.litres.ru/',

@@ -54,7 +54,7 @@
 | `docs/buyer.md` | Согласованная v1-спецификация домена `buyer`. | Граница SberPay, lifecycle, auth, handoff, knowledge-analysis. |
 | `docs/architecture-decisions.md` | Decision log обязательных архитектурных решений. | Сначала обновлять его при новых требованиях, затем остальные документы. |
 | `docs/buyer-roadmap.md` | Приоритизированный roadmap и ссылки на Linear. | При изменении roadmap синхронизировать Linear issue. |
-| `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth или purchase scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
+| `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, SberId scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
 | `docs/brandshop-agent-log-analysis-2026-05-01.md` | Аналитический разбор Brandshop trace из `.tmp`: фактические CDP-команды, agent idle, prompt/instruction причины лишних шагов, GPT-5.5/Codex prompting выводы и рекомендации по tracing. | Обновлять или дополнять при новых Brandshop eval-прогонах, изменении prompt/instruction/CDP tracing или появлении новых метрик сравнения. |
 | `docs/buyer-agent/AGENTS-runtime.md` | Stable runtime rules для внутреннего generic buyer-agent. | Платежная граница, SberPay-only, privacy/output contract; не смешивать с developer-правилами root `AGENTS.md`. |
 | `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, milestone/evidence проверки после state-changing действий, recovery и правила экономии HTML. |
@@ -167,7 +167,7 @@ Lifecycle:
 - `main.py` вызывает `configure_component_logging()` при импорте приложения;
 - формат строк для uvicorn/app handlers: `[%(name)s] %(levelname)s: %(message)s`;
 - application loggers `app.*` в контейнере и `buyer.*` в локальных тестах используют те же handlers и не дублируют записи через propagation;
-- модули `service`, `runner`, `auth_scripts`, `purchase_scripts`, `knowledge_analyzer`, `user_profile` логируют через `logging.getLogger(__name__)`, поэтому в начале строки виден компонент, например `[app.runner]` или `[app.service]`.
+- модули `service`, `runner`, `auth_scripts`, `knowledge_analyzer`, `user_profile` логируют через `logging.getLogger(__name__)`, поэтому в начале строки виден компонент, например `[app.runner]` или `[app.service]`.
 
 ### `buyer/app/url_policy.py`
 
@@ -198,11 +198,7 @@ Pydantic-контракты API и внутренних результатов.
 
 ### `buyer/app/agent_instruction_manifest.py`
 
-Формирует manifest static instruction files для generic buyer-agent.
-
-Входы:
-
-- `start_url` сессии; параметр сохраняется в сигнатуре для совместимости, но текущий manifest не выбирает файл по host.
+Формирует статический manifest instruction files для generic buyer-agent без runtime-входов.
 
 Выход:
 
@@ -249,8 +245,7 @@ Pydantic-контракты API и внутренних результатов.
 Выходы:
 
 - `ProviderPaymentEvidence(provider, host, order_id, url)` из provider URL parsers;
-- `PaymentVerificationResult(status, failure_reason, order_id_host, provider, evidence_url)`, где `status` равен `accepted`, `rejected` или `unverified`;
-- compatibility property `accepted`, которая возвращает `status == 'accepted'`.
+- `PaymentVerificationResult(status, failure_reason, order_id_host, provider, evidence_url)`, где `status` равен `accepted`, `rejected` или `unverified`.
 
 Правила:
 
@@ -271,7 +266,7 @@ Pydantic-контракты API и внутренних результатов.
 - browser/CDP: `BROWSER_CDP_ENDPOINT`, `CDP_RECOVERY_*`;
 - Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` (default `gpt-5.5`), sandbox, reasoning (default `low`), web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
-- SberId scripts инфраструктура: allowlist, timeouts, scripts dir;
+- SberId scripts инфраструктура: allowlist с default `litres.ru,brandshop.ru`, timeouts, scripts dir;
 - automatic purchase-script allowlist не входит в runtime settings или compose; app-wired покупка после SberId auth идет через generic-agent;
 - external Sber cookies API: `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`;
 - state: `STATE_BACKEND`, `DATABASE_URL`, pool sizes;
@@ -554,8 +549,7 @@ Python-runner SberId TypeScript-скриптов.
 
 Registry:
 
-- published: `brandshop.ru`, `litres.ru`;
-- draft: `kuper.ru`, `samokat.ru`, `okko.tv`.
+- published: `brandshop.ru`, `litres.ru`.
 
 Входы:
 
@@ -565,7 +559,7 @@ Registry:
 Выход:
 
 - `AuthScriptResult(status, reason_code, message, artifacts)`;
-- trace/output files в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`: runner переиспользует существующую dated session trace-директорию либо создает ее до generic-agent шага; legacy stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` удаляются и из dated session dir, и из старого flat `BUYER_TRACE_DIR/<session_id>/`, затем скрипту передается уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
+- trace/output files в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`: runner переиспользует существующую dated session trace-директорию либо создает ее до generic-agent шага; stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` удаляются в этой session dir, затем скрипту передается уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
 - входной Playwright `storageState` передается TypeScript-скрипту через временный файл вне workspace с правами `0600` и удаляется в `finally`, поэтому raw auth state не остается в `BUYER_TRACE_DIR`.
 - stderr auth-скрипта логируется runner-ом как `auth_script_stderr ...` в container logs; подробные успешные trace-события остаются только в JSONL-файлах.
 
@@ -593,7 +587,7 @@ Reason codes:
 
 ### Automatic purchase scripts
 
-Скрытый automatic purchase-script путь retired из app wiring и `BuyerService`: `main.py` не создает `PurchaseScriptRunner`, сервис не принимает allowlist/runner и settings/compose не содержат `PURCHASE_SCRIPT_ALLOWLIST` как runtime contract.
+Скрытый automatic purchase-script путь удален из app wiring и `BuyerService`: `main.py` не создает purchase runner, сервис не принимает allowlist/runner и settings/compose не содержат `PURCHASE_SCRIPT_ALLOWLIST` как runtime contract.
 
 Текущий путь покупки после SberId auth:
 
@@ -602,7 +596,7 @@ Reason codes:
 3. возвращает structured `AgentOutput`;
 4. `payment_verifier.py` решает `accepted`/`rejected`/`unverified`.
 
-`PurchaseScriptRunner` остается только как изолированный helper/test infrastructure. Если в будущем появятся custom scripts, они должны быть явным инструментом или отдельным контрактом, а не скрытым pre-generic shortcut. Любой результат такого инструмента все равно обязан пройти verifier и не может сам отправить `payment_ready`.
+`buyer/app/purchase_scripts.py` и regression-test registry удалены. Если в будущем появятся custom scripts, они должны быть явным инструментом или отдельным контрактом, а не скрытым pre-generic shortcut. Любой результат такого инструмента все равно обязан пройти verifier и не может сам отправить `payment_ready`.
 
 ### `buyer/scripts/*`
 
@@ -648,10 +642,6 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 - логирует auth-навигации и cleanup-закрытия через `auth-trace.ts`;
 - валидирует возврат на ожидаемый host и auth markers: простая страница `/account/`, generic `Профиль` и login-индикаторы вроде `Войти` не считаются авторизацией без сильных markers `.header-authorize__avatar`, заказов, logout или данных аккаунта;
 - возвращает те же auth reason codes.
-
-`buyer/scripts/sberid/kuper.ts`, `samokat.ts`, `okko.ts`:
-
-- находятся в registry как draft и не запускаются автоматически до publish.
 
 Файла `buyer/scripts/purchase/litres.ts` больше нет. Покупка Litres выполняется generic-agent через prompt-инструкции и строгий Litres verifier. Brandshop также не имеет `buyer/scripts/purchase/brandshop.ts`; его путь закреплен как generic instruction.
 
@@ -764,6 +754,16 @@ Security boundaries:
 `eval_service` запускает eval cases, принимает callbacks от `buyer`, хранит manifests и готовит данные для judge/dashboard. Публичный callback contract принимает `payment_unverified` как terminal review-needed outcome, не равный `payment_ready`/успеху.
 
 Runtime auth-профили берутся из host-директории `EVAL_AUTH_PROFILES_HOST_DIR`, которая bind-mounted в контейнер как `/run/eval/auth-profiles` и внутри сервиса читается через `EVAL_AUTH_PROFILES_DIR`. Для `auth_profile: litres_sberid` ожидается файл `litres_sberid.json`; для `auth_profile: brandshop_sberid` ожидается `brandshop_sberid.json`. Эти файлы являются секретами, не входят в image и не должны храниться в repo.
+
+### `eval_service/app/runtime_helpers.py`
+
+Общие runtime helpers для FastAPI-слоя eval service.
+
+Поведение:
+
+- лениво достает или создает `RunStore` и `BuyerClient` из `request.app.state`;
+- содержит общий поиск case в manifest, terminal-state predicate и чтение поля из dict/object response;
+- используется `callbacks.py`, `orchestrator.py` и `api.py`, чтобы не держать несколько локальных копий одинаковых helper-функций.
 
 ### `eval_service/app/orchestrator.py`
 
@@ -1057,8 +1057,7 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `buyer/tests/test_auth_reply_removal.py` | MON-29 regression: inline invalid auth уходит в guest без `ask_user`, auth-script refresh/failure уходит в heuristic без запроса auth-пакета, parser reply-auth удален. |
 | `buyer/tests/test_external_auth.py` | MON-30 regression: external cookies payload validation, httpx `MockTransport`, timeout mapping, source priority inline over external и guest fallback с `auth_external_*` reason-code. |
 | `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, persistence redaction legacy auth-like replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
-| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout, уникальные output paths, fixture-domain diagnostics и non-zero diagnostics behavior для script helpers. |
-| `buyer/tests/test_purchase_script_registry.py` | Regression: automatic purchase-script allowlist не является частью runtime-контракта. |
+| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout и устойчивость к невалидному output-файлу. |
 | `buyer/tests/test_prompt_externalization.py` | Review TODO hygiene, instruction manifest, dynamic context files, bootstrap prompt и отсутствие raw auth/profile/memory/CDP preflight blobs в prompt. |
 | `buyer/tests/test_sberid_auth_idempotency.py` | Litres/Brandshop auth snapshot helpers и source-order regression для already-authenticated precheck до entry navigation/Sber ID clicks. |
 | `buyer/tests/test_payment_verifier_and_ready.py` | Provider parsers PayEcom/YooMoney, Litres/Brandshop merchant policy, rejection matrix, `payment_ready.order_id_host` и unknown-merchant `unverified`. |

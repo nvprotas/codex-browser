@@ -72,14 +72,11 @@ def test_payment_verification_result_statuses_are_explicit() -> None:
     )
 
     assert accepted.status == 'accepted'
-    assert accepted.accepted is True
     assert accepted.provider == 'payecom'
     assert accepted.evidence_url == 'https://payecom.ru/pay_ru?orderId=order-789'
     assert accepted.order_id_host == 'payecom.ru'
     assert rejected.status == 'rejected'
-    assert rejected.accepted is False
     assert unverified.status == 'unverified'
-    assert unverified.accepted is False
     assert unverified.provider == 'yoomoney'
     assert unverified.evidence_url == 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123'
     assert unverified.order_id_host == 'yoomoney.ru'
@@ -417,7 +414,6 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 

@@ -179,7 +179,7 @@ printf '%s\n' "{\"status\":\"completed\",\"reason_code\":\"auth_ok\",\"message\"
             root = Path(tmpdir)
             scripts_dir = root / 'scripts'
             trace_dir = root / 'trace'
-            session_dir = trace_dir / 'session-stale-auth'
+            session_dir = trace_dir / '2026-05-04' / '12-00-00' / 'session-stale-auth'
             stale_output = session_dir / 'auth-script-result-attempt-01.json'
             session_dir.mkdir(parents=True)
             stale_output.write_text(

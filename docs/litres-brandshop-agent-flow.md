@@ -523,10 +523,9 @@ Litres covered следующими проверками:
 | Litres auth helper и idempotent precheck | `buyer/tests/test_observability_and_cdp_tool.py`, `buyer/tests/test_sberid_auth_idempotency.py` |
 | Strict PayEcom evidence rejection | `buyer/tests/test_cdp_recovery.py` |
 | Default purchase settings для Litres ведут в generic runner | `buyer/tests/test_cdp_recovery.py` |
-| Automatic purchase-script path не входит в runtime wiring | `buyer/tests/test_purchase_script_registry.py` |
 | `payment_ready` содержит `order_id_host` | `buyer/tests/test_payment_verifier_and_ready.py` |
 | Litres completed без `order_id` превращается в failed | `buyer/tests/test_cdp_recovery.py` |
-| Purchase runner stale output и nonzero payload не считаются success | `buyer/tests/test_script_runtime.py` |
+| Auth runner stale output и nonzero payload не считаются success | `buyer/tests/test_auth_secret_retention.py` |
 
 ## Brandshop: step-by-step работа агента
 
@@ -824,10 +823,10 @@ Eval judge оценивает:
 | CDP commands и logging | `buyer/tools/cdp_tool.py`, `buyer/app/runner.py` |
 | Litres auth/generic purchase | `buyer/scripts/sberid/litres.ts`, `buyer/app/prompt_builder.py`, `buyer/app/payment_verifier.py` |
 | Brandshop auth | `buyer/scripts/sberid/brandshop.ts` |
-| Registries | `buyer/app/auth_scripts.py`, `buyer/app/settings.py`; automatic purchase-script registry не входит в runtime-путь |
+| Registries | `buyer/app/auth_scripts.py`, `buyer/app/settings.py`; automatic purchase-script registry удален из runtime-кода |
 | Payment verification | `buyer/app/payment_verifier.py` |
 | Eval | `eval/cases/*.yaml`, `eval_service/app/*` |
-| Tests | `buyer/tests/test_cdp_recovery.py`, `buyer/tests/test_observability_and_cdp_tool.py`, `buyer/tests/test_external_auth.py`, `buyer/tests/test_script_runtime.py` |
+| Tests | `buyer/tests/test_cdp_recovery.py`, `buyer/tests/test_observability_and_cdp_tool.py`, `buyer/tests/test_external_auth.py`, `buyer/tests/test_script_runtime.py`, `buyer/tests/test_auth_secret_retention.py` |
 
 Рекомендуемые локальные проверки после изменения документа:
 
@@ -835,7 +834,7 @@ Eval judge оценивает:
 | --- | --- |
 | Найти все упоминания Brandshop/Litres в runtime | `rg -n "litres|brandshop|PayEcom|payecom|SberPay" buyer docs eval skills` |
 | Проверить retired purchase path | `rg -n "_run_purchase_script_flow|PURCHASE_SCRIPT_ALLOWLIST|purchase_script_allowlist" buyer/app docker-compose.yml docker-compose.openclaw.yml .env.example` |
-| Запустить targeted buyer tests | `uv run --with-requirements buyer/requirements.txt --with pytest pytest buyer/tests/test_cdp_recovery.py buyer/tests/test_observability_and_cdp_tool.py buyer/tests/test_external_auth.py buyer/tests/test_script_runtime.py buyer/tests/test_payment_verifier_and_ready.py buyer/tests/test_purchase_script_registry.py buyer/tests/test_sberid_auth_idempotency.py buyer/tests/test_brandshop_generic_instruction.py buyer/tests/test_callback_trace_slimming.py` |
+| Запустить targeted buyer tests | `uv run --with-requirements buyer/requirements.txt --with pytest pytest buyer/tests/test_cdp_recovery.py buyer/tests/test_observability_and_cdp_tool.py buyer/tests/test_external_auth.py buyer/tests/test_script_runtime.py buyer/tests/test_payment_verifier_and_ready.py buyer/tests/test_sberid_auth_idempotency.py buyer/tests/test_brandshop_generic_instruction.py buyer/tests/test_callback_trace_slimming.py buyer/tests/test_auth_secret_retention.py` |
 
 ## Карта источников
 

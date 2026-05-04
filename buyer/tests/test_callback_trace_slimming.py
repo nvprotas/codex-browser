@@ -9,6 +9,7 @@ from typing import Any
 
 from buyer.app.models import AgentOutput
 from buyer.app.models import EventEnvelope
+from buyer.app.payment_verifier import verify_completed_payment
 from buyer.app.runner import AgentRunner
 from buyer.app.service import BuyerService
 from buyer.app.service import _build_agent_step_payload
@@ -84,7 +85,6 @@ def _service(callback_client: _RecordingCallbackClient, store: SessionStore) -> 
         cdp_recovery_window_sec=0,
         cdp_recovery_interval_ms=1,
         sberid_allowlist=set(),
-        sberid_auth_retry_budget=0,
         auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
     )
 
@@ -366,19 +366,21 @@ def test_completed_scenario_finished_artifacts_slim_legacy_full_trace() -> None:
             auth=None,
         )
 
+        result = AgentOutput(
+            status='completed',
+            message='payment boundary reached',
+            order_id='order-123',
+            payment_evidence={
+                'source': 'litres_payecom_iframe',
+                'url': 'https://payecom.ru/pay_ru?orderId=order-123',
+            },
+            artifacts=_legacy_trace_artifacts(),
+        )
         await service._handle_completed(
             state,
-            AgentOutput(
-                status='completed',
-                message='payment boundary reached',
-                order_id='order-123',
-                payment_evidence={
-                    'source': 'litres_payecom_iframe',
-                    'url': 'https://payecom.ru/pay_ru?orderId=order-123',
-                },
-                artifacts=_legacy_trace_artifacts(),
-            ),
+            result,
             auth_summary=None,
+            payment_verification=verify_completed_payment(state.start_url, result),
         )
 
         scenario_finished = callback_client.delivered[-1]

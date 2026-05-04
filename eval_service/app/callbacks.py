@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import Field
 
-from eval_service.app.buyer_client import BuyerClient
 from eval_service.app.callback_urls import build_buyer_callback_token, build_buyer_callback_url
 from eval_service.app.models import (
     BuyerCallbackEnvelope,
@@ -21,6 +20,13 @@ from eval_service.app.models import (
 )
 from eval_service.app.orchestrator import get_run_orchestrator
 from eval_service.app.run_store import RunStore
+from eval_service.app.runtime_helpers import (
+    find_case as _find_case,
+    get_buyer_client as _get_buyer_client,
+    get_run_store as _get_run_store,
+    is_terminal_case_state as _is_terminal_case_state,
+    response_field as _response_field,
+)
 
 
 router = APIRouter()
@@ -295,22 +301,6 @@ def _mark_resume_failure(store: RunStore, eval_run_id: str, _exc: Exception) -> 
     store.update_run_status(eval_run_id, EvalRunStatus.FAILED)
 
 
-def _get_run_store(request: Request) -> RunStore:
-    store = getattr(request.app.state, 'run_store', None)
-    if store is None:
-        store = RunStore(request.app.state.settings.eval_runs_dir)
-        request.app.state.run_store = store
-    return store
-
-
-def _get_buyer_client(request: Request) -> BuyerClient:
-    client = getattr(request.app.state, 'buyer_client', None)
-    if client is None:
-        client = BuyerClient(request.app.state.settings.buyer_api_base_url)
-        request.app.state.buyer_client = client
-    return client
-
-
 def _validate_callback_token(request: Request) -> None:
     secret = getattr(request.app.state.settings, 'eval_callback_secret', None)
     if secret is None or not secret.strip():
@@ -419,28 +409,3 @@ def _require_case_value(value: str | None, name: str) -> str:
             detail=f'case не содержит активный {name}',
         )
     return value
-
-
-def _is_terminal_case_state(state: CaseRunState) -> bool:
-    return state in {
-        CaseRunState.SKIPPED_AUTH_MISSING,
-        CaseRunState.UNVERIFIED,
-        CaseRunState.FINISHED,
-        CaseRunState.FAILED,
-        CaseRunState.TIMEOUT,
-        CaseRunState.JUDGED,
-        CaseRunState.JUDGE_FAILED,
-    }
-
-
-def _find_case(cases: list[EvalRunCase], eval_case_id: str) -> EvalRunCase:
-    for case in cases:
-        if case.eval_case_id == eval_case_id:
-            return case
-    raise KeyError(eval_case_id)
-
-
-def _response_field(response: object, field_name: str) -> object:
-    if isinstance(response, dict):
-        return response[field_name]
-    return getattr(response, field_name)

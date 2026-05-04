@@ -36,10 +36,6 @@ class PaymentVerificationResult:
     provider: str | None = None
     evidence_url: str | None = None
 
-    @property
-    def accepted(self) -> bool:
-        return self.status == 'accepted'
-
 
 def is_litres_url(raw_url: str) -> bool:
     return is_domain_in_allowlist(domain_from_url(raw_url), LITRES_DOMAINS)
@@ -47,16 +43,6 @@ def is_litres_url(raw_url: str) -> bool:
 
 def is_brandshop_url(raw_url: str) -> bool:
     return is_domain_in_allowlist(domain_from_url(raw_url), BRANDSHOP_DOMAINS)
-
-
-def payecom_order_id_from_url(raw_url: str) -> str | None:
-    evidence = parse_payecom_payment_url(raw_url)
-    return evidence.order_id if evidence is not None else None
-
-
-def yoomoney_order_id_from_url(raw_url: str) -> str | None:
-    evidence = parse_yoomoney_payment_url(raw_url)
-    return evidence.order_id if evidence is not None else None
 
 
 def parse_payecom_payment_url(raw_url: str) -> ProviderPaymentEvidence | None:

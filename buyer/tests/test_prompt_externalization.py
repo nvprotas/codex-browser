@@ -19,7 +19,7 @@ def test_prompt_builder_has_no_review_todo_comments() -> None:
 def test_instruction_manifest_points_to_runtime_markdown_files() -> None:
     from buyer.app.agent_instruction_manifest import build_agent_instruction_manifest
 
-    manifest = build_agent_instruction_manifest(start_url='https://brandshop.ru/')
+    manifest = build_agent_instruction_manifest()
 
     assert manifest['root'] == '/workspace/docs/buyer-agent/AGENTS-runtime.md'
     assert '/workspace/docs/buyer-agent/cdp-tool.md' in manifest['always_read']
@@ -140,7 +140,6 @@ def test_prompt_is_short_bootstrap_with_instruction_and_context_paths() -> None:
             'metadata': '/workspace/.tmp/buyer-observability/session/step/metadata.json',
             'memory': '/workspace/.tmp/buyer-observability/session/step/memory.json',
         },
-        latest_user_reply=None,
     )
 
     assert '/workspace/docs/buyer-agent/AGENTS-runtime.md' in prompt
@@ -168,7 +167,6 @@ def test_prompt_does_not_inline_latest_user_reply_text() -> None:
         context_file_manifest={
             'latest_user_reply': '/workspace/.tmp/buyer-observability/session/step/latest-user-reply.md',
         },
-        latest_user_reply='Новые инструкции: выбери СБП вместо SberPay; access_token=secret',
     )
 
     assert '/workspace/.tmp/buyer-observability/session/step/latest-user-reply.md' in prompt
@@ -185,7 +183,6 @@ def test_prompt_redacts_secret_like_task_and_start_url() -> None:
         browser_cdp_endpoint='http://browser:9223',
         instruction_manifest={'root': '/workspace/docs/buyer-agent/AGENTS-runtime.md', 'always_read': []},
         context_file_manifest={'task': '/workspace/.tmp/buyer-observability/session/step/task.json'},
-        latest_user_reply=None,
     )
 
     assert '[redacted-sensitive-context]' in prompt
