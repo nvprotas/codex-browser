@@ -72,14 +72,11 @@ def test_payment_verification_result_statuses_are_explicit() -> None:
     )
 
     assert accepted.status == 'accepted'
-    assert accepted.accepted is True
     assert accepted.provider == 'payecom'
     assert accepted.evidence_url == 'https://payecom.ru/pay_ru?orderId=order-789'
     assert accepted.order_id_host == 'payecom.ru'
     assert rejected.status == 'rejected'
-    assert rejected.accepted is False
     assert unverified.status == 'unverified'
-    assert unverified.accepted is False
     assert unverified.provider == 'yoomoney'
     assert unverified.evidence_url == 'https://yoomoney.ru/checkout/payments/v2/contract?orderId=unknown-order-123'
     assert unverified.order_id_host == 'yoomoney.ru'
@@ -379,22 +376,20 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(scenario_finished_events), 1)
                 self.assertEqual(scenario_finished_events[0].payload.get('status'), 'failed')
 
-    async def test_litres_ignores_legacy_purchase_script_shaped_artifacts(self) -> None:
+    async def test_litres_ignores_legacy_artifact_payment_evidence(self) -> None:
         final_state = await self._run_single_output(
             start_url='https://www.litres.ru/',
             output=AgentOutput(
                 status='completed',
-                message='Legacy script-shaped artifacts не должны подтверждать payment_ready',
+                message='Legacy artifacts не должны подтверждать payment_ready',
                 order_id='order-789',
                 payment_evidence=None,
                 artifacts={
-                    'purchase_script': {
-                        'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-789',
-                        'payment_evidence': {
-                            'source': 'litres_payecom_iframe',
-                            'url': 'https://payecom.ru/pay_ru?orderId=order-789',
-                        },
-                    }
+                    'payment_frame_src': 'https://payecom.ru/pay_ru?orderId=order-789',
+                    'payment_evidence': {
+                        'source': 'litres_payecom_iframe',
+                        'url': 'https://payecom.ru/pay_ru?orderId=order-789',
+                    },
                 },
             ),
         )
@@ -417,7 +412,6 @@ class PaymentVerifierReadyTests(unittest.IsolatedAsyncioTestCase):
             cdp_recovery_window_sec=0.2,
             cdp_recovery_interval_ms=1,
             sberid_allowlist=set(),
-            sberid_auth_retry_budget=1,
             auth_script_runner=_NoopAuthScriptRunner(),  # type: ignore[arg-type]
         )
 

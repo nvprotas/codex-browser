@@ -45,7 +45,6 @@ class BuyerService:
         cdp_recovery_window_sec: float,
         cdp_recovery_interval_ms: int,
         sberid_allowlist: set[str],
-        sberid_auth_retry_budget: int,
         auth_script_runner: SberIdScriptRunner,
         knowledge_analyzer: PostSessionKnowledgeAnalyzer | None = None,
         buyer_user_info_path: str = '/run/buyer/user-buyer-info.md',
@@ -59,7 +58,6 @@ class BuyerService:
         self._cdp_recovery_window_sec = max(cdp_recovery_window_sec, 0.0)
         self._cdp_recovery_interval_sec = max(cdp_recovery_interval_ms, 1) / 1000.0
         self._sberid_allowlist = {item for item in sberid_allowlist if item}
-        self._sberid_auth_retry_budget = max(sberid_auth_retry_budget, 0)
         self._auth_script_runner = auth_script_runner
         self._knowledge_analyzer = knowledge_analyzer
         self._post_session_analysis_tasks: set[asyncio.Task[None]] = set()
@@ -347,25 +345,8 @@ class BuyerService:
         result: AgentOutput,
         *,
         auth_summary: dict[str, Any] | None,
-        payment_verification: PaymentVerificationResult | None = None,
+        payment_verification: PaymentVerificationResult,
     ) -> None:
-        payment_verification = payment_verification or verify_completed_payment(state.start_url, result)
-        if payment_verification.status == 'unverified':
-            await self._handle_unverified(
-                state,
-                result,
-                payment_verification=payment_verification,
-                auth_summary=auth_summary,
-            )
-            return
-        if payment_verification.status == 'rejected':
-            await self._handle_failed(
-                state,
-                payment_verification.failure_reason or 'Completed result rejected: payment verification failed.',
-                _artifacts_with_payment_evidence(result),
-                auth_summary=auth_summary,
-            )
-            return
         order_id_host = str(payment_verification.order_id_host or '').strip()
         if not order_id_host:
             await self._handle_failed(
@@ -614,37 +595,32 @@ class BuyerService:
             return summary
 
         summary['mode'] = 'sberid'
-        current_auth = auth
-        max_attempts = self._sberid_auth_retry_budget + 1
         last_script_artifacts: dict[str, Any] = {}
 
-        for attempt in range(1, max_attempts + 1):
-            summary['attempts'] = attempt
-            storage_state = current_auth.storage_state
-            if not _is_valid_storage_state(storage_state):
-                summary['mode'] = 'guest'
-                summary['path'] = 'guest'
-                summary['reason_code'] = 'auth_inline_invalid_payload'
-                return summary
+        summary['attempts'] = 1
+        storage_state = auth.storage_state
+        if not _is_valid_storage_state(storage_state):
+            summary['mode'] = 'guest'
+            summary['path'] = 'guest'
+            summary['reason_code'] = 'auth_inline_invalid_payload'
+            return summary
 
-            script_result = await self._auth_script_runner.run(
-                session_id=state.session_id,
-                domain=domain,
-                start_url=state.start_url,
-                storage_state=storage_state,
-                attempt=attempt,
-            )
-            summary['script_status'] = script_result.status
-            summary['reason_code'] = script_result.reason_code
-            summary['script_message'] = script_result.message
-            last_script_artifacts = script_result.artifacts
-            if script_result.reason_code == AUTH_OK and script_result.status == 'completed':
-                summary['path'] = 'script'
-                summary['artifacts'] = last_script_artifacts
-                summary['context_prepared'] = bool(last_script_artifacts.get('context_prepared_for_reuse'))
-                return summary
-
-            break
+        script_result = await self._auth_script_runner.run(
+            session_id=state.session_id,
+            domain=domain,
+            start_url=state.start_url,
+            storage_state=storage_state,
+            attempt=1,
+        )
+        summary['script_status'] = script_result.status
+        summary['reason_code'] = script_result.reason_code
+        summary['script_message'] = script_result.message
+        last_script_artifacts = script_result.artifacts
+        if script_result.reason_code == AUTH_OK and script_result.status == 'completed':
+            summary['path'] = 'script'
+            summary['artifacts'] = last_script_artifacts
+            summary['context_prepared'] = bool(last_script_artifacts.get('context_prepared_for_reuse'))
+            return summary
 
         summary['path'] = 'heuristic'
         summary['artifacts'] = last_script_artifacts
@@ -718,44 +694,6 @@ class BuyerService:
         reply_text = await self._store.pop_reply(state.session_id)
         await self._store.add_agent_memory(state.session_id, 'user', reply_text)
         return reply_text
-
-    async def _emit_handoff_and_wait(
-        self,
-        state: SessionState,
-        *,
-        reason_code: str,
-        message: str,
-    ) -> None:
-        await self._emit_event(
-            state,
-            event_type='handoff_requested',
-            payload={
-                'message': message,
-                'reason_code': reason_code,
-                'novnc_url': state.novnc_url,
-            },
-            idempotency_suffix=f'handoff-requested-{reason_code}',
-        )
-        operator_reply = await self._ask_user_for_reply(
-            state,
-            (
-                'Переключитесь в noVNC, выполните ручной шаг авторизации и '
-                'подтвердите ответом в этом диалоге.'
-            ),
-            reason_code=reason_code,
-            extra_context={'handoff': True, 'novnc_url': state.novnc_url},
-        )
-        refreshed_state = await self._store.get(state.session_id)
-        await self._emit_event(
-            refreshed_state,
-            event_type='handoff_resumed',
-            payload={
-                'message': 'Ручной этап handoff завершен, buyer продолжает сценарий.',
-                'reason_code': reason_code,
-                'operator_reply': operator_reply,
-            },
-            idempotency_suffix=f'handoff-resumed-{reason_code}',
-        )
 
     def _persist_profile_updates(self, *, session_id: str, step_index: int, updates: list[str]) -> None:
         appended = append_profile_updates(self._buyer_user_info_path, updates)

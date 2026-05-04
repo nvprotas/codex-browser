@@ -14,7 +14,7 @@ def _brandshop_prompt() -> str:
         task='Купи светлые кроссовки Jordan Air High 45 EU',
         start_url='https://brandshop.ru/',
         browser_cdp_endpoint='http://browser:9223',
-        instruction_manifest=build_agent_instruction_manifest(start_url='https://brandshop.ru/'),
+        instruction_manifest=build_agent_instruction_manifest(),
         context_file_manifest={
             'task': '/workspace/.tmp/buyer-observability/session/step/task.json',
             'metadata': '/workspace/.tmp/buyer-observability/session/step/metadata.json',
@@ -23,7 +23,6 @@ def _brandshop_prompt() -> str:
             'user_profile': '/workspace/.tmp/buyer-observability/session/step/user-profile.md',
             'auth_state': '/workspace/.tmp/buyer-observability/session/step/auth-state.json',
         },
-        latest_user_reply=None,
     )
 
 
@@ -77,7 +76,7 @@ class BrandshopGenericInstructionPromptTests(unittest.TestCase):
             task='Купи темную худи Stussy размера M',
             start_url='https://brandshop.ru/',
             browser_cdp_endpoint='http://browser:9223',
-            instruction_manifest=build_agent_instruction_manifest(start_url='https://brandshop.ru/'),
+            instruction_manifest=build_agent_instruction_manifest(),
             context_file_manifest={
                 'task': '/workspace/.tmp/buyer-observability/session/step/task.json',
                 'metadata': '/workspace/.tmp/buyer-observability/session/step/metadata.json',
@@ -86,7 +85,6 @@ class BrandshopGenericInstructionPromptTests(unittest.TestCase):
                 'user_profile': '/workspace/.tmp/buyer-observability/session/step/user-profile.md',
                 'auth_state': '/workspace/.tmp/buyer-observability/session/step/auth-state.json',
             },
-            latest_user_reply=None,
         )
         instruction = Path('docs/buyer-agent/instructions/brandshop.md').read_text(encoding='utf-8')
 

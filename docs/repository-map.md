@@ -12,7 +12,7 @@
 
 - `buyer`: FastAPI-сервис, который принимает задачу покупки, ведет состояние сессии, управляет агентным шагом `codex exec`, запускает Playwright-скрипты, отправляет callbacks и пишет trace-артефакты.
 - `browser`: sidecar-контейнер с Chromium, Xvfb, x11vnc, noVNC и CDP endpoint для управления браузером.
-- `micro-ui`: временный `middle`: принимает callbacks от `buyer`, показывает события, проксирует запуск задач и ответы пользователя.
+- `micro-ui`: дополнительный debug-модуль/локальный observer: принимает callbacks от `buyer`, показывает события, проксирует запуск задач и ответы пользователя; не является production `middle`.
 - `postgres`: долговременное состояние `buyer` в локальном compose-окружении.
 - `docs`: пользовательские и архитектурные контракты.
 - `scripts/evolve_buyer_loop.py`: standalone research-loop CLI для MVP-A self-evolving `buyer`; запускает baseline eval через `eval_service`, создает candidate branch/worktree, применяет placeholder или external patch, готовит candidate runtime через внешний hook, запускает candidate eval и пишет delta report без auto-promotion.
@@ -36,8 +36,8 @@
 | --- | --- | --- | --- | --- |
 | `README.md` | Быстрый обзор MVP, запуск compose, основные ограничения. | Нет runtime-входов. | Документирует команды, endpoints, trace-файлы, external cookies env и ограничения. | Может устареть при изменении API, env или compose. |
 | `AGENTS.md` | Правила работы агентов в репозитории. | Изменения процессов и договоренностей. | Локальные инструкции для Codex и журнал изменений. | Любое изменение требует записи в журнале. |
-| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` как `/run/codex/host-auth`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
-| `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и временного `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
+| `docker-compose.yml` | Локальный стек `postgres` + `browser` + `buyer` + `micro-ui` + `eval_service`. | `.env`, env `EVAL_CALLBACK_SECRET`, `TRUSTED_CALLBACK_URLS`, `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`, `MICRO_UI_ENABLE_EVAL_STUBS`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`, `EVAL_AUTH_PROFILES_HOST_DIR`. | Host-порты только на loopback: `127.0.0.1:5432`, `127.0.0.1:6901`, `127.0.0.1:8000`, `127.0.0.1:8080`, `127.0.0.1:8090`; CDP `9223` доступен только внутри docker-сети как `http://browser:9223`; volume `buyer-postgres-data`; `CODEX_AUTH_JSON_PATH` монтируется в `buyer` и `eval_service` как `/run/codex/host-auth`; `buyer` может получать SberId cookies из внешнего сервиса при `SBER_AUTH_SOURCE=external_cookies_api`; eval auth-профили читаются из host-директории и монтируются в `/run/eval/auth-profiles`; eval stubs в debug `micro-ui` включаются только при `MICRO_UI_ENABLE_EVAL_STUBS=true`. | Неверные env/mounts ломают авторизацию Codex, профиль пользователя, external cookies source или eval callbacks; отсутствующая host-директория или файл `<auth_profile>.json` приводит eval-case к `skipped_auth_missing`; недоступный `browser` блокирует агентный шаг; удаленный доступ к loopback-портам требует VPN/SSH tunnel/authenticated reverse proxy. |
+| `docker-compose.openclaw.yml` | Standalone compose для развертывания рядом с `openclaw`: только `postgres`, `browser`, `buyer`, без `eval_service` и debug-модуля `micro-ui`. | `.env`, обязательные `MIDDLE_CALLBACK_URL` и `SBER_COOKIES_API_URL`, bind mounts `CODEX_AUTH_JSON_PATH`, `USER_BUYER_INFO_PATH`. | `buyer` публикуется на `${BUYER_BIND_ADDR:-127.0.0.1}:${BUYER_PORT:-8000}`, noVNC на `${NOVNC_BIND_ADDR:-127.0.0.1}:${NOVNC_PORT:-6901}`, Postgres на `${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}`; callbacks отправляются во внешний `middle`; SberId cookies берутся из external cookies API по умолчанию; `buyer` получает `host.docker.internal` для доступа к сервисам host-машины. | Неверный `MIDDLE_CALLBACK_URL` ломает доставку событий в middle; неверный `SBER_COOKIES_API_URL` переводит auth в guest-flow; открытые bind addr требуют доверенного периметра. |
 | `pytest.ini` | Общая настройка pytest. | Запуск pytest из корня. | Добавляет `pythonpath = .`. | Не нужен отдельный `PYTHONPATH=.`. |
 | `LICENSE` | Лицензия проекта. | Нет. | Правовой артефакт. | Не влияет на runtime. |
 | `skills/openclaw-buyer/SKILL.md` | Скилл для агента `openclaw`: как формировать задачу для `buyer` и технически читать статус сессии. | HTTP API `buyer`, роли `openclaw`/`middle`/`buyer`. | Процедура запуска задач из `openclaw` без знаний про auth/callbacks; task-шаблон с целью, критериями, ограничениями и платежной границей; правила read-only проверки статуса. | Может устареть при изменении API или роли `middle`. |
@@ -54,7 +54,7 @@
 | `docs/buyer.md` | Согласованная v1-спецификация домена `buyer`. | Граница SberPay, lifecycle, auth, handoff, knowledge-analysis. |
 | `docs/architecture-decisions.md` | Decision log обязательных архитектурных решений. | Сначала обновлять его при новых требованиях, затем остальные документы. |
 | `docs/buyer-roadmap.md` | Приоритизированный roadmap и ссылки на Linear. | При изменении roadmap синхронизировать Linear issue. |
-| `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth или purchase scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
+| `docs/litres-brandshop-agent-flow.md` | Подробное фактическое описание step-by-step работы `buyer` при покупке на Litres и Brandshop, включая архитектуру, prompt-инструкции внутренних Codex-агентов, SberId scripts, verifier, callbacks и eval-контур. | Обновлять при изменении Litres/Brandshop auth scripts, generic prompt-а, payment verifier, callback/eval contracts или статуса доменной поддержки. |
 | `docs/brandshop-agent-log-analysis-2026-05-01.md` | Аналитический разбор Brandshop trace из `.tmp`: фактические CDP-команды, agent idle, prompt/instruction причины лишних шагов, GPT-5.5/Codex prompting выводы и рекомендации по tracing. | Обновлять или дополнять при новых Brandshop eval-прогонах, изменении prompt/instruction/CDP tracing или появлении новых метрик сравнения. |
 | `docs/buyer-agent/AGENTS-runtime.md` | Stable runtime rules для внутреннего generic buyer-agent. | Платежная граница, SberPay-only, privacy/output contract; не смешивать с developer-правилами root `AGENTS.md`. |
 | `docs/buyer-agent/cdp-tool.md` | Runtime manual для вызова `buyer/tools/cdp_tool.py`. | Доступные команды, milestone/evidence проверки после state-changing действий, recovery и правила экономии HTML. |
@@ -167,7 +167,7 @@ Lifecycle:
 - `main.py` вызывает `configure_component_logging()` при импорте приложения;
 - формат строк для uvicorn/app handlers: `[%(name)s] %(levelname)s: %(message)s`;
 - application loggers `app.*` в контейнере и `buyer.*` в локальных тестах используют те же handlers и не дублируют записи через propagation;
-- модули `service`, `runner`, `auth_scripts`, `purchase_scripts`, `knowledge_analyzer`, `user_profile` логируют через `logging.getLogger(__name__)`, поэтому в начале строки виден компонент, например `[app.runner]` или `[app.service]`.
+- модули `service`, `runner`, `auth_scripts`, `knowledge_analyzer`, `user_profile` логируют через `logging.getLogger(__name__)`, поэтому в начале строки виден компонент, например `[app.runner]` или `[app.service]`.
 
 ### `buyer/app/url_policy.py`
 
@@ -179,6 +179,22 @@ Lifecycle:
 - `callback_url`: task-provided URL не должен содержать query string или fragment; публичный callback должен быть https.
 - Internal callback по http разрешен только при точном совпадении scheme/host/port/path с `MIDDLE_CALLBACK_URL` или `TRUSTED_CALLBACK_URLS`; query/fragment в default/trusted entries запрещены и не участвуют в allowlist.
 - Секрет callback receiver передается отдельно как ephemeral `callback_token`, а не в persisted `callback_url`. Legacy query-token может приниматься входящим eval receiver, но `buyer` такой callback URL не allowlist-ит.
+
+### `buyer/app/cdp_endpoint.py`
+
+Общий resolver CDP endpoint для Python browser tooling.
+
+Поведение:
+
+- `ws://`/`wss://` endpoint возвращается без изменений;
+- HTTP(S) endpoint резолвится через `/json/version` в `webSocketDebuggerUrl`;
+- если исходный HTTP(S) hostname недоступен из текущего процесса, пробуются fallback hostnames `localhost`, `127.0.0.1`, `host.docker.internal` с тем же scheme/port;
+- websocket URL из `/json/version` возвращается с netloc фактически сработавшего HTTP endpoint, чтобы `auth_scripts.py` и `cdp_tool.py` одинаково работали из контейнера и локального окружения.
+
+Ошибки:
+
+- `RuntimeError('CDP endpoint не вернул webSocketDebuggerUrl.')`, если `/json/version` не содержит websocket URL;
+- `RuntimeError('Не удалось подключиться к browser-sidecar ни по одному CDP endpoint...')`, если все кандидаты недоступны.
 
 ### `buyer/app/models.py`
 
@@ -198,11 +214,7 @@ Pydantic-контракты API и внутренних результатов.
 
 ### `buyer/app/agent_instruction_manifest.py`
 
-Формирует manifest static instruction files для generic buyer-agent.
-
-Входы:
-
-- `start_url` сессии; параметр сохраняется в сигнатуре для совместимости, но текущий manifest не выбирает файл по host.
+Формирует статический manifest instruction files для generic buyer-agent без runtime-входов.
 
 Выход:
 
@@ -249,14 +261,13 @@ Pydantic-контракты API и внутренних результатов.
 Выходы:
 
 - `ProviderPaymentEvidence(provider, host, order_id, url)` из provider URL parsers;
-- `PaymentVerificationResult(status, failure_reason, order_id_host, provider, evidence_url)`, где `status` равен `accepted`, `rejected` или `unverified`;
-- compatibility property `accepted`, которая возвращает `status == 'accepted'`.
+- `PaymentVerificationResult(status, failure_reason, order_id_host, provider, evidence_url)`, где `status` равен `accepted`, `rejected` или `unverified`.
 
 Правила:
 
 - Provider parser `parse_payecom_payment_url()` принимает только точный HTTPS URL `https://payecom.ru/pay_ru?orderId=<order_id>` без port/path params и с ровно одним непустым `orderId`.
 - Provider parser `parse_yoomoney_payment_url()` принимает только точный HTTPS URL `https://yoomoney.ru/checkout/payments/v2/contract?orderId=<order_id>` без port/path params и с ровно одним непустым `orderId`.
-- Для Litres merchant policy принимает только `order_id`, подтвержденный `payment_evidence`/`payment_frame_src` с PayEcom provider evidence и совпадающим `orderId`; accepted result возвращает `order_id_host="payecom.ru"`.
+- Для Litres merchant policy принимает только `order_id`, подтвержденный top-level `payment_evidence.source="litres_payecom_iframe"` с PayEcom provider evidence и совпадающим `orderId`; legacy evidence из `artifacts.payment_frame_src`/`artifacts.payment_evidence` игнорируется; accepted result возвращает `order_id_host="payecom.ru"`.
 - `http://payecom.ru`, subdomain вроде `evil.payecom.ru`, port/path params, path prefix вроде `/pay_ru_malicious`, несколько `orderId` или mismatch `orderId` отклоняются.
 - Для Brandshop merchant policy принимает только `order_id`, подтвержденный `payment_evidence.source="brandshop_yoomoney_sberpay_redirect"` и YooMoney provider evidence с совпадающим `orderId`; accepted result возвращает `order_id_host="yoomoney.ru"`.
 - Для доменов без merchant policy валидный provider evidence PayEcom/YooMoney со совпадающим top-level `order_id` возвращает `unverified`, а не success; битый/mismatch evidence возвращает `rejected`.
@@ -269,9 +280,9 @@ Pydantic-контракты API и внутренних результатов.
 
 - callbacks: `MIDDLE_CALLBACK_URL`, `TRUSTED_CALLBACK_URLS`, retries, timeout, backoff;
 - browser/CDP: `BROWSER_CDP_ENDPOINT`, `CDP_RECOVERY_*`;
-- Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` (default `gpt-5.5`), sandbox, reasoning (default `low`), web search, timeout;
+- Codex: `CODEX_BIN`, единственная модель `CODEX_MODEL` с настройкой по умолчанию в `buyer/app/settings.py`, sandbox, reasoning (default `low`), web search, timeout;
 - trace и user profile: `BUYER_TRACE_DIR`, `BUYER_USER_INFO_PATH`;
-- SberId scripts инфраструктура: allowlist, timeouts, scripts dir;
+- SberId scripts инфраструктура: allowlist с default `litres.ru,brandshop.ru`, timeouts, scripts dir;
 - automatic purchase-script allowlist не входит в runtime settings или compose; app-wired покупка после SberId auth идет через generic-agent;
 - external Sber cookies API: `SBER_AUTH_SOURCE`, `SBER_COOKIES_API_URL`, `SBER_COOKIES_API_TIMEOUT_SEC`, `SBER_COOKIES_API_RETRIES`;
 - state: `STATE_BACKEND`, `DATABASE_URL`, pool sizes;
@@ -343,7 +354,7 @@ Postgres repository и inline migrations.
 
 - `_sanitize_auth_context` удаляет `storageState`, cookies, localStorage, auth/token/password-like ключи.
 - `_sanitize_persistent_metadata` дополнительно удаляет stdout/stderr/prompt preview.
-- `_sanitize_reply_or_memory_text` и legacy helper `summarize_sberid_auth_reply` остаются защитным редактированием на persistence-границе, но `BuyerService` больше не запрашивает и не принимает auth-пакеты через пользовательский reply.
+- `_sanitize_reply_or_memory_text` остается защитным редактированием на persistence-границе, но `BuyerService` больше не запрашивает и не принимает auth-пакеты через пользовательский reply.
 - `_iter_artifact_paths` не сохраняет path к `storageState`/cookies/localStorage.
 
 ### `buyer/app/external_auth.py`
@@ -472,14 +483,14 @@ HTTP-клиент доставки callback-событий.
 
 Внутренний flow:
 
-1. Подготавливает trace context: `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/step-XXX-*`.
+1. Подготавливает trace context через `trace_session`: `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/step-XXX-*`.
 2. Делает CDP preflight через `/app/tools/cdp_tool.py url`.
 3. Загружает user profile.
 4. Пишет dynamic context files в trace step dir через `agent_context_files`.
 5. Получает instruction manifest через `agent_instruction_manifest`.
 6. Строит bootstrap prompt из hard rules, task, CDP endpoint и manifest-ов файлов; latest reply передается только через context file.
 7. Проверяет `OPENAI_API_KEY` или `/root/.codex/auth.json`.
-8. Формирует единственную попытку модели `single` через `CODEX_MODEL` или default `gpt-5.5`; fast/strong роли в runtime отсутствуют.
+8. Формирует единственную попытку модели `single` через уже нормализованный `Settings.codex_model`; модель по умолчанию задана только в `buyer/app/settings.py`, fast/strong роли в runtime отсутствуют.
 9. Генерирует `attempt_id`, передает его в `BUYER_CODEX_ATTEMPT_ID` для `codex exec` и CDP action log, затем запускает `codex exec --json --output-schema ... -o <tmp> <prompt>`.
 10. Параллельно стримит stdout/stderr и новые browser action records; stdout/stderr читаются chunk-based без лимита длины одной строки, а длинные строки внутри stream payload обрезаются перед callback/storage. Browser action metrics связывают start/finish по `command_id`, если он есть, и используют FIFO по имени команды только для legacy-логов.
 11. Парсит output JSON в `AgentOutput`.
@@ -530,6 +541,19 @@ HTTP-клиент доставки callback-событий.
 
 Ошибки: `remove_file_quietly` гасит `FileNotFoundError`; остальные функции ошибок обычно не генерируют.
 
+### `buyer/app/trace_session.py`
+
+Общий helper для trace session directories.
+
+Поведение:
+
+- ищет существующую dated session dir в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>` и возвращает последнюю подходящую;
+- отбрасывает date/time/session entries с неподходящим именем, symlink или выходом за `trace_root`;
+- для новой сессии подбирает безопасный timestamp directory, при collision пробует следующие секунды в пределах минуты;
+- используется `AgentRunner`, `SberIdScriptRunner` и `PostSessionKnowledgeAnalyzer`, чтобы trace lookup и symlink-политика были одинаковыми.
+
+Ошибки: при невозможности подобрать безопасный путь выбрасывает `ValueError` с русскоязычным описанием.
+
 ## `buyer`: SberId auth scripts and TypeScript helpers
 
 ### `buyer/app/script_runtime.py`
@@ -554,8 +578,7 @@ Python-runner SberId TypeScript-скриптов.
 
 Registry:
 
-- published: `brandshop.ru`, `litres.ru`;
-- draft: `kuper.ru`, `samokat.ru`, `okko.tv`.
+- published: `brandshop.ru`, `litres.ru`.
 
 Входы:
 
@@ -565,7 +588,7 @@ Registry:
 Выход:
 
 - `AuthScriptResult(status, reason_code, message, artifacts)`;
-- trace/output files в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`: runner переиспользует существующую dated session trace-директорию либо создает ее до generic-agent шага; legacy stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` удаляются и из dated session dir, и из старого flat `BUYER_TRACE_DIR/<session_id>/`, затем скрипту передается уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
+- trace/output files в `BUYER_TRACE_DIR/YYYY-MM-DD/HH-MM-SS/<session_id>/`: runner переиспользует существующую dated session trace-директорию либо создает ее до generic-agent шага; stale `auth-script-result.json` и `auth-script-result-attempt-XX.json` удаляются в этой session dir, затем скрипту передается уникальный `auth-script-result-attempt-XX-<uuid>.json` для текущей попытки;
 - входной Playwright `storageState` передается TypeScript-скрипту через временный файл вне workspace с правами `0600` и удаляется в `finally`, поэтому raw auth state не остается в `BUYER_TRACE_DIR`.
 - stderr auth-скрипта логируется runner-ом как `auth_script_stderr ...` в container logs; подробные успешные trace-события остаются только в JSONL-файлах.
 
@@ -588,12 +611,11 @@ Reason codes:
 - любой non-zero exit code: `auth_failed_invalid_session`; JSON payload из output/stdout может сохраняться только как диагностический `script_result_payload` в artifacts и не может стать успешным `auth_ok`.
 - process failed без валидного payload: `auth_failed_invalid_session`.
 - невалидный JSON payload: `auth_failed_invalid_session`.
-- `_resolve_single_http_endpoint` может поднять `RuntimeError`, если `/json/version` не содержит `webSocketDebuggerUrl`.
-- `resolve_cdp_endpoint` может поднять `RuntimeError`, если не удалось подключиться ни к одному fallback endpoint.
+- CDP endpoint резолвится через общий `buyer/app/cdp_endpoint.py`; ошибки resolver переходят в `auth_failed_invalid_session`.
 
 ### Automatic purchase scripts
 
-Скрытый automatic purchase-script путь retired из app wiring и `BuyerService`: `main.py` не создает `PurchaseScriptRunner`, сервис не принимает allowlist/runner и settings/compose не содержат `PURCHASE_SCRIPT_ALLOWLIST` как runtime contract.
+Скрытый automatic purchase-script путь удален из app wiring и `BuyerService`: `main.py` не создает purchase runner, сервис не принимает allowlist/runner и settings/compose не содержат `PURCHASE_SCRIPT_ALLOWLIST` как runtime contract.
 
 Текущий путь покупки после SberId auth:
 
@@ -602,7 +624,7 @@ Reason codes:
 3. возвращает structured `AgentOutput`;
 4. `payment_verifier.py` решает `accepted`/`rejected`/`unverified`.
 
-`PurchaseScriptRunner` остается только как изолированный helper/test infrastructure. Если в будущем появятся custom scripts, они должны быть явным инструментом или отдельным контрактом, а не скрытым pre-generic shortcut. Любой результат такого инструмента все равно обязан пройти verifier и не может сам отправить `payment_ready`.
+`buyer/app/purchase_scripts.py` и regression-test registry удалены. Если в будущем появятся custom scripts, они должны быть явным инструментом или отдельным контрактом, а не скрытым pre-generic shortcut. Любой результат такого инструмента все равно обязан пройти verifier и не может сам отправить `payment_ready`.
 
 ### `buyer/scripts/*`
 
@@ -649,10 +671,6 @@ TypeScript Playwright-скрипты, запускаемые через `tsx` и
 - валидирует возврат на ожидаемый host и auth markers: простая страница `/account/`, generic `Профиль` и login-индикаторы вроде `Войти` не считаются авторизацией без сильных markers `.header-authorize__avatar`, заказов, logout или данных аккаунта;
 - возвращает те же auth reason codes.
 
-`buyer/scripts/sberid/kuper.ts`, `samokat.ts`, `okko.ts`:
-
-- находятся в registry как draft и не запускаются автоматически до publish.
-
 Файла `buyer/scripts/purchase/litres.ts` больше нет. Покупка Litres выполняется generic-agent через prompt-инструкции и строгий Litres verifier. Brandshop также не имеет `buyer/scripts/purchase/brandshop.ts`; его путь закреплен как generic instruction.
 
 ## `buyer`: browser tooling
@@ -684,8 +702,7 @@ CLI-утилита управления browser-sidecar через Playwright CD
 
 Поведение:
 
-- HTTP endpoint резолвится через `/json/version` в websocket endpoint.
-- При недоступном hostname пробуются fallback: `localhost`, `127.0.0.1`, `host.docker.internal`.
+- HTTP endpoint резолвится через общий `buyer/app/cdp_endpoint.py`: `/json/version` переводит его в websocket endpoint, а при недоступном hostname пробуются fallback `localhost`, `127.0.0.1`, `host.docker.internal`.
 - `ensure_page()` выбирает существующую не пустую страницу нейтрально: сначала HTTP(S), затем прочие non-blank, а среди равных кандидатов последнюю по `context_index/page_index`; hardcoded доменного приоритета нет.
 - `goto --url` до подключения к Playwright валидирует URL той же public http/https policy, что `start_url`: без userinfo, loopback/private/link-local/metadata hosts, `host.docker.internal` и внутренних suffixes.
 - После подключения к странице `cdp_tool` ставит Playwright `context.route("**/*", ...)` guard на время команды: document/navigation requests, включая redirects и iframe-навигации, проходят через ту же URL policy и при нарушении abort-ятся `blockedbyclient`; ненавигационные asset/XHR requests не блокируются этим guard.
@@ -765,6 +782,16 @@ Security boundaries:
 
 Runtime auth-профили берутся из host-директории `EVAL_AUTH_PROFILES_HOST_DIR`, которая bind-mounted в контейнер как `/run/eval/auth-profiles` и внутри сервиса читается через `EVAL_AUTH_PROFILES_DIR`. Для `auth_profile: litres_sberid` ожидается файл `litres_sberid.json`; для `auth_profile: brandshop_sberid` ожидается `brandshop_sberid.json`. Эти файлы являются секретами, не входят в image и не должны храниться в repo.
 
+### `eval_service/app/runtime_helpers.py`
+
+Общие runtime helpers для FastAPI-слоя eval service.
+
+Поведение:
+
+- лениво достает или создает `RunStore` и `BuyerClient` из `request.app.state`;
+- содержит общий поиск case в manifest, terminal-state predicate и чтение поля из dict/object response;
+- используется `callbacks.py`, `orchestrator.py` и `api.py`, чтобы не держать несколько локальных копий одинаковых helper-функций.
+
 ### `eval_service/app/orchestrator.py`
 
 Создает eval run и оркестрирует последовательный запуск case через `buyer`.
@@ -832,7 +859,7 @@ Callback state rules:
 
 ### `eval_service/app/api.py`
 
-HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Run detail дополнительно sanitizes callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
+HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Handler-ы отвечают за чтение run artifacts, HTTP-ошибки и judge orchestration; сборка outward payload вынесена в `api_presenters.py`.
 
 Judge flow:
 
@@ -846,9 +873,20 @@ Judge flow:
 - при timeout, non-zero exit, невалидном JSON/schema mismatch или identity mismatch пишется fallback evaluation со skipped/failed checks.
 - async judge-job пишет промежуточный `judge_input` в `artifact_paths`, после каждого judge-eligible case обновляет state на `judged`/`judge_failed`, пересчитывает `summary.json`, а повторный запуск пропускает уже `judged` cases с валидным evaluation artifact и `unverified` cases как review-needed terminal.
 
+### `eval_service/app/api_presenters.py`
+
+Чистая сборка payload для eval UI.
+
+Отвечает за:
+
+- case/run summary items, run detail cases и placeholder case для неизвестного registry entry;
+- outward evaluation items: renderable checks, artifact/evidence refs, runtime status, duration/tokens/recommendation counts;
+- dashboard rows для cases/hosts с micro-ui friendly fields;
+- sanitization callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
+
 ## `micro-ui`
 
-`micro-ui` временно выполняет роль `middle` для локального MVP.
+`micro-ui` является дополнительным debug-модулем для локального MVP: он наблюдает callbacks, проксирует ручные действия и eval-запросы, но не является production `middle`.
 
 ### `micro-ui/app/main.py`
 
@@ -890,13 +928,13 @@ In-memory callback store.
 
 ### `micro-ui/app/models.py` и `settings.py`
 
-Pydantic-модели callback, task proxy, reply proxy и session summary. `SessionSummary` хранит `payment_provider` для непроверенного платежного шага. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`.
+Pydantic-модели callback, task proxy, reply proxy и session summary. `SessionSummary` хранит `payment_provider` для непроверенного платежного шага. `BUYER_BASE_URL` по умолчанию `http://buyer:8000`. `MICRO_UI_ENABLE_EVAL_STUBS=false` по умолчанию; локальные eval stubs во frontend включаются только этим явным флагом и не используются как неявный fallback при проблемах с `eval_service`.
 
 ### Frontend assets
 
 - `micro-ui/app/templates/index.html`: HTML shell.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state; знает `payment_unverified`, показывает `unverified` как неуспешный/review-needed статус и выводит provider в summary.
-- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке.
+- `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке. Встроенные stub-данные используются только при `window.MICRO_UI_ENABLE_EVAL_STUBS === true`.
 - `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
@@ -1057,8 +1095,8 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `buyer/tests/test_auth_reply_removal.py` | MON-29 regression: inline invalid auth уходит в guest без `ask_user`, auth-script refresh/failure уходит в heuristic без запроса auth-пакета, parser reply-auth удален. |
 | `buyer/tests/test_external_auth.py` | MON-30 regression: external cookies payload validation, httpx `MockTransport`, timeout mapping, source priority inline over external и guest fallback с `auth_external_*` reason-code. |
 | `buyer/tests/test_auth_secret_retention.py` | Runtime-only SberId auth payload, persistence redaction legacy auth-like replies, временный storageState-файл, auth runner stale output/unique output path/non-zero diagnostics behavior. |
-| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout, уникальные output paths, fixture-domain diagnostics и non-zero diagnostics behavior для script helpers. |
-| `buyer/tests/test_purchase_script_registry.py` | Regression: automatic purchase-script allowlist не является частью runtime-контракта. |
+| `buyer/tests/test_cdp_endpoint.py` | Общий CDP endpoint resolver: fallback-кандидаты, passthrough websocket endpoint и rewrite websocket netloc под сработавший HTTP endpoint. |
+| `buyer/tests/test_script_runtime.py` | Чтение script output с fallback на stdout и устойчивость к невалидному output-файлу. |
 | `buyer/tests/test_prompt_externalization.py` | Review TODO hygiene, instruction manifest, dynamic context files, bootstrap prompt и отсутствие raw auth/profile/memory/CDP preflight blobs в prompt. |
 | `buyer/tests/test_sberid_auth_idempotency.py` | Litres/Brandshop auth snapshot helpers и source-order regression для already-authenticated precheck до entry navigation/Sber ID clicks. |
 | `buyer/tests/test_payment_verifier_and_ready.py` | Provider parsers PayEcom/YooMoney, Litres/Brandshop merchant policy, rejection matrix, `payment_ready.order_id_host` и unknown-merchant `unverified`. |
@@ -1075,7 +1113,7 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `scripts/tests/test_evolve_buyer_loop.py` | MVP-A evolve-loop CLI: doctor preflight, baseline/candidate eval client, async judge polling, comparator/scoring, case fingerprints, placeholder/external patch, branch/worktree/commit flow, candidate prepare, handoff `operator-action.json`, `continue`, offline `compare`, artifact/redaction behavior. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
 | `micro-ui/tests/test_design_handoff.py` | Session summary для `ask_user`/waiting progression, `payment_ready.order_id_host` и `payment_unverified` в `CallbackStore`. |
-| `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run и статический contract для отображения `payment_unverified`. |
+| `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run, явный флаг eval stubs и статический contract для отображения `payment_unverified`. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.
 

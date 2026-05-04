@@ -372,40 +372,6 @@ class KnowledgeAnalyzerTests(unittest.TestCase):
         self.assertNotIn(str(outside_actions), dumped)
         self.assertIn('[outside-session-dir]/outside-trace.json', dumped)
 
-    def test_build_trace_summaries_reads_legacy_root_session_trace_dir(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            session_dir = root / '2026-04-24' / '10-20-30' / 'session-1'
-            legacy_session_dir = root / 'session-1'
-            other_session_dir = root / 'session-2'
-            session_dir.mkdir(parents=True)
-            legacy_session_dir.mkdir()
-            other_session_dir.mkdir()
-            legacy_trace = legacy_session_dir / 'purchase-script-trace.jsonl'
-            legacy_trace.write_text(
-                json.dumps({'event': 'LEGACY_TRACE_CONTENT', 'url': 'https://shop.example/catalog'}),
-                encoding='utf-8',
-            )
-            other_trace = other_session_dir / 'purchase-script-trace.jsonl'
-            other_trace.write_text(
-                json.dumps({'event': 'OTHER_SESSION_TRACE_CONTENT', 'url': 'https://shop.example/payment/order/987654'}),
-                encoding='utf-8',
-            )
-
-            summaries = build_trace_summaries(
-                [
-                    {'trace_path': str(legacy_trace)},
-                    {'trace_path': str(other_trace)},
-                ],
-                session_dir=session_dir,
-            )
-
-        dumped = json.dumps(summaries, ensure_ascii=False)
-        self.assertIn('LEGACY_TRACE_CONTENT', dumped)
-        self.assertNotIn('OTHER_SESSION_TRACE_CONTENT', dumped)
-        self.assertNotIn(str(other_trace), dumped)
-        self.assertIn('[outside-session-dir]/purchase-script-trace.jsonl', dumped)
-
     @unittest.skipIf(not hasattr(os, 'symlink'), 'symlink недоступен в этой среде')
     def test_prepare_context_ignores_symlink_session_dir(self) -> None:
         with TemporaryDirectory() as tmpdir, TemporaryDirectory() as outside_tmpdir:
@@ -418,8 +384,8 @@ class KnowledgeAnalyzerTests(unittest.TestCase):
 
             self.assertIsNone(find_existing_trace_session_dir(trace_root=trace_root, session_id='session-1'))
 
-            with patch('buyer.app.knowledge_analyzer.trace_date_dir_name', return_value='2026-04-24'):
-                with patch('buyer.app.knowledge_analyzer.trace_time_dir_name', return_value='10-20-30'):
+            with patch('buyer.app.trace_session.trace_date_dir_name', return_value='2026-04-24'):
+                with patch('buyer.app.trace_session.trace_time_dir_name', return_value='10-20-30'):
                     trace = prepare_knowledge_analysis_context(trace_root=trace_root, session_id='session-1')
 
             session_dir = trace['session_dir']

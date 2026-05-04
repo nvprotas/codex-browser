@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 
 from .models import EventEnvelope, SessionSummary
 
@@ -188,7 +187,3 @@ def _extract_message(event: EventEnvelope) -> str | None:
         if isinstance(value, str):
             return value
     return None
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)

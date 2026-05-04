@@ -595,13 +595,6 @@ def _ensure_json_safe(value: dict[str, Any]) -> None:
 AUTH_REPLY_MARKER = '[SBERID_AUTH_RECEIVED]'
 
 
-def summarize_sberid_auth_reply(raw: str) -> str:
-    summary = _summarize_storage_state_reply(raw)
-    if summary is not None:
-        return summary
-    return f'{AUTH_REPLY_MARKER} status=unparseable'
-
-
 def _sanitize_reply_or_memory_text(raw: str) -> str:
     summary = _summarize_storage_state_reply(raw)
     if summary is not None:

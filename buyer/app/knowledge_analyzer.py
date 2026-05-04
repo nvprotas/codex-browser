@@ -9,14 +9,21 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
-from ._utils import duration_ms_since, remove_file_quietly, tail_text, trace_date_dir_name, trace_time_dir_name
+from ._utils import duration_ms_since, remove_file_quietly, tail_text
 from .runner import _build_codex_config_overrides
 from .settings import Settings
+from .trace_session import (
+    TRACE_DATE_DIR_RE,
+    TRACE_TIME_DIR_RE,
+    find_existing_trace_session_dir,
+    is_relative_to_path,
+    resolve_trace_session_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +144,6 @@ SENSITIVE_PATH_INLINE_RE = re.compile(
 PATH_SEQUENCE_RE = re.compile(
     r'(?<![:/])((?:/[A-Za-z0-9._~%+-]+){2,})(?=$|[?#\s\'"<>)}\],;])'
 )
-TRACE_DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-TRACE_TIME_DIR_RE = re.compile(r'^\d{2}-\d{2}-\d{2}$')
 BROWSER_ACTIONS_LOG_NAME_RE = re.compile(r'^step-\d{3}-browser-actions\.jsonl$')
 SCRIPT_TRACE_LOG_NAME_RE = re.compile(r'^(?:purchase|auth)-script(?:-[A-Za-z0-9._-]+)?-trace\.jsonl$')
 FIXED_KNOWLEDGE_OUTPUT_NAMES = frozenset(
@@ -413,13 +418,7 @@ class PostSessionKnowledgeAnalyzer:
 
 
 def prepare_knowledge_analysis_context(*, trace_root: Path, session_id: str) -> dict[str, Any]:
-    trace_root = trace_root.expanduser()
-    session_dir = find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
-    if session_dir is None:
-        trace_date, trace_time, session_dir = build_new_trace_session_dir(trace_root=trace_root, session_id=session_id)
-    else:
-        trace_time = session_dir.parent.name
-        trace_date = session_dir.parent.parent.name
+    trace_date, trace_time, session_dir = resolve_trace_session_dir(trace_root=trace_root, session_id=session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     return {
         'session_id': session_id,
@@ -687,12 +686,7 @@ def candidate_session_file_paths(value: str, session_dir: Path) -> list[Path]:
     candidate = Path(raw_path)
     if candidate.is_absolute():
         return [candidate]
-
-    candidates = [session_dir / candidate]
-    legacy_session_dir = legacy_trace_session_dir(session_dir)
-    if legacy_session_dir is not None:
-        candidates.append(legacy_session_dir / candidate)
-    return candidates
+    return [session_dir / candidate]
 
 
 def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
@@ -701,7 +695,6 @@ def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
     except (OSError, RuntimeError):
         return []
     trace_root = dated_trace_root_for_session_dir(session_dir)
-    trace_root_resolved: Path | None = None
     if trace_root is not None:
         try:
             trace_root_resolved = trace_root.resolve(strict=False)
@@ -713,14 +706,6 @@ def trace_safe_roots_for_session(session_dir: Path) -> list[Path]:
             return []
 
     roots = [session_root]
-    legacy_session_dir = legacy_trace_session_dir(session_dir)
-    if (
-        legacy_session_dir is not None
-        and trace_root_resolved is not None
-        and is_safe_existing_trace_dir(legacy_session_dir, trace_root_resolved=trace_root_resolved)
-    ):
-        roots.append(legacy_session_dir.resolve(strict=False))
-
     deduped: list[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -738,21 +723,6 @@ def dated_trace_root_for_session_dir(session_dir: Path) -> Path | None:
     if not TRACE_DATE_DIR_RE.match(session_dir.parent.parent.name):
         return None
     return session_dir.parent.parent.parent
-
-
-def legacy_trace_session_dir(session_dir: Path) -> Path | None:
-    trace_root = dated_trace_root_for_session_dir(session_dir)
-    if trace_root is None:
-        return None
-    return trace_root / session_dir.name
-
-
-def is_relative_to_path(path: Path, base: Path) -> bool:
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
 
 
 def normalize_analysis_payload(payload: Any, snapshot: PostSessionAnalysisSnapshot) -> dict[str, Any]:
@@ -1000,105 +970,6 @@ def normalize_domain(raw_url: str) -> str:
     if host.startswith('www.'):
         host = host[4:]
     return host
-
-
-def find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
-    trace_root = trace_root.expanduser()
-    if not trace_root.is_dir():
-        return None
-    try:
-        trace_root_resolved = trace_root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    matches: list[Path] = []
-    try:
-        date_dirs = [
-            item
-            for item in trace_root.iterdir()
-            if is_safe_existing_trace_dir(item, trace_root_resolved=trace_root_resolved, name_re=TRACE_DATE_DIR_RE)
-        ]
-    except OSError:
-        return None
-    for date_dir in date_dirs:
-        try:
-            time_dirs = [
-                item
-                for item in date_dir.iterdir()
-                if is_safe_existing_trace_dir(item, trace_root_resolved=trace_root_resolved, name_re=TRACE_TIME_DIR_RE)
-            ]
-        except OSError:
-            continue
-        for time_dir in time_dirs:
-            candidate = time_dir / session_id
-            if is_safe_existing_trace_dir(candidate, trace_root_resolved=trace_root_resolved):
-                matches.append(candidate)
-    if not matches:
-        return None
-    return sorted(matches)[-1]
-
-
-def build_new_trace_session_dir(*, trace_root: Path, session_id: str) -> tuple[str, str, Path]:
-    trace_date = trace_date_dir_name()
-    trace_time = trace_time_dir_name()
-    for candidate_date, candidate_time in candidate_new_trace_dir_names(trace_date=trace_date, trace_time=trace_time):
-        session_dir = trace_root / candidate_date / candidate_time / session_id
-        try:
-            ensure_new_trace_session_dir_is_safe(trace_root=trace_root, session_dir=session_dir)
-        except ValueError:
-            continue
-        return candidate_date, candidate_time, session_dir
-    raise ValueError('Не удалось подобрать безопасную директорию trace-сессии.')
-
-
-def candidate_new_trace_dir_names(*, trace_date: str, trace_time: str) -> list[tuple[str, str]]:
-    candidates = [(trace_date, trace_time)]
-    try:
-        base = datetime.strptime(f'{trace_date} {trace_time}', '%Y-%m-%d %H-%M-%S')
-    except ValueError:
-        return candidates
-    for offset_seconds in range(1, 60):
-        current = base + timedelta(seconds=offset_seconds)
-        candidates.append((current.strftime('%Y-%m-%d'), current.strftime('%H-%M-%S')))
-    return candidates
-
-
-def ensure_new_trace_session_dir_is_safe(*, trace_root: Path, session_dir: Path) -> None:
-    try:
-        trace_root_resolved = trace_root.resolve(strict=False)
-        session_dir_resolved = session_dir.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError('Небезопасная директория trace-сессии.') from exc
-
-    if not is_relative_to_path(session_dir_resolved, trace_root_resolved):
-        raise ValueError('Директория trace-сессии должна находиться внутри trace_root.')
-
-    try:
-        relative_parts = session_dir.relative_to(trace_root).parts
-    except ValueError as exc:
-        raise ValueError('Директория trace-сессии должна находиться внутри trace_root.') from exc
-
-    current = trace_root
-    for part in relative_parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError('Директория trace-сессии не должна проходить через symlink.')
-
-
-def is_safe_existing_trace_dir(
-    path: Path,
-    *,
-    trace_root_resolved: Path,
-    name_re: re.Pattern[str] | None = None,
-) -> bool:
-    if name_re is not None and not name_re.match(path.name):
-        return False
-    if path.is_symlink() or not path.is_dir():
-        return False
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    return is_relative_to_path(resolved, trace_root_resolved)
 
 
 def read_json_file(path: Path) -> Any:

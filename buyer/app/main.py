@@ -76,7 +76,6 @@ service = BuyerService(
     cdp_recovery_window_sec=settings.cdp_recovery_window_sec,
     cdp_recovery_interval_ms=settings.cdp_recovery_interval_ms,
     sberid_allowlist=parse_allowlist(settings.sberid_allowlist),
-    sberid_auth_retry_budget=settings.sberid_auth_retry_budget,
     auth_script_runner=auth_script_runner,
     knowledge_analyzer=knowledge_analyzer,
     buyer_user_info_path=settings.buyer_user_info_path,

@@ -17,14 +17,13 @@ from uuid import uuid4
 from ._utils import (
     duration_ms_since as _duration_ms_since,
     tail_text as _tail_text,
-    trace_date_dir_name as _trace_date_dir_name,
-    trace_time_dir_name as _trace_time_dir_name,
 )
 from .models import AgentOutput, TaskAuthPayload
 from .agent_context_files import write_agent_context_files
 from .agent_instruction_manifest import build_agent_instruction_manifest
 from .prompt_builder import build_agent_prompt
 from .settings import Settings
+from .trace_session import resolve_trace_session_dir
 from .user_profile import load_user_profile
 
 logger = logging.getLogger(__name__)
@@ -42,7 +41,7 @@ AgentStreamCallback = Callable[[dict[str, Any]], Awaitable[None]]
 @dataclass(frozen=True)
 class _CodexAttemptSpec:
     role: str
-    model: str | None
+    model: str
 
 
 @dataclass
@@ -136,9 +135,8 @@ class AgentRunner:
             task=task,
             start_url=start_url,
             browser_cdp_endpoint=self._settings.browser_cdp_endpoint,
-            instruction_manifest=build_agent_instruction_manifest(start_url=start_url),
+            instruction_manifest=build_agent_instruction_manifest(),
             context_file_manifest=context_file_manifest,
-            latest_user_reply=latest_user_reply,
         )
         trace['prompt_path'].write_text(prompt, encoding='utf-8')
         prompt_hash = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
@@ -184,50 +182,38 @@ class AgentRunner:
                 ),
             )
 
-        attempts = _build_model_attempt_specs(self._settings)
-        attempt_summaries: list[dict[str, Any]] = []
-        attempt_results: list[_CodexAttemptResult] = []
-        latest_attempt: _CodexAttemptResult | None = None
         codex_phase_started_at = datetime.now(timezone.utc)
         model_strategy = 'single'
 
-        for attempt_index, attempt_spec in enumerate(attempts, start=1):
-            _ = attempt_index
-            attempt = await self._run_codex_attempt(
-                trace=trace,
-                step_index=step_index,
-                prompt=prompt,
-                env=env,
-                attempt_spec=attempt_spec,
-                stream_callback=stream_callback,
+        latest_attempt = await self._run_codex_attempt(
+            trace=trace,
+            step_index=step_index,
+            prompt=prompt,
+            env=env,
+            attempt_spec=_CodexAttemptSpec(
+                role='single',
+                model=self._settings.codex_model,
+            ),
+            stream_callback=stream_callback,
+        )
+
+        normalized = latest_attempt.result.status.strip().lower() if latest_attempt.result is not None else None
+        if normalized is not None and normalized not in {'needs_user_input', 'completed', 'failed'}:
+            latest_attempt.failure_reason = 'invalid_status'
+            latest_attempt.failure_message = f'codex вернул неподдерживаемый статус: {latest_attempt.result.status}'
+            logger.error(
+                'codex_step_invalid_status session_id=%s step=%s status=%s model=%s',
+                session_id,
+                step_index,
+                latest_attempt.result.status,
+                latest_attempt.spec.model,
             )
-            latest_attempt = attempt
-            attempt_results.append(attempt)
+        elif normalized == 'failed':
+            latest_attempt.failure_reason = 'agent_reported_failed'
+            latest_attempt.failure_message = latest_attempt.result.message or 'codex вернул статус failed.'
 
-            normalized = attempt.result.status.strip().lower() if attempt.result is not None else None
-            if normalized is not None and normalized not in {'needs_user_input', 'completed', 'failed'}:
-                attempt.failure_reason = 'invalid_status'
-                attempt.failure_message = f'codex вернул неподдерживаемый статус: {attempt.result.status}'
-                logger.error(
-                    'codex_step_invalid_status session_id=%s step=%s status=%s model=%s',
-                    session_id,
-                    step_index,
-                    attempt.result.status,
-                    attempt.spec.model or 'default',
-                )
-            elif normalized == 'failed':
-                attempt.failure_reason = 'agent_reported_failed'
-                attempt.failure_message = attempt.result.message or 'codex вернул статус failed.'
+        attempt_summaries = [_summarize_codex_attempt(latest_attempt)]
 
-            attempt_summaries.append(_summarize_codex_attempt(attempt))
-
-            break
-
-        if latest_attempt is None:
-            raise RuntimeError('codex step finished without attempts')
-
-        aggregate_stdout_text = '\n'.join(item.stdout_text for item in attempt_results if item.stdout_text)
-        aggregate_stderr_text = '\n'.join(item.stderr_text for item in attempt_results if item.stderr_text)
         trace_artifacts = self._build_trace_artifacts(
             trace=trace,
             preflight_summary=probe_summary,
@@ -235,8 +221,8 @@ class AgentRunner:
             prompt_preview=prompt_preview,
             command_for_log=latest_attempt.command_for_log,
             output_path=latest_attempt.output_path,
-            stdout_text=aggregate_stdout_text,
-            stderr_text=aggregate_stderr_text,
+            stdout_text=latest_attempt.stdout_text,
+            stderr_text=latest_attempt.stderr_text,
             codex_returncode=latest_attempt.codex_returncode,
             duration_ms=_duration_ms_since(codex_phase_started_at),
             codex_started_at=codex_phase_started_at,
@@ -269,7 +255,7 @@ class AgentRunner:
                 if isinstance(result.artifacts.get('trace'), dict)
                 else None
             ),
-            latest_attempt.spec.model or 'default',
+            latest_attempt.spec.model,
             model_strategy,
         )
         return result
@@ -320,7 +306,7 @@ class AgentRunner:
             'codex_step_exec step=%s prompt_path=%s model=%s role=%s attempt_id=%s sandbox=%s',
             step_index,
             trace['prompt_path'],
-            attempt_spec.model or 'default',
+            attempt_spec.model,
             attempt_spec.role,
             attempt_id,
             self._settings.codex_sandbox_mode,
@@ -367,7 +353,7 @@ class AgentRunner:
                 'codex_step_timeout step=%s role=%s model=%s timeout_sec=%s duration_ms=%s',
                 step_index,
                 attempt_spec.role,
-                attempt_spec.model or 'default',
+                attempt_spec.model,
                 self._settings.codex_timeout_sec,
                 attempt.duration_ms,
             )
@@ -379,7 +365,7 @@ class AgentRunner:
             'codex_step_process_finished step=%s role=%s model=%s returncode=%s duration_ms=%s stdout_len=%s stderr_len=%s',
             step_index,
             attempt_spec.role,
-            attempt_spec.model or 'default',
+            attempt_spec.model,
             attempt.codex_returncode,
             attempt.duration_ms,
             len(attempt.stdout_text),
@@ -509,14 +495,7 @@ class AgentRunner:
 
     def _prepare_trace_context(self, *, session_id: str, step_index: int) -> dict[str, Any]:
         trace_root = Path(self._settings.buyer_trace_dir).expanduser()
-        session_dir = _find_existing_trace_session_dir(trace_root=trace_root, session_id=session_id)
-        if session_dir is None:
-            trace_date = _trace_date_dir_name()
-            trace_time = _trace_time_dir_name()
-            session_dir = trace_root / trace_date / trace_time / session_id
-        else:
-            trace_time = session_dir.parent.name
-            trace_date = session_dir.parent.parent.name
+        trace_date, trace_time, session_dir = resolve_trace_session_dir(trace_root=trace_root, session_id=session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         step_tag = f'step-{step_index:03d}'
         return {
@@ -602,32 +581,6 @@ class AgentRunner:
             )
         }
 
-
-def _find_existing_trace_session_dir(*, trace_root: Path, session_id: str) -> Path | None:
-    if not trace_root.is_dir():
-        return None
-
-    matches: list[Path] = []
-    try:
-        date_dirs = [item for item in trace_root.iterdir() if item.is_dir()]
-    except OSError:
-        return None
-
-    for date_dir in date_dirs:
-        try:
-            time_dirs = [item for item in date_dir.iterdir() if item.is_dir()]
-        except OSError:
-            continue
-        for time_dir in time_dirs:
-            candidate = time_dir / session_id
-            if candidate.is_dir():
-                matches.append(candidate)
-
-    if not matches:
-        return None
-    return sorted(matches)[-1]
-
-
 def _preview_text(text: str, *, limit: int) -> str:
     if limit <= 0:
         return ''
@@ -685,11 +638,6 @@ def _slim_codex_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]
         if slim:
             slim_attempts.append(slim)
     return slim_attempts
-
-
-def _read_jsonl_records(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]]]:
-    total, items, _ = _read_browser_actions_log(path, limit=limit)
-    return total, items
 
 
 def _read_browser_actions_log(path: Path, *, limit: int) -> tuple[int, list[dict[str, Any]], dict[str, Any]]:
@@ -878,10 +826,6 @@ def _int_or_zero(value: Any) -> int:
         return max(int(value), 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _build_model_attempt_specs(settings: Settings) -> list[_CodexAttemptSpec]:
-    return [_CodexAttemptSpec(role='single', model=_non_empty(settings.codex_model) or 'gpt-5.5')]
 
 
 def _build_codex_command(
@@ -1355,13 +1299,6 @@ def _build_post_browser_idle_ms(
     return max(codex_finished_ms - last_finished, 0)
 
 
-def _non_empty(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
 def _write_json_safely(path: Path, payload: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1404,24 +1341,6 @@ def _extract_cdp_error_tail(*, stdout_text: str, stderr_text: str) -> str:
 
     source = parsed_error or stderr_text or stdout_text or 'unknown error'
     return _tail_text(source)
-
-
-def _build_redacted_auth_payload(auth: TaskAuthPayload | None) -> dict[str, Any] | None:
-    if auth is None:
-        return None
-
-    storage_state = auth.storage_state if isinstance(auth.storage_state, dict) else None
-    cookies = storage_state.get('cookies') if storage_state is not None else None
-    origins = storage_state.get('origins') if storage_state is not None else None
-
-    return {
-        'provider': (auth.provider or '').strip().lower() or 'sberid',
-        'has_storage_state': storage_state is not None,
-        'storage_state_stats': {
-            'cookies_count': len(cookies) if isinstance(cookies, list) else 0,
-            'origins_count': len(origins) if isinstance(origins, list) else 0,
-        },
-    }
 
 
 def _build_agent_auth_state(

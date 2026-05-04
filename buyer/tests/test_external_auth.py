@@ -116,7 +116,6 @@ def _service(
         cdp_recovery_window_sec=0,
         cdp_recovery_interval_ms=1,
         sberid_allowlist={'litres.ru'},
-        sberid_auth_retry_budget=0,
         auth_script_runner=auth_script_runner or _RecordingAuthScriptRunner(),  # type: ignore[arg-type]
         external_auth_client=external_auth_client,  # type: ignore[arg-type]
     )

@@ -521,10 +521,13 @@
   }
 
   async function evalRequest(contract, options = {}) {
-    if (window.EVAL_SERVICE_BASE_URL) {
-      return fetchEvalService(contract, options);
+    if (window.MICRO_UI_ENABLE_EVAL_STUBS === true) {
+      return stubRequest(contract, options);
     }
-    return stubRequest(contract, options);
+    if (!window.EVAL_SERVICE_BASE_URL) {
+      throw new Error('Eval service base URL не настроен. Для локального stub-режима включите MICRO_UI_ENABLE_EVAL_STUBS=true.');
+    }
+    return fetchEvalService(contract, options);
   }
 
   function renderCases() {

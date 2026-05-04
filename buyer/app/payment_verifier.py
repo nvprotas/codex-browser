@@ -36,10 +36,6 @@ class PaymentVerificationResult:
     provider: str | None = None
     evidence_url: str | None = None
 
-    @property
-    def accepted(self) -> bool:
-        return self.status == 'accepted'
-
 
 def is_litres_url(raw_url: str) -> bool:
     return is_domain_in_allowlist(domain_from_url(raw_url), LITRES_DOMAINS)
@@ -47,16 +43,6 @@ def is_litres_url(raw_url: str) -> bool:
 
 def is_brandshop_url(raw_url: str) -> bool:
     return is_domain_in_allowlist(domain_from_url(raw_url), BRANDSHOP_DOMAINS)
-
-
-def payecom_order_id_from_url(raw_url: str) -> str | None:
-    evidence = parse_payecom_payment_url(raw_url)
-    return evidence.order_id if evidence is not None else None
-
-
-def yoomoney_order_id_from_url(raw_url: str) -> str | None:
-    evidence = parse_yoomoney_payment_url(raw_url)
-    return evidence.order_id if evidence is not None else None
 
 
 def parse_payecom_payment_url(raw_url: str) -> ProviderPaymentEvidence | None:
@@ -193,58 +179,28 @@ def _unverified(evidence: ProviderPaymentEvidence, *, reason: str) -> PaymentVer
 
 
 def _litres_payment_evidence(result: AgentOutput, order_id: str) -> ProviderPaymentEvidence | None:
-    for url in _iter_litres_payment_evidence_urls(result):
-        evidence = parse_payecom_payment_url(url)
-        if evidence is not None and evidence.order_id == order_id:
-            return evidence
+    evidence = _payment_evidence_to_dict(result.payment_evidence)
+    if evidence is None or evidence.get('source') != LITRES_PAYMENT_EVIDENCE_SOURCE:
+        return None
+    url = evidence.get('url')
+    provider_evidence = parse_payecom_payment_url(url) if isinstance(url, str) else None
+    if provider_evidence is not None and provider_evidence.order_id == order_id:
+        return provider_evidence
     return None
-
-
-def _iter_litres_payment_evidence_urls(result: AgentOutput) -> list[str]:
-    urls: list[str] = []
-    direct_evidence = _payment_evidence_to_dict(result.payment_evidence)
-    if direct_evidence and direct_evidence.get('source') == LITRES_PAYMENT_EVIDENCE_SOURCE:
-        url = direct_evidence.get('url')
-        if isinstance(url, str):
-            urls.append(url)
-
-    frame_src = result.artifacts.get('payment_frame_src')
-    if isinstance(frame_src, str):
-        urls.append(frame_src)
-    artifact_evidence = _payment_evidence_to_dict(result.artifacts.get('payment_evidence'))  # type: ignore[arg-type]
-    if artifact_evidence and artifact_evidence.get('source') == LITRES_PAYMENT_EVIDENCE_SOURCE:
-        url = artifact_evidence.get('url')
-        if isinstance(url, str):
-            urls.append(url)
-    return urls
 
 
 def _iter_provider_payment_evidence(result: AgentOutput) -> list[ProviderPaymentEvidence]:
     evidence: list[ProviderPaymentEvidence] = []
-    for url in _iter_payment_evidence_urls(result):
-        parsed = parse_payecom_payment_url(url) or parse_yoomoney_payment_url(url)
-        if parsed is not None:
-            evidence.append(parsed)
-    return evidence
-
-
-def _iter_payment_evidence_urls(result: AgentOutput) -> list[str]:
-    urls: list[str] = []
     direct_evidence = _payment_evidence_to_dict(result.payment_evidence)
-    if direct_evidence:
-        url = direct_evidence.get('url')
-        if isinstance(url, str):
-            urls.append(url)
-
-    frame_src = result.artifacts.get('payment_frame_src')
-    if isinstance(frame_src, str):
-        urls.append(frame_src)
-    artifact_evidence = _payment_evidence_to_dict(result.artifacts.get('payment_evidence'))  # type: ignore[arg-type]
-    if artifact_evidence:
-        url = artifact_evidence.get('url')
-        if isinstance(url, str):
-            urls.append(url)
-    return urls
+    if direct_evidence is None:
+        return evidence
+    url = direct_evidence.get('url')
+    parsed = None
+    if isinstance(url, str):
+        parsed = parse_payecom_payment_url(url) or parse_yoomoney_payment_url(url)
+    if parsed is not None:
+        evidence.append(parsed)
+    return evidence
 
 
 def _payment_evidence_to_dict(value: PaymentEvidence | dict[str, Any] | None) -> dict[str, Any] | None:
