@@ -701,6 +701,7 @@ class CDPRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.event_type, 'session_started')
         self.assertEqual(event.eval_run_id, 'eval-run-001')
         self.assertEqual(event.eval_case_id, 'case-a')
+        self.assertEqual(event.payload['message'], 'Сессия buyer запущена. Задача: Купить книгу')
 
     async def test_callback_token_is_sent_as_header_and_not_kept_after_session(self) -> None:
         callback_client = _RecordingCallbackClient()

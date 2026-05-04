@@ -165,7 +165,7 @@ flowchart LR
 
 | Шаг | Event | Когда появляется | Что важно |
 | --- | --- | --- | --- |
-| Старт | `session_started` | Сразу после старта `_run_session` | Фиксирует начало сценария: `message`, `start_url`, `novnc_url`; исходная `metadata` не является частью payload. |
+| Старт | `session_started` | Сразу после старта `_run_session` | Фиксирует начало сценария: `message`, `start_url`, `novnc_url`; `message` включает краткое описание задачи, исходная `metadata` не является частью payload. |
 | Generic step start | `agent_step_started` | Перед каждым `codex exec` | Указывает номер шага. |
 | Stream | `agent_stream_event` | Во время generic step | Payload имеет `step`, `source`, `stream`, `sequence`, `items`, `message`; может содержать stdout/stderr/codex-json/browser action summaries. |
 | Generic step finish | `agent_step_finished` | После `codex exec` | Содержит slim trace summary без prompt/stdout/stderr/browser-actions tails и результат шага. |

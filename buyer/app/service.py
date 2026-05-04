@@ -125,11 +125,12 @@ class BuyerService:
         last_recovery_error_tail = 'none'
         try:
             state = await self._store.get(session_id)
+            task_summary = _head_text(state.task, 180)
             await self._emit_event(
                 state,
                 event_type='session_started',
                 payload={
-                    'message': 'Сессия buyer запущена.',
+                    'message': f'Сессия buyer запущена. Задача: {task_summary}',
                     'start_url': state.start_url,
                     'novnc_url': state.novnc_url,
                 },

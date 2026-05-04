@@ -216,6 +216,7 @@ components:
       properties:
         message:
           type: string
+          description: Человекочитаемое сообщение о старте; включает краткое описание задачи.
         start_url:
           type: string
         novnc_url:

@@ -21,7 +21,7 @@
 
 1. `openclaw` или `micro-ui` вызывает `POST /v1/tasks` у `buyer`.
 2. `buyer` создает `SessionState`, переводит ее в `running` и запускает фоновую задачу `_run_session`.
-3. `_run_session` отправляет `session_started`, добавляет память агента и подготавливает SberId auth-контекст.
+3. `_run_session` отправляет `session_started`, где `message` включает краткое описание задачи, добавляет память агента и подготавливает SberId auth-контекст.
 4. В app-wired runtime нет настроенного automatic purchase-script пути: `main.py` не передает purchase runner/allowlist, поэтому после auth-подготовки `buyer` запускает generic цикл `AgentRunner.run_step()` через `codex exec`.
 5. Агент управляет browser-sidecar через `buyer/tools/cdp_tool.py`.
 6. `buyer` отправляет callback-события в `middle`/`micro-ui`.
@@ -387,7 +387,7 @@ Postgres repository и inline migrations.
 
 Основной `_run_session`:
 
-1. Отправляет `session_started`.
+1. Отправляет `session_started` с `message`, `start_url` и `novnc_url`; `message` включает краткое описание задачи.
 2. Добавляет `Start URL` и задачу в agent memory.
 3. Запускает `_run_sberid_auth_flow`, где `_resolve_session_auth` выбирает inline auth или external cookies API.
 4. Сразу переходит к generic-agent: скрытого pre-generic purchase-script шага в `BuyerService` больше нет.
