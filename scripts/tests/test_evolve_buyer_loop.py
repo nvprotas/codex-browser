@@ -118,6 +118,7 @@ class FakeResponse:
 class FakeDeps:
     responses: list[tuple[str, str, Any, FakeResponse]] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
+    command_timeouts: list[tuple[str, int]] = field(default_factory=list)
     events: list[tuple[str, str]] = field(default_factory=list)
     command_results: list[evolve.CommandResult] = field(default_factory=list)
     stdout: list[str] = field(default_factory=list)
@@ -157,6 +158,7 @@ class FakeDeps:
         timeout_sec: int = 120,
     ) -> evolve.CommandResult:
         self.commands.append(args)
+        self.command_timeouts.append((" ".join(args), timeout_sec))
         self.events.append(("process", " ".join(args)))
         hook = self.process_hooks.get(args[0])
         if hook is not None:
@@ -204,6 +206,7 @@ def git_results_for_candidate(
     return [
         ok(str(tmp_path)),
         ok("base-sha\n"),
+        ok(""),
         ok(""),
         ok(""),
         ok(diff_name + "\n"),
@@ -451,6 +454,70 @@ def test_external_patch_command_receives_patch_request_env_and_commits(tmp_path:
     assert_no_promotion_commands(deps.commands)
 
 
+def test_external_patch_command_can_commit_candidate_itself(tmp_path: Path) -> None:
+    def patch_hook(*, args: list[str], cwd: Path, env: dict[str, str]) -> evolve.CommandResult:
+        manifest_path = Path(env["EVOLVE_PATCH_MANIFEST"])
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "buyer-evolve-patch-manifest-v1",
+                    "patch_slug": "litres-payment-guard",
+                    "patch_kind": "prompt",
+                    "touched_paths": ["docs/buyer-agent/instructions/litres.md"],
+                    "rationale": "Guard against saved-card purchase before SberPay boundary.",
+                    "expected_improvement": "Avoid final purchase and reach PayEcom boundary.",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ok("codex committed candidate")
+
+    deps = FakeDeps(process_hooks={"fake-patch": patch_hook})
+    queue_successful_eval(deps, "http://127.0.0.1:8090", "baseline-run")
+    deps.command_results = [
+        ok(str(tmp_path)),
+        ok("base-sha\n"),
+        ok(""),
+        ok(""),
+        ok("docs/buyer-agent/instructions/litres.md\n"),
+        ok(""),
+        ok(""),
+        ok(""),
+        ok(" 1 file changed\n"),
+        ok("diff --git a/docs/buyer-agent/instructions/litres.md b/docs/buyer-agent/instructions/litres.md\n"),
+        ok("candidate-committed-sha\n"),
+    ]
+
+    code = evolve.main(
+        [
+            "run",
+            "--repo",
+            str(tmp_path),
+            "--eval-base-url",
+            "http://127.0.0.1:8090",
+            "--case-id",
+            CASE_ID,
+            "--reports-dir",
+            str(tmp_path / "reports"),
+            "--patch-mode",
+            "external-command",
+            "--patch-command",
+            "fake-patch",
+            "--skip-candidate-eval",
+            "--json",
+        ],
+        deps=deps,
+    )
+
+    assert code == 0
+    assert not any(command[:2] == ["git", "commit"] for command in deps.commands)
+    assert any(command[:3] == ["git", "diff", "--name-only"] for command in deps.commands)
+    assert ("fake-patch", 3600) in deps.command_timeouts
+    result = json.loads(deps.stdout[-1])
+    assert result["candidate_sha"] == "candidate-committed-sha"
+    assert_no_promotion_commands(deps.commands)
+
+
 def test_candidate_prepare_runs_before_candidate_eval_and_compares(tmp_path: Path) -> None:
     command_order: list[str] = []
 
@@ -501,6 +568,7 @@ def test_candidate_prepare_runs_before_candidate_eval_and_compares(tmp_path: Pat
     candidate_health_index = deps.events.index(("http", "GET http://127.0.0.1:8092/healthz"))
     candidate_sha_index = deps.events.index(("process", "git rev-parse HEAD"))
     assert candidate_sha_index < prepare_index < candidate_health_index
+    assert ("fake-prepare", 3600) in deps.command_timeouts
     result = json.loads(deps.stdout[-1])
     report = json.loads(Path(result["delta_report_path"]).read_text(encoding="utf-8"))
     assert report["verdict"]["status"] == "improved"

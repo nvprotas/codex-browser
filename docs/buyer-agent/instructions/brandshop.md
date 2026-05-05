@@ -4,7 +4,7 @@
 
 - Brandshop auth script возвращает браузер на обычную страницу Brandshop; сначала проверь текущую страницу и работай от нее, а не от hardcoded SKU.
 - Допустим быстрый путь через direct search URL: `https://brandshop.ru/search/?st=<query>`.
-- В `<query>` включай только product identity из текущей задачи: бренд, модель и категорию.
+- В `<query>` включай только product identity из текущей задачи.
 - Размер и цвет являются ограничениями для фильтрации, ранжирования и проверки, а не обязательными словами поискового URL.
 - UI-поиск через header search button с `aria-label="search"`, catalog search input с placeholder `Искать в каталоге` и press Enter остается допустимым fallback.
 - Product URL выбирай из фактических результатов поиска по соответствию задаче; нельзя hardcode SKU или product URL.
@@ -13,7 +13,7 @@
 
 ## Проверка варианта
 
-- Перед `Добавить в корзину` проверь бренд, модель, категорию, цвет и размер выбранного товара относительно текущей задачи, metadata, профиля и свежего ответа пользователя.
+- Перед `Добавить в корзину` проверь product identity и явно заданные constraints выбранного товара относительно текущей задачи, metadata, профиля и свежего ответа пользователя.
 - Размер из текущей задачи, metadata или latest_user_reply является обязательным constraint, если он указан: выбирай его через UI-control или подтвержденное состояние страницы.
 - Цветовое предпочтение из текущей задачи, metadata или latest_user_reply используй как ranking/verification constraint.
 - Если в task, metadata или latest_user_reply указан размер, цвет или вариант, перед `Добавить в корзину` найди, выбери и проверь точный вариант через `snapshot`, `text`, `exists` или `attr`.
@@ -38,6 +38,6 @@
 
 ## Пример
 
-Example task shape: `купи светлые кроссовки Jordan Air High 45 EU`.
+Example task shape: `Купи на brandshop.ru Air Jordan Retro High OG`.
 
-Используй `Jordan Air High` как product identity для поиска, например через `/search/?st=Jordan%20Air%20High`, а `45 EU` и `светлые` как constraints. Не hardcode SKU, product URL или `mfp`.
+Используй `Air Jordan Retro High OG` как product identity для поиска, например через `/search/?st=Air%20Jordan%20Retro%20High%20OG`, а `45 EU` как constraint. Не hardcode SKU, product URL или `mfp`.

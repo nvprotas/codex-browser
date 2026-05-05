@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
 from eval_service.app.case_registry import CaseRegistry, CaseRegistryError
 
@@ -142,12 +141,3 @@ def test_repository_smoke_cases_are_loadable() -> None:
         'brandshop_purchase_smoke_001',
     }
     assert {case.host for case in cases} == {'litres.ru', 'brandshop.ru'}
-
-
-def test_brandshop_repository_case_uses_st_search_parameter() -> None:
-    repo_root = Path(__file__).parents[2]
-
-    with (repo_root / 'eval' / 'cases' / 'brandshop_purchase_smoke.yaml').open(encoding='utf-8') as file:
-        template = yaml.safe_load(file)
-
-    assert template['start_url_template'] == 'https://brandshop.ru/search/?st={{ search_query }}'

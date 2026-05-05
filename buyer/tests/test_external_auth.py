@@ -176,6 +176,29 @@ class ExternalAuthClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason_code, 'auth_external_loaded')
         self.assertEqual(result.metadata['cookie_count'], 1)
 
+    async def test_client_sends_scope_header_when_configured(self) -> None:
+        requested_scopes: list[str | None] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requested_scopes.append(request.headers.get('X-Ratatouille-Sber-Scope'))
+            return httpx.Response(200, json=_valid_payload())
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client = ExternalSberCookiesClient(
+            base_url='https://auth.example/api/v1/cookies',
+            timeout_sec=1,
+            retries=0,
+            scope='scope-123',
+            http_client=http_client,
+        )
+        try:
+            result = await client.fetch_storage_state()
+        finally:
+            await client.aclose()
+
+        self.assertEqual(requested_scopes, ['scope-123'])
+        self.assertEqual(result.reason_code, 'auth_external_loaded')
+
     async def test_client_maps_timeout(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.TimeoutException('timed out', request=request)

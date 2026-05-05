@@ -11,7 +11,7 @@ from typing import Any, Coroutine
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import AliasChoices, Field
 
-from eval_service.app.auth_profiles import AuthProfileLoader
+from eval_service.app.auth_profiles import AuthProfileLoader, AuthProfileLoadResult
 from eval_service.app.buyer_client import BuyerClient
 from eval_service.app.callback_urls import build_buyer_callback_token, build_buyer_callback_url
 from eval_service.app.case_registry import CaseRegistry
@@ -48,6 +48,7 @@ class RunOrchestrator:
         run_store: RunStore,
         buyer_client: BuyerClient,
         auth_profile_loader: AuthProfileLoader,
+        auth_source: str = 'auth_profiles',
         run_id_generator: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
@@ -61,6 +62,7 @@ class RunOrchestrator:
         self.run_store = run_store
         self.buyer_client = buyer_client
         self.auth_profile_loader = auth_profile_loader
+        self.auth_source = auth_source
         self.run_id_generator = run_id_generator or generate_eval_run_id
         self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
@@ -141,7 +143,11 @@ class RunOrchestrator:
                     break
                 continue
 
-            auth_result = self.auth_profile_loader.load(case.auth_profile)
+            auth_result = (
+                AuthProfileLoadResult()
+                if self.auth_source == 'buyer_runtime'
+                else self.auth_profile_loader.load(case.auth_profile)
+            )
             if auth_result.skip_reason is not None:
                 self.run_store.update_case(
                     eval_run_id,
@@ -365,6 +371,7 @@ def get_run_orchestrator(request: Request) -> RunOrchestrator:
             'auth_profile_loader',
             AuthProfileLoader(settings.eval_auth_profiles_dir),
         ),
+        auth_source=settings.eval_auth_source,
         run_id_generator=getattr(request.app.state, 'eval_run_id_generator', None),
         clock=getattr(request.app.state, 'orchestrator_clock', None),
         monotonic=getattr(request.app.state, 'orchestrator_monotonic', None),

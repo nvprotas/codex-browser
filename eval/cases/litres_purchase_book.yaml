@@ -1,7 +1,7 @@
 template_id: litres_purchase_book
 title: Litres purchase book smoke
 host: litres.ru
-start_url_template: "https://www.litres.ru/search/?q={{ search_query }}"
+start_url_template: "https://www.litres.ru/"
 task_template: "На litres.ru найди электронную книгу {{ book_title }} автора {{ author }} и доведи покупку до шага SberPay без выполнения оплаты."
 default_metadata:
   city: Москва
@@ -33,7 +33,6 @@ variants:
     variables:
       book_title: Мастер и Маргарита
       author: Михаил Булгаков
-      search_query: "%D0%9C%D0%B0%D1%81%D1%82%D0%B5%D1%80%20%D0%B8%20%D0%9C%D0%B0%D1%80%D0%B3%D0%B0%D1%80%D0%B8%D1%82%D0%B0%20%D0%91%D1%83%D0%BB%D0%B3%D0%B0%D0%BA%D0%BE%D0%B2"
     metadata:
       budget_rub: 700
       desired_format: electronic_book
@@ -43,7 +42,6 @@ variants:
     variables:
       book_title: Японские мифы
       author: Джошуа Фридман
-      search_query: "%D0%AF%D0%BF%D0%BE%D0%BD%D1%81%D0%BA%D0%B8%D0%B5%20%D0%BC%D0%B8%D1%84%D1%8B%20%D0%94%D0%B6%D0%BE%D1%88%D1%83%D0%B0%20%D0%A4%D1%80%D0%B8%D0%B4%D0%BC%D0%B0%D0%BD"
     metadata:
       budget_rub: 700
       desired_format: electronic_book
@@ -53,7 +51,6 @@ variants:
     variables:
       book_title: "1984"
       author: Джордж Оруэлл
-      search_query: "1984%20%D0%9E%D1%80%D1%83%D1%8D%D0%BB%D0%BB"
     metadata:
       budget_rub: 700
       desired_format: electronic_book
