@@ -71,6 +71,32 @@ def collect_trace_session(
     if trace_dir is None:
         return {'session_id': session_id, 'trace_dir': None, 'steps': []}
 
+    return collect_trace_session_dir(trace_dir, browser_actions_tail_limit=browser_actions_tail_limit)
+
+
+def iter_trace_session_dirs(trace_root: Path | str) -> list[Path]:
+    root = Path(trace_root).expanduser()
+    if not root.is_dir():
+        return []
+
+    session_dirs: list[Path] = []
+    for date_dir in _iter_dirs(root):
+        if TRACE_DATE_DIR_RE.fullmatch(date_dir.name) is None:
+            continue
+        for time_dir in _iter_dirs(date_dir):
+            if TRACE_TIME_DIR_RE.fullmatch(time_dir.name) is None:
+                continue
+            session_dirs.extend(_iter_dirs(time_dir))
+    return sorted(session_dirs, key=lambda path: (path.parent.parent.name, path.parent.name, path.name))
+
+
+def collect_trace_session_dir(
+    trace_dir: Path | str,
+    *,
+    browser_actions_tail_limit: int = 20,
+) -> dict[str, Any]:
+    trace_dir = Path(trace_dir).expanduser()
+    session_id = trace_dir.name
     steps = [
         _build_step_summary(trace_file, trace_dir=trace_dir, browser_actions_tail_limit=browser_actions_tail_limit)
         for trace_file in sorted(trace_dir.glob('step-*-trace.json'), key=_step_sort_key)

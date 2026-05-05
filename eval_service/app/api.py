@@ -38,6 +38,7 @@ from eval_service.app.runtime_helpers import (
     get_run_store as _get_run_store,
     get_run_store_from_app as _get_run_store_from_app,
 )
+from eval_service.app.stats import build_stats_sessions_payload
 from eval_service.app.trace_collector import collect_trace_session
 
 
@@ -200,6 +201,17 @@ async def dashboard_hosts(request: Request) -> dict[str, Any]:
     return _response_with_warnings(
         {'rows': [host_dashboard_row(row) for row in build_hosts_payload(summary)]},
         warnings,
+    )
+
+
+@router.get('/stats/sessions')
+async def stats_sessions(request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    store = _get_run_store(request)
+    return await run_in_threadpool(
+        build_stats_sessions_payload,
+        settings.buyer_trace_dir,
+        store.runs_dir,
     )
 
 

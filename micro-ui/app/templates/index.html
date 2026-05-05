@@ -7,6 +7,7 @@
     <link rel="icon" href="/static/assets/favicon.svg" />
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/eval.css" />
+    <link rel="stylesheet" href="/static/stats.css" />
   </head>
   <body>
     <div class="backdrop" aria-hidden="true"></div>
@@ -44,6 +45,17 @@
           aria-selected="false"
         >
           Eval
+        </button>
+        <button
+          type="button"
+          id="tab-stats"
+          class="tab-button"
+          data-tab-target="stats-tab-panel"
+          role="tab"
+          aria-controls="stats-tab-panel"
+          aria-selected="false"
+        >
+          Stats
         </button>
       </nav>
 
@@ -338,6 +350,91 @@
           </article>
         </section>
       </section>
+
+      <section
+        id="stats-tab-panel"
+        class="tab-panel stats-shell"
+        data-tab-panel="stats"
+        role="tabpanel"
+        aria-labelledby="tab-stats"
+        hidden
+      >
+        <div class="stats-section-divider">
+          <span class="stats-section-divider-label">Общая статистика</span>
+          <span class="stats-section-divider-line"></span>
+        </div>
+
+        <article class="panel stats-overview-panel">
+          <div class="stats-kpi-grid" aria-label="Stats KPI"></div>
+          <div class="stats-overview-divider"></div>
+          <div class="stats-overview-inner">
+            <div>
+              <p class="stats-overview-sub-label">Command breakdown · all sessions</p>
+              <div id="stats-cmd-breakdown-content"></div>
+            </div>
+            <div>
+              <p class="stats-overview-sub-label">Eval · by case</p>
+              <div id="stats-eval-by-case"></div>
+              <p class="stats-overview-sub-label">Eval · by host</p>
+              <div id="stats-eval-by-host"></div>
+            </div>
+          </div>
+        </article>
+
+        <div class="stats-section-divider">
+          <span class="stats-section-divider-label">Детали прогона</span>
+          <span class="stats-section-divider-line"></span>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Trace sessions</p>
+              <h2>Sessions</h2>
+            </div>
+          </div>
+          <div class="stats-filters" role="toolbar" aria-label="Фильтры"></div>
+          <div class="eval-table-wrap">
+            <table class="stats-session-table">
+              <thead>
+                <tr>
+                  <th data-sort="start_ts">Start <i class="sort-icon">↕</i></th>
+                  <th>Session</th>
+                  <th>Source</th>
+                  <th>Host</th>
+                  <th>Status</th>
+                  <th data-sort="duration_ms">Duration <i class="sort-icon">↕</i></th>
+                  <th data-sort="tokens_total">Tokens <i class="sort-icon">↕</i></th>
+                  <th data-sort="step_count">Steps <i class="sort-icon">↕</i></th>
+                  <th data-sort="cdp_count">Commands <i class="sort-icon">↕</i></th>
+                  <th data-sort="errors">Errors <i class="sort-icon">↕</i></th>
+                  <th>Eval</th>
+                  <th>Artifacts</th>
+                </tr>
+              </thead>
+              <tbody id="stats-sessions-tbody"></tbody>
+            </table>
+            <div id="stats-sessions-empty" class="empty" hidden>
+              Нет trace-сессий. Убедитесь что <span class="code">BUYER_TRACE_DIR</span>
+              настроен и содержит <span class="code">step-XXX-trace.json</span>.
+            </div>
+          </div>
+        </article>
+
+        <article class="panel" id="stats-session-detail-wrap" hidden>
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Selected session</p>
+              <h2>Session detail</h2>
+            </div>
+          </div>
+          <div id="stats-session-detail-content" class="stats-session-detail"></div>
+        </article>
+
+        <div id="stats-detail-placeholder" class="empty">
+          Выберите строку в таблице Sessions выше, чтобы увидеть детали прогона.
+        </div>
+      </section>
     </main>
 
     <script src="/static/app.js" defer></script>
@@ -346,5 +443,6 @@
       window.MICRO_UI_ENABLE_EVAL_STUBS = {{ micro_ui_enable_eval_stubs | default(false) | tojson }};
     </script>
     <script src="/static/eval.js" defer></script>
+    <script src="/static/stats.js" defer></script>
   </body>
 </html>

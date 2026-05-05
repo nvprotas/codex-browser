@@ -859,7 +859,13 @@ Callback state rules:
 
 ### `eval_service/app/api.py`
 
-HTTP API для eval UI: cases/runs/run detail/judge/dashboard. Handler-ы отвечают за чтение run artifacts, HTTP-ошибки и judge orchestration; сборка outward payload вынесена в `api_presenters.py`.
+HTTP API для eval UI: cases/runs/run detail/judge/dashboard/stats. Handler-ы отвечают за чтение run artifacts, HTTP-ошибки и judge orchestration; сборка outward payload вынесена в `api_presenters.py`, а trace stats собираются через `stats.py`.
+
+Read-only stats endpoint:
+
+- `GET /stats/sessions` сканирует `BUYER_TRACE_DIR` по dated-layout `YYYY-MM-DD/HH-MM-SS/<session_id>`, собирает step trace/browser-actions summary и коррелирует `session_id` с eval manifests из `EVAL_RUNS_DIR`;
+- payload содержит `sessions[]` с source `eval|direct`, eval ids при наличии, host, status, timestamps, duration/tokens/commands/errors/screenshots, step summaries и normalized `command_breakdown`;
+- corrupt eval manifests не валят endpoint целиком: они возвращаются в `warnings[]`.
 
 Judge flow:
 
@@ -883,6 +889,36 @@ Judge flow:
 - outward evaluation items: renderable checks, artifact/evidence refs, runtime status, duration/tokens/recommendation counts;
 - dashboard rows для cases/hosts с micro-ui friendly fields;
 - sanitization callbacks и artifact paths перед отдачей наружу; waiting question извлекается из `ask_user.payload.message` с legacy fallback на `question`.
+
+### `eval_service/app/stats.py`
+
+Агрегирует trace-сессии для вкладки Stats в `micro-ui`.
+
+Входы:
+
+- `BUYER_TRACE_DIR`: session trace directories, `step-XXX-trace.json`, `step-XXX-browser-actions.jsonl`, screenshots;
+- `EVAL_RUNS_DIR`: `manifest.json` для связи `session_id` с `eval_run_id`, `eval_case_id` и runtime state.
+
+Выход:
+
+- JSON-ready payload для `GET /stats/sessions`;
+- normalized step fields: `duration_ms`, `codex_tokens_used`, `command_duration_ms`, `command_errors`, `html_bytes`, `command_breakdown`;
+- session-level KPI fields для таблицы Stats.
+
+Ошибки и ограничения:
+
+- endpoint не читает raw auth artifacts и не возвращает browser action payload целиком;
+- direct-сессии без eval manifest получают source `direct`, status из returncode trace steps и host из URL в trace/browser summary.
+
+### `eval_service/app/trace_collector.py`
+
+Читает локальные trace directories и строит sanitized step summary для judge и stats.
+
+Дополнительные публичные helpers:
+
+- `iter_trace_session_dirs(trace_root)` возвращает dated session directories;
+- `collect_trace_session_dir(trace_dir)` собирает trace summary по уже найденной session directory;
+- `collect_trace_session(trace_root, session_id)` остается lookup wrapper-ом для judge flow.
 
 ## `micro-ui`
 
@@ -932,10 +968,12 @@ Pydantic-модели callback, task proxy, reply proxy и session summary. `Ses
 
 ### Frontend assets
 
-- `micro-ui/app/templates/index.html`: HTML shell.
+- `micro-ui/app/templates/index.html`: HTML shell с вкладками Buyer, Eval и Stats.
 - `micro-ui/app/static/app.js`: запуск задач, отправка replies, SSE stream, UI state; знает `payment_unverified`, показывает `unverified` как неуспешный/review-needed статус и выводит provider в summary.
 - `micro-ui/app/static/eval.js`: eval shell; при инициализации загружает cases, последний eval run через `GET /runs` + `GET /runs/{eval_run_id}`, dashboard и operator reply; operator reply отправляет в eval_service только `reply_id` и `message`, без лишнего `session_id`; активный running eval-run периодически обновляется через `GET /runs/{eval_run_id}` до ожидания пользователя или terminal state; в Run detail группирует `agent_stream_event` по `source/stream`, показывает компактные последние summary и счетчики, а raw payload/details оставляет в раскрываемом блоке. Встроенные stub-данные используются только при `window.MICRO_UI_ENABLE_EVAL_STUBS === true`.
+- `micro-ui/app/static/stats.js`: Stats tab; загружает `/api/eval/stats/sessions`, строит KPI, command breakdown, eval slices, sortable/filterable sessions table, selected session detail, step Gantt и per-step table. Handoff mock data не используется.
 - `micro-ui/app/static/app.css`: стили панели; блок сессий и единая лента событий полноширинные, лента событий имеет ограниченную высоту, фильтры по всем известным `event_type` и прокручивается на уровне списка без внутренней прокрутки payload-карточек.
+- `micro-ui/app/static/stats.css`: компактные стили Stats tab поверх `app.css`/`eval.css`.
 
 При изменении callback payload или session summary нужно синхронизировать Python store, JS и OpenAPI callback contract.
 
@@ -1109,11 +1147,13 @@ Candidate branches создаются по convention `refs/heads/evolve/cand-YY
 | `eval_service/tests/test_callbacks.py` | Eval callback receiver, operator reply flow, `payment_unverified`, malformed terminal callbacks, manifest redaction на диске. |
 | `eval_service/tests/test_run_store.py` | File manifest lifecycle, callback event redaction/deduplication, atomic summary writes. |
 | `eval_service/tests/test_api.py` | Eval API, run detail/dashboard/judge payloads и outward sanitization. |
+| `eval_service/tests/test_stats_api.py` | Stats endpoint: trace session summary, command breakdown normalization и связь с eval manifest. |
 | `eval_service/tests/test_orchestrator.py` | Eval run orchestration, payment_ready grace, terminal `unverified`, waiting/reply resume progression. |
 | `scripts/tests/test_evolve_buyer_loop.py` | MVP-A evolve-loop CLI: doctor preflight, baseline/candidate eval client, async judge polling, comparator/scoring, case fingerprints, placeholder/external patch, branch/worktree/commit flow, candidate prepare, handoff `operator-action.json`, `continue`, offline `compare`, artifact/redaction behavior. |
 | `micro-ui/tests/test_store_stream.py` | CallbackStore, дедупликация, SSE queue behavior. |
 | `micro-ui/tests/test_design_handoff.py` | Session summary для `ask_user`/waiting progression, `payment_ready.order_id_host` и `payment_unverified` в `CallbackStore`. |
 | `micro-ui/tests/test_eval_shell_static.py` | Поведенчески значимый proxy timeout для долгого создания eval run, явный флаг eval stubs и статический contract для отображения `payment_unverified`. |
+| `micro-ui/tests/test_stats_tab_static.py` | Статический contract Stats tab: вкладка подключена, assets загружены, frontend использует real stats API без handoff mock data. |
 
 Рекомендованный точечный запуск Python-тестов описан в `AGENTS.md`.
 
