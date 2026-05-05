@@ -64,4 +64,19 @@ def test_stats_sessions_summarizes_trace_sessions_and_eval_metadata(tmp_path: Pa
     assert session['screenshot_count'] == 1
     assert session['steps'][0]['command_breakdown']['goto']['count'] == 1
     assert session['steps'][0]['command_breakdown']['fill']['errors'] == 1
+    timeline = session['steps'][0]['command_timeline']
+    assert [item['command'] for item in timeline] == ['goto', 'click', 'fill']
+    assert [item['event'] for item in timeline] == [
+        'browser_command_finished',
+        'browser_command_finished',
+        'browser_command_failed',
+    ]
+    assert timeline[0]['offset_ms'] == 0
+    assert timeline[0]['duration_ms'] == 120
+    assert timeline[0]['ok'] is True
+    assert timeline[2]['ok'] is False
+    assert [item['offset_ms'] for item in timeline] == sorted(item['offset_ms'] for item in timeline)
+    assert session['steps'][0]['timeline_total_ms'] >= timeline[-1]['end_offset_ms']
+    assert 'details' not in timeline[0]
+    assert 'result' not in timeline[0]
     assert session['trace_dir'].endswith('session-judge-123')

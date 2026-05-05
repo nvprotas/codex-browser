@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,7 +63,7 @@ def _build_eval_session_index(runs_dir: Path, *, warnings: list[dict[str, str]])
 
 def _stats_session_from_trace(trace_dir: Path, eval_meta: EvalSessionMeta | None) -> dict[str, Any]:
     trace = collect_trace_session_dir(trace_dir, browser_actions_tail_limit=20)
-    steps = [_stats_step(step) for step in trace.get('steps') or []]
+    steps = [_stats_step(step, trace_dir=trace_dir) for step in trace.get('steps') or []]
     duration_ms = sum(_int(step.get('duration_ms')) for step in steps)
     tokens_total = sum(_int(step.get('codex_tokens_used')) for step in steps)
     cdp_count = sum(_int(step.get('total_cmds')) for step in steps)
@@ -92,12 +93,14 @@ def _stats_session_from_trace(trace_dir: Path, eval_meta: EvalSessionMeta | None
     }
 
 
-def _stats_step(step: dict[str, Any]) -> dict[str, Any]:
+def _stats_step(step: dict[str, Any], *, trace_dir: Path) -> dict[str, Any]:
     action_summary = _dict(step.get('browser_actions_summary'))
     breakdown = _normalize_command_breakdown(action_summary.get('command_breakdown'))
     total_cmds = sum(_int(item.get('count')) for item in breakdown.values())
     if total_cmds == 0:
         total_cmds = _int(step.get('browser_actions_total'))
+    command_timeline = _command_timeline(trace_dir, step)
+    timeline_total_ms = max((item['end_offset_ms'] for item in command_timeline), default=0)
 
     return {
         'step': _int(step.get('step')),
@@ -116,6 +119,8 @@ def _stats_step(step: dict[str, Any]) -> dict[str, Any]:
         'html_commands': _int(action_summary.get('html_commands')),
         'html_bytes': _int(action_summary.get('html_bytes')),
         'command_breakdown': breakdown,
+        'command_timeline': command_timeline,
+        'timeline_total_ms': timeline_total_ms,
         'llm_duration_ms': max(_int(step.get('duration_ms')) - _int(action_summary.get('command_duration_ms')), 0),
         'total_cmds': total_cmds,
         'stdout_tail': step.get('stdout_tail') or '',
@@ -140,6 +145,122 @@ def _normalize_command_breakdown(value: Any) -> dict[str, dict[str, int]]:
         else:
             result[command] = {'count': _int(raw_stats), 'duration_ms': 0, 'errors': 0}
     return result
+
+
+def _command_timeline(trace_dir: Path, step: dict[str, Any]) -> list[dict[str, Any]]:
+    actions_file = _actions_file_path(trace_dir, step)
+    if actions_file is None:
+        return []
+
+    records: list[dict[str, Any]] = []
+    starts_by_command: dict[str, list[dict[str, Any]]] = {}
+    starts_by_command_id: dict[str, dict[str, Any]] = {}
+    try:
+        lines = actions_file.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return []
+
+    for line_index, raw_line in enumerate(lines):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        event = record.get('event')
+        command = record.get('command')
+        if not isinstance(command, str) or not command:
+            continue
+        if event == 'browser_command_started':
+            starts_by_command.setdefault(command, []).append(record)
+            command_id = record.get('command_id')
+            if isinstance(command_id, str) and command_id:
+                starts_by_command_id[command_id] = record
+            continue
+        if event not in {'browser_command_finished', 'browser_command_failed'}:
+            continue
+        end_ts = _epoch_ms(record.get('ts'))
+        if end_ts is None:
+            continue
+        duration_ms = _int(record.get('duration_ms'))
+        started_record = None
+        command_id = record.get('command_id')
+        if isinstance(command_id, str) and command_id:
+            started_record = starts_by_command_id.pop(command_id, None)
+        queue = starts_by_command.get(command)
+        if isinstance(started_record, dict) and queue and started_record in queue:
+            queue.remove(started_record)
+        elif queue:
+            started_record = queue.pop(0)
+        start_ts = _epoch_ms(started_record.get('ts')) if isinstance(started_record, dict) else None
+        if start_ts is None:
+            start_ts = max(end_ts - duration_ms, 0)
+        records.append(
+            {
+                'command': command,
+                'event': event,
+                'ok': False if event == 'browser_command_failed' else record.get('ok') is not False,
+                'duration_ms': duration_ms,
+                'start_ts': start_ts,
+                'end_ts': end_ts,
+                'sequence': _int(record.get('sequence')),
+                'line_index': line_index,
+                'attempt_id': record.get('attempt_id') if isinstance(record.get('attempt_id'), str) else None,
+            }
+        )
+
+    if not records:
+        return []
+
+    records.sort(key=lambda item: (item['start_ts'], item['end_ts'], item['sequence'], item['line_index']))
+    base_ts = records[0]['start_ts']
+    timeline: list[dict[str, Any]] = []
+    for item in records:
+        offset_ms = max(item['start_ts'] - base_ts, 0)
+        timeline.append(
+            {
+                'command': item['command'],
+                'event': item['event'],
+                'ok': item['ok'],
+                'duration_ms': item['duration_ms'],
+                'start_ts': item['start_ts'],
+                'end_ts': item['end_ts'],
+                'offset_ms': offset_ms,
+                'end_offset_ms': max(item['end_ts'] - base_ts, offset_ms),
+                'sequence': item['sequence'],
+                'attempt_id': item['attempt_id'],
+            }
+        )
+    return timeline
+
+
+def _actions_file_path(trace_dir: Path, step: dict[str, Any]) -> Path | None:
+    name = step.get('browser_actions_file')
+    if not isinstance(name, str) or not name:
+        return None
+    candidate = trace_dir / name
+    try:
+        resolved = candidate.resolve(strict=False)
+        trace_root = trace_dir.resolve(strict=False)
+        resolved.relative_to(trace_root)
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _epoch_ms(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1000)
 
 
 def _direct_status(steps: list[dict[str, Any]]) -> str:

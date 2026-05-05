@@ -423,6 +423,12 @@
 
 .stats-gantt-lane {
   min-height: 18px;
+  outline: none;
+}
+
+.stats-gantt-lane-label,
+.stats-gantt-legend-item {
+  transition: color 0.12s, opacity 0.12s;
 }
 
 .stats-gantt-track {
@@ -447,7 +453,7 @@
   height: 12px;
   border-radius: 3px;
   cursor: pointer;
-  transition: filter 0.1s;
+  transition: filter 0.12s, opacity 0.12s, transform 0.12s;
 }
 
 .stats-gantt-bar:hover {
@@ -455,8 +461,31 @@
   filter: brightness(1.15);
 }
 
-.stats-gantt-bar.llm {
-  background: rgba(22, 103, 168, 0.55);
+.stats-gantt-wrap.is-highlighted .stats-gantt-bar.dimmed {
+  opacity: 0.18;
+  filter: saturate(0.45);
+}
+
+.stats-gantt-wrap.is-highlighted .stats-gantt-bar.highlighted {
+  z-index: 3;
+  opacity: 1;
+  filter: brightness(1.2) saturate(1.25);
+  transform: scaleY(1.28);
+}
+
+.stats-gantt-lane.highlighted .stats-gantt-lane-label,
+.stats-gantt-legend-item.highlighted {
+  color: var(--text);
+  opacity: 1;
+}
+
+.stats-gantt-lane.dimmed .stats-gantt-lane-label,
+.stats-gantt-legend-item.dimmed {
+  opacity: 0.38;
+}
+
+.stats-gantt-bar.runtime {
+  background: rgba(18, 35, 56, 0.12);
 }
 
 .stats-gantt-bar.read {
@@ -489,7 +518,7 @@
 
 .stats-gantt-bar.error {
   border: 1.5px solid var(--error);
-  background: transparent;
+  box-shadow: 0 0 0 1px rgba(180, 35, 24, 0.2);
 }
 
 .stats-gantt-tooltip,
@@ -520,7 +549,9 @@
   align-items: center;
   gap: 4px;
   color: var(--muted);
+  cursor: pointer;
   font-size: 0.64rem;
+  outline: none;
 }
 
 .stats-gantt-legend-swatch {

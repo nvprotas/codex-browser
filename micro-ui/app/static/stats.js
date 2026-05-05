@@ -1,23 +1,33 @@
 (() => {
   const STATS_SERVICE_PATH = '/api/eval/stats/sessions';
   const CDP_INFO = {
-    url: { type: 'read', desc: 'Возвращает текущий URL страницы.', when: 'Проверка навигации и payment boundary.', risk: 'Дешевая read-команда.' },
-    title: { type: 'read', desc: 'Возвращает title страницы.', when: 'Быстрая проверка нужной страницы.', risk: 'Дешевая read-команда.' },
-    goto: { type: 'navigation', desc: 'Открывает URL.', when: 'Первый переход, recovery, явный переход.', risk: 'State-changing действие.' },
-    click: { type: 'write', desc: 'Кликает по selector.', when: 'Кнопки, выбор опций, checkout.', risk: 'State-changing действие, нужен milestone.' },
-    fill: { type: 'write', desc: 'Заполняет input/textarea.', when: 'Формы, поиск, адрес.', risk: 'Может вводить персональные данные.' },
-    press: { type: 'write', desc: 'Нажимает клавишу.', when: 'Enter, Escape, Tab, hotkeys.', risk: 'Эффект зависит от focus.' },
-    wait: { type: 'wait', desc: 'Ждет заданное время.', when: 'Fallback при нестабильной загрузке.', risk: 'Дорогая и непрозрачная команда.' },
-    'wait-url': { type: 'wait', desc: 'Ждет URL по contains/regex.', when: 'После клика, submit или navigation.', risk: 'Может timeout.' },
-    'wait-selector': { type: 'wait', desc: 'Ждет появления DOM selector.', when: 'DOM milestone после действия.', risk: 'Зависит от selector.' },
-    snapshot: { type: 'read', desc: 'Возвращает структурный список видимых элементов.', when: 'Основной observe-инструмент.', risk: 'Средняя стоимость.' },
-    links: { type: 'read', desc: 'Возвращает ссылки внутри selector.', when: 'Поиск навигационных кандидатов.', risk: 'Дешевая read-команда.' },
-    text: { type: 'read', desc: 'Возвращает текст selector с лимитом.', when: 'Проверка содержимого блока.', risk: 'Может быть шумным.' },
-    exists: { type: 'read', desc: 'Проверяет наличие selector.', when: 'Milestone/evidence без чтения всего DOM.', risk: 'Дешевая read-команда.' },
-    attr: { type: 'read', desc: 'Читает атрибут selector.', when: 'Проверить state, href, value.', risk: 'Дешевая read-команда.' },
-    screenshot: { type: 'evidence', desc: 'Сохраняет screenshot в файл.', when: 'Evidence для judge/debug.', risk: 'Дороже read; пишет artifact.' },
-    html: { type: 'heavy', desc: 'Возвращает или сохраняет HTML.', when: 'Fallback после snapshot, text, links, attr.', risk: 'Самая шумная команда.' },
+    url: { type: 'read', desc: 'Проверяет, на каком адресе сейчас открыт браузер.', when: 'После переходов, кликов и оплаты, чтобы понять, куда попал агент.', risk: 'Очень дешевая проверка, страницу не меняет.' },
+    title: { type: 'read', desc: 'Читает заголовок вкладки браузера.', when: 'Быстрая проверка, что открыта ожидаемая страница или магазин.', risk: 'Очень дешевая проверка, страницу не меняет.' },
+    goto: { type: 'navigation', desc: 'Переводит браузер на указанный URL.', when: 'Старт сценария, recovery после тупика или явный переход на найденную страницу.', risk: 'Меняет страницу и может сбросить текущий контекст.' },
+    click: { type: 'write', desc: 'Нажимает найденную кнопку, ссылку, чекбокс или другой элемент страницы.', when: 'Выбор товара, добавление в корзину, переход к checkout, выбор доставки или оплаты.', risk: 'Меняет состояние страницы; после клика нужен контрольный признак результата.' },
+    fill: { type: 'write', desc: 'Вводит текст в поле формы.', when: 'Поиск, имя, телефон, email, адрес или другой checkout input.', risk: 'Может вводить пользовательские данные и менять форму.' },
+    press: { type: 'write', desc: 'Нажимает клавишу в текущем фокусе браузера.', when: 'Enter для поиска/submit, Escape для закрытия окна, Tab для перехода между полями.', risk: 'Результат зависит от того, какой элемент был в фокусе.' },
+    wait: { type: 'wait', desc: 'Просто ждет N миллисекунд без проверки состояния страницы.', when: 'Последний fallback при анимациях, нестабильной загрузке или внешних виджетах.', risk: 'Тратит время и не доказывает, что нужное состояние наступило.' },
+    'wait-url': { type: 'wait', desc: 'Ждет, пока адрес страницы совпадет с ожидаемой строкой или регулярным выражением.', when: 'После клика, submit или редиректа, если успех виден по URL.', risk: 'Может ждать до timeout, если сайт остался на другой странице.' },
+    'wait-selector': { type: 'wait', desc: 'Ждет появления конкретного элемента на странице.', when: 'После действия, когда результат должен быть виден как кнопка, форма, сообщение или блок checkout.', risk: 'Зависит от точности селектора; неверный селектор приведет к timeout.' },
+    snapshot: { type: 'read', desc: 'Делает DOM-снимок страницы: показывает агенту видимые кнопки, ссылки, поля ввода, заголовки и тексты, по которым он выбирает следующий шаг.', when: 'Основной способ понять, что сейчас видно на странице, без выгрузки всего HTML.', risk: 'Дороже простых read-проверок, но обычно полезнее и чище полного HTML.' },
+    links: { type: 'read', desc: 'Собирает ссылки из выбранной части страницы.', when: 'Поиск кандидатов для перехода: категории, карточки товара, checkout, help/payment links.', risk: 'Страницу не меняет, но список может быть шумным.' },
+    text: { type: 'read', desc: 'Читает видимый текст выбранного блока страницы.', when: 'Проверка цены, названия товара, ошибки формы, условий доставки или платежного шага.', risk: 'Страницу не меняет; слишком широкий блок даст много шума.' },
+    exists: { type: 'read', desc: 'Проверяет, есть ли на странице конкретный элемент.', when: 'Быстро подтвердить milestone: корзина открыта, кнопка SberPay видна, ошибка появилась.', risk: 'Дешевая проверка, но не объясняет содержимое элемента.' },
+    attr: { type: 'read', desc: 'Читает атрибут элемента: href, value, disabled, aria-label и похожие признаки.', when: 'Проверка ссылки, состояния кнопки, заполненного значения или скрытой подсказки.', risk: 'Страницу не меняет; полезность зависит от выбранного атрибута.' },
+    screenshot: { type: 'evidence', desc: 'Сохраняет картинку текущего экрана браузера.', when: 'Нужен визуальный артефакт для debug, judge или проверки платежного экрана.', risk: 'Дороже read-команд и пишет файл с артефактом.' },
+    html: { type: 'heavy', desc: 'Выгружает HTML страницы или выбранного блока.', when: 'Fallback, когда snapshot/text/links/attr не дают нужной информации.', risk: 'Самая шумная команда: много данных, медленнее читать и сложнее анализировать.' },
   };
+  const GANTT_CATEGORIES = [
+    { category: 'runtime', label: 'runtime/idle' },
+    { category: 'read', label: 'read' },
+    { category: 'write', label: 'write' },
+    { category: 'navigation', label: 'navigation' },
+    { category: 'wait', label: 'wait' },
+    { category: 'evidence', label: 'evidence' },
+    { category: 'heavy', label: 'heavy' },
+    { category: 'error', label: 'error' },
+  ];
 
   const panel = document.getElementById('stats-tab-panel');
   if (!panel) {
@@ -113,6 +123,23 @@
     });
   }
 
+  function formatTimelineTs(value, isAbsolute) {
+    if (!isAbsolute) {
+      return `+${fmtMs(value)}`;
+    }
+    const date = new Date(Number(value));
+    if (Number.isNaN(date.getTime())) {
+      return '—';
+    }
+    return date.toLocaleString('ru-RU', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+
   function shortId(value, max = 16) {
     const text = String(value || '');
     if (!text) {
@@ -169,6 +196,34 @@
     return result;
   }
 
+  function normalizeTimeline(value) {
+    return asArray(value)
+      .map((item) => {
+        const command = String(item?.command || '');
+        if (!command) {
+          return null;
+        }
+        const offsetMs = number(item.offset_ms);
+        const durationMs = number(item.duration_ms);
+        const endOffsetMs = number(item.end_offset_ms) || offsetMs + durationMs;
+        const startTs = number(item.start_ts);
+        const endTs = number(item.end_ts) || (startTs ? startTs + durationMs : 0);
+        return {
+          command,
+          event: String(item.event || ''),
+          ok: item.ok !== false,
+          duration_ms: durationMs,
+          start_ts: startTs,
+          end_ts: endTs,
+          offset_ms: offsetMs,
+          end_offset_ms: Math.max(endOffsetMs, offsetMs + durationMs),
+          sequence: number(item.sequence),
+          attempt_id: String(item.attempt_id || ''),
+        };
+      })
+      .filter(Boolean);
+  }
+
   function normalizeSessions(sessions) {
     return asArray(sessions).map((session) => {
       let stepOffset = 0;
@@ -188,10 +243,11 @@
           command_errors: number(step.command_errors),
           html_commands: number(step.html_commands),
           html_bytes: number(step.html_bytes),
-          llm_duration_ms: number(step.llm_duration_ms),
           post_browser_idle_ms: number(step.post_browser_idle_ms),
           total_cmds: number(step.total_cmds) || totalFromBreakdown,
           command_breakdown: breakdown,
+          command_timeline: normalizeTimeline(step.command_timeline),
+          timeline_total_ms: number(step.timeline_total_ms),
           screenshots: asArray(step.screenshots),
           _stepOffset: stepOffset,
         };
@@ -339,6 +395,30 @@
     element.addEventListener('mouseleave', () => {
       tooltip.style.display = 'none';
     });
+  }
+
+  function setGanttHighlight(scope, category) {
+    const active = Boolean(category);
+    scope.classList.toggle('is-highlighted', active);
+    for (const element of scope.querySelectorAll('[data-gantt-types]')) {
+      const types = String(element.dataset.ganttTypes || '').split(/\s+/).filter(Boolean);
+      const matched = active && types.includes(category);
+      element.classList.toggle('highlighted', matched);
+      element.classList.toggle('dimmed', active && !matched);
+    }
+    for (const element of scope.querySelectorAll('.stats-gantt-lane[data-gantt-category], .stats-gantt-legend-item[data-gantt-category]')) {
+      const matched = active && element.dataset.ganttCategory === category;
+      element.classList.toggle('highlighted', matched);
+      element.classList.toggle('dimmed', active && !matched);
+    }
+  }
+
+  function attachGanttHighlight(element, scope, category) {
+    element.dataset.ganttCategory = category;
+    element.addEventListener('mouseenter', () => setGanttHighlight(scope, category));
+    element.addEventListener('mouseleave', () => setGanttHighlight(scope, null));
+    element.addEventListener('focus', () => setGanttHighlight(scope, category));
+    element.addEventListener('blur', () => setGanttHighlight(scope, null));
   }
 
   function renderKpis(list) {
@@ -559,7 +639,7 @@
 
     const twoCol = node('div', 'stats-detail-two-col');
     const ganttCol = node('div', 'stats-detail-col-wide');
-    ganttCol.append(panelHead('Timeline', 'Step Gantt'), renderGantt(session));
+    ganttCol.append(panelHead('Timeline', 'Browser timeline'), renderGantt(session));
     const commandCol = node('div', 'stats-detail-col-narrow');
     commandCol.append(panelHead('This session', 'Command breakdown'), renderSessionCommandBreakdown(session));
     twoCol.append(ganttCol, commandCol);
@@ -574,17 +654,145 @@
     return head;
   }
 
+  function collectTimelineCommands(session) {
+    const raw = [];
+    for (const step of session.steps) {
+      for (const item of step.command_timeline) {
+        raw.push({ step, item });
+      }
+    }
+    const useAbsolute = raw.length > 0 && raw.every(({ item }) => item.start_ts > 0 && item.end_ts > 0);
+    return raw
+      .map(({ step, item }, order) => {
+        const offsetMs = number(item.offset_ms);
+        const endOffsetMs = number(item.end_offset_ms) || offsetMs + number(item.duration_ms);
+        const localStartMs = number(step._stepOffset) + offsetMs;
+        const localEndMs = number(step._stepOffset) + endOffsetMs;
+        const startMs = useAbsolute ? number(item.start_ts) : localStartMs;
+        const rawEndMs = useAbsolute ? number(item.end_ts) : localEndMs;
+        const durationMs = Math.max(number(item.duration_ms), rawEndMs - startMs, 1);
+        return {
+          command: item.command,
+          type: cdpType(item.command),
+          event: item.event,
+          ok: item.ok !== false,
+          step: step.step,
+          sequence: item.sequence,
+          attempt_id: item.attempt_id,
+          startMs,
+          endMs: Math.max(rawEndMs, startMs + durationMs),
+          durationMs,
+          absolute: useAbsolute,
+          order,
+        };
+      })
+      .sort((left, right) => (
+        left.startMs - right.startMs
+        || left.endMs - right.endMs
+        || left.sequence - right.sequence
+        || left.order - right.order
+      ));
+  }
+
+  function timelineBounds(commands) {
+    if (!commands.length) {
+      return null;
+    }
+    const startMs = Math.min(...commands.map((command) => command.startMs));
+    const endMs = Math.max(...commands.map((command) => command.endMs));
+    return {
+      startMs,
+      endMs,
+      totalMs: Math.max(endMs - startMs, 1),
+      absolute: commands.every((command) => command.absolute),
+    };
+  }
+
+  function buildIdleSegments(commands, totalMs) {
+    const intervals = commands
+      .map((command) => ({
+        start: Math.min(totalMs, Math.max(0, command.offMs)),
+        end: Math.min(totalMs, Math.max(0, command.endOffMs)),
+      }))
+      .filter((interval) => interval.end > interval.start)
+      .sort((left, right) => left.start - right.start || left.end - right.end);
+    if (intervals.length < 2) {
+      return [];
+    }
+
+    const merged = [intervals[0]];
+    for (const interval of intervals.slice(1)) {
+      const current = merged[merged.length - 1];
+      if (interval.start <= current.end) {
+        current.end = Math.max(current.end, interval.end);
+      } else {
+        merged.push({ ...interval });
+      }
+    }
+
+    const gaps = [];
+    for (let index = 1; index < merged.length; index += 1) {
+      const previous = merged[index - 1];
+      const current = merged[index];
+      if (current.start > previous.end) {
+        gaps.push({ offMs: previous.end, durationMs: current.start - previous.end });
+      }
+    }
+    return gaps;
+  }
+
+  function commandTimelineTip(command) {
+    return [
+      command.command,
+      `type: ${command.type}`,
+      `step: ${command.step || '—'}`,
+      `sequence: ${command.sequence || '—'}`,
+      `status: ${command.ok ? 'ok' : 'failed'}`,
+      `dur: ${fmtMs(command.durationMs)}`,
+      `start: ${formatTimelineTs(command.startMs, command.absolute)}`,
+    ].join('\n');
+  }
+
+  function commandSegment(command) {
+    const types = [command.type];
+    if (!command.ok) {
+      types.push('error');
+    }
+    return {
+      offMs: command.offMs,
+      durationMs: Math.max(command.endOffMs - command.offMs, 1),
+      className: `${typeClass(command.type)}${command.ok ? '' : ' error'}`,
+      types,
+      highlightCategory: command.type,
+      tip: commandTimelineTip(command),
+    };
+  }
+
+  function commandTimelineLane(command) {
+    return {
+      label: `#${command.order + 1} ${command.command}`,
+      category: command.type,
+      segments: [commandSegment(command)],
+    };
+  }
+
   function renderGantt(session) {
-    const wrapper = node('div');
-    if (!session.steps.length || !session.duration_ms) {
+    const wrapper = node('div', 'stats-gantt-wrap');
+    const commands = collectTimelineCommands(session);
+    const bounds = timelineBounds(commands);
+    if (!bounds) {
       wrapper.append(node('div', 'empty', 'Нет данных timeline.'));
       return wrapper;
     }
-    wrapper.append(node('p', 'stats-gantt-notice', 'Шкала построена по duration_ms и browser action summaries.'));
+    wrapper.append(node('p', 'stats-gantt-notice', 'Шкала построена по timestamps из browser-actions JSONL; runtime/idle — промежутки без активных CDP-команд.'));
 
-    const totalMs = Math.max(number(session.duration_ms), 1);
+    const totalMs = bounds.totalMs;
     const pct = (ms) => `${Math.min(100, Math.max(0, (ms / totalMs) * 100)).toFixed(2)}%`;
-    const width = (ms) => `${Math.max(0.3, (ms / totalMs) * 100).toFixed(2)}%`;
+    const width = (ms) => `${Math.min(100, Math.max(0.3, (ms / totalMs) * 100)).toFixed(2)}%`;
+    for (const command of commands) {
+      command.offMs = Math.max(command.startMs - bounds.startMs, 0);
+      command.endOffMs = Math.max(command.endMs - bounds.startMs, command.offMs + 1);
+    }
 
     const gantt = node('div', 'stats-gantt');
     const axisRow = node('div', 'stats-gantt-axis-row');
@@ -592,76 +800,55 @@
     for (const point of [0, 0.25, 0.5, 0.75, 1]) {
       axis.append(node('span', null, fmtMs(totalMs * point)));
     }
-    axisRow.append(node('span', 'stats-gantt-label-col', 'Step / Lane'), axis);
+    axisRow.append(node('span', 'stats-gantt-label-col', 'Lane'), axis);
     gantt.append(axisRow);
 
-    for (const step of session.steps) {
-      const group = node('div', 'stats-gantt-step-group');
-      const stepOffset = number(step._stepOffset);
-      const lanes = [];
-      const llmDuration = number(step.llm_duration_ms) || Math.max(number(step.duration_ms) - number(step.command_duration_ms), 0);
-      if (llmDuration > 0) {
-        lanes.push({
-          label: `step ${step.step} · LLM`,
-          className: 'llm',
-          segments: [{ off: stepOffset, dur: llmDuration, tip: `LLM/Codex\nstep: ${step.step}\ndur: ${fmtMs(llmDuration)}\nmodel: ${step.codex_model || '—'}` }],
-        });
-      }
+    const group = node('div', 'stats-gantt-step-group');
+    const idleSegments = buildIdleSegments(commands, totalMs).map((segment) => ({
+      ...segment,
+      className: 'runtime',
+      types: ['runtime'],
+      tip: [
+        'runtime/idle',
+        'between active CDP commands',
+        `dur: ${fmtMs(segment.durationMs)}`,
+        `start: ${formatTimelineTs(bounds.absolute ? bounds.startMs + segment.offMs : segment.offMs, bounds.absolute)}`,
+      ].join('\n'),
+    }));
+    const lanes = [
+      ...(idleSegments.length ? [{ label: 'runtime/idle', category: 'runtime', segments: idleSegments }] : []),
+      ...commands.map(commandTimelineLane),
+    ];
 
-      const totalCommands = Object.values(step.command_breakdown).reduce((sum, item) => sum + number(item.count), 0) || 1;
-      const fallbackPerCommand = number(step.command_duration_ms) / totalCommands;
-      let commandOffset = stepOffset + llmDuration;
-      const grouped = {};
-      for (const [command, stats] of Object.entries(step.command_breakdown)) {
-        const type = cdpType(command);
-        const duration = number(stats.duration_ms) || fallbackPerCommand * number(stats.count);
-        grouped[type] = grouped[type] || [];
-        grouped[type].push({
-          off: commandOffset,
-          dur: duration,
-          tip: `${command}\ntype: ${type}\ncount: ${number(stats.count)}\ndur: ${fmtMs(duration)}\nerrors: ${number(stats.errors) || '—'}`,
-        });
-        commandOffset += duration;
+    for (const lane of lanes) {
+      const row = node('div', 'stats-gantt-lane');
+      const label = node('span', 'stats-gantt-lane-label', lane.label);
+      row.tabIndex = 0;
+      attachGanttHighlight(row, wrapper, lane.category);
+      const track = node('div', 'stats-gantt-track');
+      for (const segment of lane.segments) {
+        const durationMs = Math.max(Math.min(segment.durationMs, totalMs - segment.offMs), 1);
+        const bar = node('div', `stats-gantt-bar ${segment.className}`);
+        bar.dataset.ganttTypes = segment.types.join(' ');
+        bar.style.left = pct(segment.offMs);
+        bar.style.width = width(durationMs);
+        attachGanttTooltip(bar, segment.tip);
+        attachGanttHighlight(bar, wrapper, segment.highlightCategory || segment.types[0]);
+        track.append(bar);
       }
-      for (const [type, segments] of Object.entries(grouped)) {
-        lanes.push({ label: type, className: typeClass(type), segments });
-      }
-      if (number(step.post_browser_idle_ms) > 0) {
-        lanes.push({
-          label: 'idle',
-          className: 'idle',
-          segments: [{ off: commandOffset, dur: number(step.post_browser_idle_ms), tip: `post_browser_idle\ndur: ${fmtMs(step.post_browser_idle_ms)}` }],
-        });
-      }
-      if (number(step.command_errors) > 0) {
-        lanes.push({
-          label: 'error',
-          className: 'error',
-          segments: [{ off: stepOffset + llmDuration, dur: Math.max(totalMs * 0.008, 1000), tip: `CDP errors: ${step.command_errors}\n${step.stderr_tail || ''}` }],
-        });
-      }
-
-      for (const [index, lane] of lanes.entries()) {
-        const row = node('div', 'stats-gantt-lane');
-        const label = node('span', `stats-gantt-lane-label${index === 0 ? ' step-label' : ''}`, lane.label);
-        const track = node('div', 'stats-gantt-track');
-        for (const segment of lane.segments) {
-          const bar = node('div', `stats-gantt-bar ${lane.className}`);
-          bar.style.left = pct(segment.off);
-          bar.style.width = width(segment.dur);
-          attachGanttTooltip(bar, segment.tip);
-          track.append(bar);
-        }
-        row.append(label, track);
-        group.append(row);
-      }
-      gantt.append(group);
+      row.append(label, track);
+      group.append(row);
     }
+    gantt.append(group);
 
     const legend = node('div', 'stats-gantt-legend');
-    for (const [className, label] of [['llm', 'LLM/Codex'], ['read', 'read'], ['write', 'write'], ['navigation', 'navigation'], ['wait', 'wait'], ['evidence', 'evidence'], ['heavy', 'heavy'], ['idle', 'idle'], ['error', 'error']]) {
+    for (const { category, label } of GANTT_CATEGORIES) {
       const item = node('div', 'stats-gantt-legend-item');
-      item.append(node('div', `stats-gantt-legend-swatch stats-gantt-bar ${className}`), node('span', null, label));
+      item.tabIndex = 0;
+      attachGanttHighlight(item, wrapper, category);
+      const swatch = node('div', `stats-gantt-legend-swatch stats-gantt-bar ${category}`);
+      swatch.dataset.ganttTypes = category;
+      item.append(swatch, node('span', null, label));
       legend.append(item);
     }
     wrapper.append(gantt, legend);
