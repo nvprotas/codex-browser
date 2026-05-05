@@ -66,6 +66,7 @@ if settings.sber_auth_source == 'external_cookies_api':
         base_url=settings.sber_cookies_api_url,
         timeout_sec=settings.sber_cookies_api_timeout_sec,
         retries=settings.sber_cookies_api_retries,
+        scope=settings.sber_cookies_api_scope,
     )
 service = BuyerService(
     store=store,

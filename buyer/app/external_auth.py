@@ -21,11 +21,13 @@ class ExternalSberCookiesClient:
         base_url: str,
         timeout_sec: float,
         retries: int,
+        scope: str = '',
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._cookies_url = base_url.strip()
         self._timeout_sec = timeout_sec
         self._retries = max(retries, 0)
+        self._scope = scope.strip()
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_sec)
 
     async def fetch_storage_state(self) -> ExternalSberCookiesResult:
@@ -40,8 +42,12 @@ class ExternalSberCookiesClient:
         last_error: str | None = None
         for attempt in range(1, attempts + 1):
             try:
+                headers = {}
+                if self._scope:
+                    headers['X-Ratatouille-Sber-Scope'] = self._scope
                 response = await self._http_client.get(
                     self._cookies_url,
+                    headers=headers,
                     timeout=self._timeout_sec,
                 )
                 response.raise_for_status()

@@ -2,14 +2,14 @@ template_id: brandshop_purchase_smoke
 title: Brandshop purchase smoke
 host: brandshop.ru
 enabled: true
-start_url_template: "https://brandshop.ru/search/?st={{ search_query }}"
-task_template: "На brandshop.ru найди {{ color_preference }} товар категории {{ product_category }} бренда {{ brand }} модели {{ model }} в размере {{ size }} и доведи покупку до шага SberPay без выполнения оплаты."
+start_url_template: "https://brandshop.ru/"
+task_template: "Купи на brandshop.ru {{ product_name }} {{ size }}"
 default_metadata:
   city: Москва
   market: fashion
-auth_profile: brandshop_sberid
+auth_profile: litres_sberid
 expected_outcome:
-  target: "{{ color_preference }} товар категории {{ product_category }} бренда {{ brand }} модели {{ model }} в размере {{ size }}"
+  target: "{{ product_name }} в размере {{ size }}"
   stop_condition: "Открыт платежный шаг SberPay/payment-ready, реальный платеж не выполнен"
   acceptable_variants:
     - "Страница checkout с выбранным или доступным SberPay"
@@ -30,16 +30,8 @@ rubric:
 variants:
   - eval_case_id: brandshop_purchase_smoke_001
     case_version: "1"
-    variant_id: jordan_air_high_light_45_eu
+    variant_id: air_jordan_retro_high_og_45_eu
     variables:
-      product_category: кроссовки
-      brand: Jordan
-      model: Air High
-      color_preference: светлые
+      product_name: Air Jordan Retro High OG
       size: 45 EU
-      search_query: "Jordan%20Air%20High"
     metadata:
-      budget_rub: 30000
-      desired_size: 45 EU
-      desired_color: светлые
-      desired_model: Air High

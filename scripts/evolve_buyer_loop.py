@@ -27,6 +27,7 @@ EXIT_ARTIFACT = 5
 
 QUALITY_CHECKS = ("outcome_ok", "safety_ok", "payment_boundary_ok", "evidence_ok")
 DEFAULT_ALLOWED_PATHS = ("buyer/**", "eval/cases/**", "eval/evolution/placeholders/**", "docs/**")
+DEFAULT_PATCH_COMMAND_TIMEOUT_SEC = 3600
 FORBIDDEN_PATTERNS = (
     ".env",
     ".env.*",
@@ -568,11 +569,19 @@ def create_candidate(
             "EVOLVE_PATCH_MANIFEST": str(candidate_dir / "patch-manifest.json"),
             "EVOLVE_ALLOWED_PATHS": os.pathsep.join(_allowed_paths(args)),
         }
-        result = deps.run_process(shlex.split(args.patch_command), worktree_path, env=env)
+        result = deps.run_process(
+            shlex.split(args.patch_command),
+            worktree_path,
+            env=env,
+            timeout_sec=DEFAULT_PATCH_COMMAND_TIMEOUT_SEC,
+        )
         if result.returncode != 0:
             raise EvolveError(f"patch command failed: {result.stderr}", EXIT_GIT)
         manifest = read_json(candidate_dir / "patch-manifest.json")
 
+    committed_files = _diff_files(
+        git.run(["git", "diff", "--name-only", f"{base_sha}..HEAD"], worktree_path).stdout
+    )
     ls_files = _diff_files(
         git.run(
             ["git", "ls-files", "--modified", "--others", "--deleted", "--exclude-standard"],
@@ -580,18 +589,26 @@ def create_candidate(
         ).stdout
     )
     cached_files = _diff_files(git.run(["git", "diff", "--cached", "--name-only"], worktree_path).stdout)
-    diff_files = sorted({*ls_files, *cached_files, *_manifest_touched_paths(manifest)})
+    diff_files = sorted({*committed_files, *ls_files, *cached_files, *_manifest_touched_paths(manifest)})
     if not diff_files:
         raise EvolveError("patch produced no diff", EXIT_GIT)
     diff_files = _validate_diff_files(diff_files, _allowed_paths(args))
-    git.run(["git", "diff", "--check"], worktree_path)
-    git.run(["git", "add", *diff_files], worktree_path)
-    git.run(["git", "diff", "--cached", "--check"], worktree_path)
-    diffstat = git.run(["git", "diff", "--cached", "--stat"], worktree_path).stdout
-    diff_text = git.run(["git", "diff", "--cached"], worktree_path).stdout
+    if committed_files:
+        if ls_files or cached_files:
+            raise EvolveError("patch command committed changes but left uncommitted diff", EXIT_GIT)
+        git.run(["git", "diff", "--check", f"{base_sha}..HEAD"], worktree_path)
+        diffstat = git.run(["git", "diff", "--stat", f"{base_sha}..HEAD"], worktree_path).stdout
+        diff_text = git.run(["git", "diff", f"{base_sha}..HEAD"], worktree_path).stdout
+    else:
+        git.run(["git", "diff", "--check"], worktree_path)
+        git.run(["git", "add", *diff_files], worktree_path)
+        git.run(["git", "diff", "--cached", "--check"], worktree_path)
+        diffstat = git.run(["git", "diff", "--cached", "--stat"], worktree_path).stdout
+        diff_text = git.run(["git", "diff", "--cached"], worktree_path).stdout
     write_json(candidate_dir / "patch-diffstat.json", {"files": diff_files, "stat": diffstat})
     (candidate_dir / "candidate.diff").write_text(redact_text(diff_text), encoding="utf-8")
-    git.run(["git", "commit", "-m", f"evolve buyer: {manifest.get('patch_slug', initial_slug)}"], worktree_path)
+    if not committed_files:
+        git.run(["git", "commit", "-m", f"evolve buyer: {manifest.get('patch_slug', initial_slug)}"], worktree_path)
     candidate_sha = git.run(["git", "rev-parse", "HEAD"], worktree_path).stdout.strip() or "candidate-sha"
     candidate = CandidateBranch(
         cycle_id=cycle_id,
@@ -626,7 +643,12 @@ def run_candidate_prepare(command: str, deps: Deps, branch: CandidateBranch, can
         "EVOLVE_CANDIDATE_EVAL_BASE_URL": candidate_eval_base_url,
         "EVOLVE_REPORTS_DIR": str(branch.path.parent.parent.parent),
     }
-    result = deps.run_process(shlex.split(command), branch.worktree_path, env=env)
+    result = deps.run_process(
+        shlex.split(command),
+        branch.worktree_path,
+        env=env,
+        timeout_sec=DEFAULT_PATCH_COMMAND_TIMEOUT_SEC,
+    )
     if result.returncode != 0:
         raise EvolveError(f"candidate prepare failed: {result.stderr}", EXIT_GIT)
     return result

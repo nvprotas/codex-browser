@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     sberid_allowlist: str = 'litres.ru,brandshop.ru'
     sber_auth_source: Literal['inline_only', 'external_cookies_api'] = 'inline_only'
     sber_cookies_api_url: str = ''
+    sber_cookies_api_scope: str = ''
     sber_cookies_api_timeout_sec: float = Field(default=5.0, ge=0.1)
     sber_cookies_api_retries: int = Field(default=1, ge=0)
     auth_scripts_dir: str = '/app/scripts'

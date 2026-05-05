@@ -155,6 +155,23 @@ def test_post_runs_selected_cases_creates_manifest_and_calls_buyer_sequentially(
     assert buyer.calls[0]['storage_state'] == {'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}
 
 
+def test_post_runs_can_delegate_auth_to_buyer_runtime(tmp_path: Path) -> None:
+    client, _store, buyer, _timer = _client_with_orchestrator(
+        tmp_path,
+        cases=[_case('case-a', auth_profile='auth-a')],
+        auth_results={
+            'auth-a': AuthProfileLoadResult(storage_state={'cookies': [{'name': 'a', 'value': '1'}], 'origins': []}),
+        },
+        on_create=lambda call: _append_payment_ready(_store, call),
+        eval_auth_source='buyer_runtime',
+    )
+
+    response = client.post('/runs', json={'case_ids': ['case-a']})
+
+    assert response.status_code == 200
+    assert buyer.calls[0]['storage_state'] is None
+
+
 def test_post_runs_returns_running_manifest_before_background_cases_start(tmp_path: Path) -> None:
     scheduled: list[Awaitable[Any]] = []
 
@@ -817,6 +834,7 @@ def _client_with_orchestrator(
     raise_server_exceptions: bool = True,
     eval_callback_base_url: str | None = 'http://eval_service:8090',
     eval_callback_secret: str | None = None,
+    eval_auth_source: str = 'auth_profiles',
     client_base_url: str = 'http://testserver',
     run_scheduler: Callable[[Awaitable[Any]], Awaitable[None]] | None = None,
 ) -> tuple[TestClient, RunStore, FakeBuyerClient, FakeTimer]:
@@ -826,6 +844,7 @@ def _client_with_orchestrator(
         buyer_api_base_url='http://buyer.test',
         eval_callback_base_url=eval_callback_base_url,
         eval_callback_secret=eval_callback_secret,
+        eval_auth_source=eval_auth_source,
     )
     app = create_app(settings)
     store = RunStore(tmp_path, clock=lambda: datetime(2026, 4, 28, 12, 0, tzinfo=UTC))

@@ -1,5 +1,6 @@
 # Руководство по CDP tool
 
+- CDP доступен через shell command execution, а не как отдельный нативный tool-вызов Codex.
 - Используй `python /app/tools/cdp_tool.py --endpoint "$BROWSER_CDP_ENDPOINT" <command>`.
 - На первом шаге открой `start_url` через `goto --url <start_url>`, если текущая browser state еще не является нужной страницей.
 - Если в memory есть системный маркер `[CDP_RECOVERY_RESTART_FROM_START_URL]`, первым действием заново открой `start_url`.

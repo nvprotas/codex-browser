@@ -258,6 +258,16 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('Не печатай полный HTML в stdout', cdp_tool_doc)
         self.assertIn('html --path <file>', cdp_tool_doc)
 
+    def test_prompt_explains_cdp_is_available_through_shell_command(self) -> None:
+        prompt = _build_test_agent_prompt(
+            task='Открой litres. Ищи книгу одиссея гомера',
+            start_url='https://www.litres.ru/',
+        )
+
+        self.assertIn('shell command execution', prompt)
+        self.assertIn('CDP не является отдельным нативным tool-вызовом', prompt)
+        self.assertIn('python /app/tools/cdp_tool.py --endpoint http://browser:9223 title', prompt)
+
     def test_prompt_requires_sberpay_not_sbp_or_fps(self) -> None:
         prompt = _build_test_agent_prompt(
             task='Открой litres. Ищи книгу одиссея гомера',
@@ -1094,6 +1104,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
     def test_codex_command_disables_image_generation_with_low_reasoning_default(self) -> None:
         cmd = _build_codex_command(
             settings=Settings(
+                _env_file=None,
                 codex_web_search='disabled',
                 codex_image_generation='disabled',
             ),
@@ -1114,6 +1125,7 @@ class BrowserActionMetricsTests(unittest.TestCase):
     def test_codex_command_keeps_image_generation_when_explicitly_enabled(self) -> None:
         cmd = _build_codex_command(
             settings=Settings(
+                _env_file=None,
                 codex_reasoning_effort='none',
                 codex_reasoning_summary='none',
                 codex_web_search='disabled',
