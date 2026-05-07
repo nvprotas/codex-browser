@@ -5,6 +5,7 @@
 - На первом шаге открой `start_url` через `goto --url <start_url>`, если текущая browser state еще не является нужной страницей.
 - Если в memory есть системный маркер `[CDP_RECOVERY_RESTART_FROM_START_URL]`, первым действием заново открой `start_url`.
 - Предпочитай `snapshot`, `links`, `exists`, `attr`, `url`, `title` перед `html`.
+- У `snapshot` есть только `--selector` и `--limit`; не используй `snapshot --max-chars`. Если нужен ограниченный текст, используй `text --selector body --max-chars <N>`.
 - Для ожидания переходов используй `wait-url --contains <text>` или `wait-url --regex <pattern>`.
 - Для ожидания DOM milestone используй `wait-selector --selector <selector>`.
 - Если клик должен сразу привести к ожидаемому URL или DOM состоянию, используй `click --selector <selector> --wait-url-contains <text>` / `--wait-url-regex <pattern>` / `--wait-selector <selector>` вместо отдельного лишнего observe-step.
