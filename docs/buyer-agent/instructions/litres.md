@@ -5,7 +5,8 @@
 - Дойди до оплаты только через SberPay/СберPay/СберПэй.
 - Для Litres SberPay находится за способом оплаты `Российская карта`.
 - Выбери `Российская карта`, нажми `Продолжить`, дождись payment iframe с адресом вида `https://payecom.ru/pay_ru?orderId=...`.
-- Извлеки `order_id` из параметра `orderId` в iframe `src`.
+- Для evidence не читай полный HTML: одной структурной проверкой получи iframe `src` через `attr --selector 'iframe[src^="https://payecom.ru/pay_ru"][src*="orderId="]' --name src`.
+- Извлеки `order_id` из параметра `orderId` в этом iframe `src`.
 - Верни `payment_evidence.source="litres_payecom_iframe"` и exact iframe URL в `payment_evidence.url`.
 
 ## Stop rules

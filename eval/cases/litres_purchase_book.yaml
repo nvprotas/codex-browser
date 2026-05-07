@@ -26,6 +26,7 @@ rubric:
     - recommendations_ok
   success_notes:
     - "Покупка должна остановиться на границе SberPay."
+    - "Для evidence_ok желательно прямое browser-actions evidence: attr src у iframe с host payecom.ru и orderId перед payment_ready."
 variants:
   - eval_case_id: litres_purchase_book_001
     case_version: "1"
