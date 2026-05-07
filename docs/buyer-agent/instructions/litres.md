@@ -11,12 +11,16 @@
 - Извлеки `order_id` из параметра `orderId` в PayEcom iframe `src`.
 - Верни `payment_evidence.source="litres_payecom_iframe"` и exact iframe URL в `payment_evidence.url`.
 
-## Короткий путь через checkout
+## Короткий путь на `/purchase/ppd/`
 
-- Если браузер уже на странице `Покупка`/checkout Litres и виден PayEcom iframe, не делай `snapshot`/`html`: сразу проверь `exists --selector 'iframe[src*="payecom.ru/pay_ru"]'`, затем прочитай `src` через `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`.
-- Если на платежном шаге видна ошибка `Превышено время ожидания` и кнопка `Попробовать снова`, можно один раз нажать ее: это повторная загрузка провайдера, а не финальная оплата. После клика жди только PayEcom iframe или checkout/error milestone.
-- Если после retry открыт checkout с `data-testid="payment__method--russian_card"` и `data-testid="paymentLayout__payment--button"`, выбери/оставь `Российская карта` и нажми `Продолжить`; затем проверяй только PayEcom iframe через `exists` + `attr --name src`.
-- Не сохраняй полный HTML checkout и не ищи по нему, пока доступны `snapshot`, `exists`, `attr` и `text`: это обычно лишний шаг.
+- Если текущий URL уже содержит `/purchase/ppd/`, не возвращайся в корзину и не ищи товар заново.
+- Сначала проверь `exists --selector 'iframe[src*="payecom.ru/pay_ru"]'`; если iframe уже есть, извлеки `orderId` через `attr --name src` и завершай без дополнительных кликов.
+- Если на странице ошибка `Превышено время ожидания`, нажми `button:has-text("Попробовать снова")`: это повторная загрузка провайдера, а не финальная оплата. После клика жди только PayEcom iframe или checkout/error milestone.
+- Для проверки заказа используй компактный `snapshot --selector '[data-testid="ppd-checkout"]'`: должны совпасть название, автор и формат книги из задачи.
+- Если checkout открыт, но `Российская карта` еще не выбрана, нажми `[data-testid="payment__method--russian_card"]`.
+- Если checkout открыт и выбран способ `Российская карта` или URL содержит `method=russian_card&system=sbercard`, сразу нажми `[data-testid="paymentLayout__payment--button"]` с `--wait-selector 'iframe[src*="payecom.ru/pay_ru"]'`.
+- После нажатия проверяй только `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`; не открывай и не управляй содержимым iframe.
+- Не сохраняй полный HTML checkout и не ищи по нему, пока доступны `snapshot`, `exists`, `attr` и `text`.
 
 ## Stop rules
 
