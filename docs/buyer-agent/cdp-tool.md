@@ -5,10 +5,13 @@
 - На первом шаге открой `start_url` через `goto --url <start_url>`, если текущая browser state еще не является нужной страницей.
 - Если в memory есть системный маркер `[CDP_RECOVERY_RESTART_FROM_START_URL]`, первым действием заново открой `start_url`.
 - Предпочитай `snapshot`, `links`, `exists`, `attr`, `url`, `title` перед `html`.
+- Для `snapshot` ограничивай число элементов через `--limit`, например `snapshot --selector body --limit 40`; у `snapshot` нет `--max-chars`.
 - Для ожидания переходов используй `wait-url --contains <text>` или `wait-url --regex <pattern>`.
 - Для ожидания DOM milestone используй `wait-selector --selector <selector>`.
+- `wait-selector`, `exists` и `attr` принимают CSS-селектор Playwright. Не смешивай CSS с `text=...` внутри одного selector list; если нужен текст ошибки, проверь его отдельной командой `text`.
 - Если клик должен сразу привести к ожидаемому URL или DOM состоянию, используй `click --selector <selector> --wait-url-contains <text>` / `--wait-url-regex <pattern>` / `--wait-selector <selector>` вместо отдельного лишнего observe-step.
 - Для неизвестных селекторов используй короткий timeout.
+- Для чтения атрибута используй `attr --selector <css> --name <attr>`, например `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`; параметра `--attr` нет.
 - После state-changing действий проверяй milestone/evidence через `url`, `title`, `snapshot`, `exists` или `attr`, если сам результат команды не доказывает нужное состояние.
 - Не делай вывод о недоступности CDP через `curl`, `/json/version` или DNS-проверки; проверяй браузер только через `cdp_tool.py`.
 - Используй `html --path <file>` только как fallback после структурных команд, затем проверяй сохраненный файл локальным поиском.
