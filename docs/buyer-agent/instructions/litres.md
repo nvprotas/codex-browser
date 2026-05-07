@@ -8,6 +8,16 @@
 - Извлеки `order_id` из параметра `orderId` в iframe `src`.
 - Верни `payment_evidence.source="litres_payecom_iframe"` и exact iframe URL в `payment_evidence.url`.
 
+## Быстрый путь на `/purchase/ppd/`
+
+- Если текущий URL уже содержит `/purchase/ppd/`, не возвращайся в корзину и не ищи товар заново.
+- Сначала проверь `iframe[src*="payecom.ru/pay_ru"]`; если он уже есть, извлеки `orderId` и завершай без дополнительных кликов.
+- Если на странице ошибка `Превышено время ожидания.`, нажми `button:has-text("Попробовать снова")`, затем проверь checkout.
+- Для проверки заказа используй компактный `snapshot --selector '[data-testid="ppd-checkout"]'`: должны совпасть название, автор и формат книги из задачи.
+- Если checkout открыт, но `Российская карта` еще не выбрана, нажми `[data-testid="payment__method--russian_card"]`.
+- Если checkout уже открыт и выбран способ `Российская карта` или URL содержит `method=russian_card&system=sbercard`, сразу нажми `[data-testid="paymentLayout__payment--button"]` с `--wait-selector 'iframe[src*="payecom.ru/pay_ru"]'`.
+- После нажатия проверяй только `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`; не открывай и не управляй содержимым iframe.
+
 ## Stop rules
 
 - Не продолжай оплату внутри платежного iframe.
