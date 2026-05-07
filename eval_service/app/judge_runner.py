@@ -165,6 +165,8 @@ class JudgeRunner:
             'exec',
             '-m',
             self._settings.eval_judge_model,
+            '-s',
+            self._settings.eval_judge_sandbox_mode,
             '--output-schema',
             str(self._schema_path),
             '-o',

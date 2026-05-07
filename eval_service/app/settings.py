@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     eval_baseline_window: int = Field(default=5, ge=1)
     eval_callback_base_url: str | None = None
     eval_callback_secret: str | None = None
+    eval_judge_sandbox_mode: str = 'danger-full-access'
 
 
 @lru_cache
