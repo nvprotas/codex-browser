@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import unittest
@@ -253,6 +254,36 @@ class PersistentStateStoreTests(unittest.IsolatedAsyncioTestCase):
         restarted = SessionStore(repository=repository, max_active_sessions=1)
         next_state = await restarted.create_session(
             task='Вторая задача после рестарта',
+            start_url='https://example.com/second',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+
+        self.assertNotEqual(created.session_id, next_state.session_id)
+
+    async def test_finished_runtime_task_releases_active_slot(self) -> None:
+        store = SessionStore(max_active_sessions=1)
+        created = await store.create_session(
+            task='Первая задача',
+            start_url='https://example.com/first',
+            callback_url='http://callback',
+            novnc_url='http://novnc',
+            metadata={},
+            auth=None,
+        )
+        await store.set_status(created.session_id, SessionStatus.RUNNING)
+
+        async def finished_runner() -> None:
+            return
+
+        task_ref = asyncio.create_task(finished_runner())
+        store.set_task_ref(created.session_id, task_ref)
+        await task_ref
+
+        next_state = await store.create_session(
+            task='Вторая задача после завершения runner',
             start_url='https://example.com/second',
             callback_url='http://callback',
             novnc_url='http://novnc',

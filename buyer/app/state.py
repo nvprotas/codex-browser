@@ -161,6 +161,7 @@ class SessionStore:
     def set_task_ref(self, session_id: str, task_ref: asyncio.Task[None]) -> None:
         self._task_refs[session_id] = task_ref
         self._runtime_sessions.add(session_id)
+        task_ref.add_done_callback(lambda _task: self._runtime_sessions.discard(session_id))
 
     async def set_auth_context(self, session_id: str, context: dict[str, Any]) -> None:
         async with self._lock:
@@ -187,6 +188,7 @@ class SessionStore:
     ) -> SessionState:
         async with self._lock:
             sessions = await self._prune_and_list_locked()
+            self._drop_finished_runtime_tasks_locked()
             active = [
                 session
                 for session in sessions
@@ -312,6 +314,7 @@ class SessionStore:
     async def list_sessions(self) -> list[SessionState]:
         async with self._lock:
             sessions = await self._prune_and_list_locked()
+            self._drop_finished_runtime_tasks_locked()
             return [self._attach_runtime(state) for state in sessions]
 
     async def _get_locked(self, session_id: str) -> SessionState:
@@ -344,7 +347,20 @@ class SessionStore:
     def _is_active_in_current_runtime(self, state: SessionState) -> bool:
         if state.status not in {SessionStatus.CREATED, SessionStatus.RUNNING, SessionStatus.WAITING_USER}:
             return False
-        return state.session_id in self._runtime_sessions
+        if state.session_id not in self._runtime_sessions:
+            return False
+        task_ref = self._task_refs.get(state.session_id)
+        return task_ref is None or not task_ref.done()
+
+    def _drop_finished_runtime_tasks_locked(self) -> None:
+        finished = [
+            session_id
+            for session_id, task_ref in self._task_refs.items()
+            if task_ref.done()
+        ]
+        for session_id in finished:
+            self._task_refs.pop(session_id, None)
+            self._runtime_sessions.discard(session_id)
 
     def _touch_locked(self, state: SessionState) -> None:
         state.updated_at = self._clock()

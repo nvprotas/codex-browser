@@ -327,6 +327,8 @@ Pydantic-контракты API и внутренних результатов.
 Важное ограничение: auth-пакет живет в `_runtime_auth`; persistent backend не должен восстанавливать cookies/localStorage после рестарта. Пользовательский reply не должен быть auth-source.
 Передача `storageState` через чат запрещена; external cookies API является только машинным source для текущей сессии и не отменяет это ограничение.
 
+Активный runtime slot освобождается не только при терминальном статусе, но и когда связанный `asyncio.Task` runner уже завершился или был отменен. Это предотвращает ложный `409 /v1/tasks` после оборванного eval/run, если статус сессии остался `running`.
+
 ### `buyer/app/persistence.py`
 
 Postgres repository и inline migrations.
