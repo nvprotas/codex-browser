@@ -105,6 +105,15 @@ def parser() -> argparse.ArgumentParser:
     fill.add_argument('--value', required=True)
     _add_timeout_alias(fill)
 
+    otp_fill = sub.add_parser('otp-fill')
+    otp_fill.add_argument('--selector', required=True)
+    otp_fill.add_argument('--code', required=True)
+    otp_fill.add_argument('--digits', type=int, default=4)
+    otp_fill.add_argument('--type-delay-ms', type=int, default=120)
+    otp_fill.add_argument('--settle-ms', type=int, default=4000)
+    otp_fill.add_argument('--wait-gone-selector')
+    _add_timeout_alias(otp_fill)
+
     press = sub.add_parser('press')
     press.add_argument('--key', required=True)
     _add_timeout_alias(press)
@@ -268,6 +277,16 @@ def _extract_command_details_for_log(args: argparse.Namespace) -> dict[str, Any]
         return details
     if command == 'fill':
         return {'selector': args.selector, 'value_length': len(args.value)}
+    if command == 'otp-fill':
+        code = re.sub(r'\D+', '', args.code or '')
+        return {
+            'selector': args.selector,
+            'code_length': len(code),
+            'digits': args.digits,
+            'type_delay_ms': args.type_delay_ms,
+            'settle_ms': args.settle_ms,
+            'wait_gone_selector': args.wait_gone_selector or args.selector,
+        }
     if command == 'press':
         return {'key': args.key}
     if command == 'wait':
@@ -753,6 +772,120 @@ async def _wait_for_selector(page: Any, args: argparse.Namespace, deadline: floa
         await asyncio.sleep(interval_sec)
 
 
+
+OTP_INVALID_PATTERNS = (
+    r'неверн[ыо]й\s+код',
+    r'код\s+не\s+подходит',
+    r'код\s+ист[её]к',
+    r'время\s+жизни\s+кода\s+истекло',
+    r'попробуйте\s+ещ[её]\s+раз',
+)
+
+
+def _normalize_otp_code(raw: str, digits: int) -> str:
+    if digits <= 0:
+        raise RuntimeError('OTP_CODE_INVALID: --digits must be greater than 0')
+    code = re.sub(r'\D+', '', raw or '')
+    if len(code) != digits:
+        raise RuntimeError(f'OTP_CODE_INVALID: expected {digits} digits, got {len(code)}')
+    return code
+
+
+def _find_otp_invalid_text(text: str) -> str | None:
+    for pattern in OTP_INVALID_PATTERNS:
+        match = re.search(pattern, text or '', flags=re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
+async def _otp_body_excerpt(page: Any, max_chars: int = 1200) -> str:
+    try:
+        body_text = await page.locator('body').inner_text(timeout=1000)
+    except Exception:
+        return ''
+    return ' '.join(str(body_text).split())[:max_chars]
+
+
+async def _otp_input_state(page: Any, selector: str) -> dict[str, Any]:
+    locator = page.locator(selector)
+    try:
+        count = await locator.count()
+    except Exception:
+        return {'count': 0, 'visible': False, 'value_length': None}
+
+    visible = False
+    value_length: int | None = None
+    if count:
+        first = locator.first
+        try:
+            visible = await first.is_visible()
+        except Exception:
+            visible = False
+        try:
+            value = await first.evaluate('(node) => "value" in node ? String(node.value || "") : ""')
+            value_length = len(value)
+        except Exception:
+            value_length = None
+
+    return {'count': count, 'visible': visible, 'value_length': value_length}
+
+
+async def _run_otp_fill(page: Any, args: argparse.Namespace) -> dict[str, Any]:
+    code = _normalize_otp_code(args.code, args.digits)
+    selector = args.selector
+    wait_gone_selector = args.wait_gone_selector or selector
+    type_delay_ms = max(0, args.type_delay_ms)
+    settle_ms = max(0, args.settle_ms)
+    url_before = page.url
+
+    locator = page.locator(selector).first
+    await locator.wait_for(state='visible', timeout=args.timeout_ms)
+    await locator.click()
+    await page.keyboard.press('Control+A')
+    await page.keyboard.press('Backspace')
+    await page.keyboard.type(code, delay=type_delay_ms)
+
+    deadline = asyncio.get_running_loop().time() + (settle_ms / 1000)
+    body_excerpt = ''
+    invalid_text = None
+    input_state: dict[str, Any] = {'count': None, 'visible': None, 'value_length': None}
+
+    while True:
+        input_state = await _otp_input_state(page, wait_gone_selector)
+        body_excerpt = await _otp_body_excerpt(page)
+        invalid_text = _find_otp_invalid_text(body_excerpt)
+        input_gone = input_state.get('count') == 0 or input_state.get('visible') is False
+        if invalid_text or input_gone or asyncio.get_running_loop().time() >= deadline:
+            break
+        await asyncio.sleep(0.25)
+
+    url_after = page.url
+    input_gone = input_state.get('count') == 0 or input_state.get('visible') is False
+    accepted = bool(input_gone and not invalid_text)
+    still_open = bool(not input_gone)
+
+    return {
+        'ok': True,
+        'selector': selector,
+        'code_length': len(code),
+        'digits': args.digits,
+        'accepted': accepted,
+        'still_open': still_open,
+        'input_gone': bool(input_gone),
+        'invalid_code': bool(invalid_text),
+        'url_before': url_before,
+        'url_after': url_after,
+        'url_changed': url_before != url_after,
+        'evidence': {
+            'input_state': input_state,
+            'invalid_text': invalid_text,
+            'body_excerpt': body_excerpt,
+        },
+    }
+
+
+
 def _log_command_finished(
     args: argparse.Namespace,
     started: float,
@@ -840,6 +973,11 @@ async def run_command(args: argparse.Namespace) -> dict:
             if args.command == 'fill':
                 await page.fill(args.selector, args.value)
                 result = {'ok': True, 'selector': args.selector, 'url': page.url}
+                _log_command_finished(args, started, command_details, result, correlation)
+                return result
+
+            if args.command == 'otp-fill':
+                result = await _run_otp_fill(page, args)
                 _log_command_finished(args, started, command_details, result, correlation)
                 return result
 
