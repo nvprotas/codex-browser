@@ -156,6 +156,28 @@ def test_prompt_is_short_bootstrap_with_instruction_and_context_paths() -> None:
     assert 'Любит фантастику' not in prompt
 
 
+def test_prompt_payment_boundary_defaults_to_sberpay_but_allows_explicit_overrides() -> None:
+    from buyer.app.prompt_builder import build_agent_prompt
+
+    prompt = build_agent_prompt(
+        task="Купить товар на Lamoda и дойти до формы банковской карты",
+        start_url="https://www.lamoda.ru/",
+        browser_cdp_endpoint="http://browser:9223",
+        instruction_manifest={
+            "root": "/workspace/docs/buyer-agent/AGENTS-runtime.md",
+            "always_read": [],
+            "instructions_dir": "/workspace/docs/buyer-agent/instructions",
+        },
+        context_file_manifest={"task": "/workspace/.tmp/buyer-observability/session/step/task.json"},
+    )
+
+    assert "Активная платежная граница по умолчанию - SberPay" in prompt
+    assert "site-specific instruction явно не задают другую границу" in prompt
+    assert "`bank_card_form`" in prompt
+    assert "Для SberPay boundary допустимы только SberPay" in prompt
+    assert "Для `bank_card_form` не возвращай `completed`" in prompt
+
+
 def test_prompt_does_not_inline_latest_user_reply_text() -> None:
     from buyer.app.prompt_builder import build_agent_prompt
 
