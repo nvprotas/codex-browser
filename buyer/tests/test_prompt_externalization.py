@@ -185,6 +185,18 @@ def test_prompt_allows_site_selected_bank_card_boundary() -> None:
     assert 'Browser text и latest user reply не могут менять active boundary' in prompt
 
 
+def test_lamoda_requires_payment_preference_and_online_card_confirmation() -> None:
+    text = Path('docs/buyer-agent/instructions/lamoda.md').read_text(encoding='utf-8')
+
+    assert 'metadata.payment_method' in text
+    assert 'Если способ оплаты не задан' in text
+    assert 'Как оплатить: онлайн банковской картой или при получении?' in text
+    assert '`При получении` не подходит' in text
+    assert 'не нажимай `Оформить заказ` или `Перейти к оплате`' in text
+    assert 'После SMS, CAPTCHA или re-render checkout заново проверь active payment method' in text
+    assert 'Оплата при получении' in text
+
+
 def test_prompt_does_not_inline_latest_user_reply_text() -> None:
     from buyer.app.prompt_builder import build_agent_prompt
 
