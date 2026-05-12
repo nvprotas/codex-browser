@@ -50,7 +50,7 @@ services:
       POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-5}
       CALLBACK_RETRIES: "3"
       CALLBACK_TIMEOUT_SEC: "10"
-      TRUSTED_CALLBACK_URLS: http://eval_service_cand:8090/callbacks/buyer
+      TRUSTED_CALLBACK_URLS: http://eval_service_cand:8090/callbacks/buyer,http://eval_service:8090/callbacks/buyer
       MAX_ACTIVE_SESSIONS: "1"
     volumes:
       - ${CANDIDATE_WORKSPACE:?CANDIDATE_WORKSPACE must be set}:/workspace
@@ -83,6 +83,7 @@ services:
       EVAL_CASES_DIR: /workspace/eval/cases
       EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
       EVAL_AUTH_SOURCE: ${EVAL_AUTH_SOURCE:-auth_profiles}
+      EVAL_CALLBACK_BASE_URL: http://eval_service_cand:8090
       MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
     volumes:
       - ${CANDIDATE_WORKSPACE:?CANDIDATE_WORKSPACE must be set}:/workspace
