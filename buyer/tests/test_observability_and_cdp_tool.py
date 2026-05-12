@@ -282,6 +282,9 @@ class CdpToolOutputTests(unittest.TestCase):
         self.assertIn('/workspace/docs/buyer-agent/instructions', prompt)
         self.assertIn('payment_evidence.source="litres_payecom_iframe"', litres_instruction)
         self.assertIn('https://payecom.ru/pay_ru?orderId=', litres_instruction)
+        self.assertIn('не трать 15 секунд на клик по еще не появившейся кнопке', litres_instruction)
+        self.assertIn('text --selector body --max-chars 500', litres_instruction)
+        self.assertIn('wait-selector --selector \'[data-testid="paymentLayout__payment--button"]\' --timeout-ms 5000', litres_instruction)
 
     def test_prompt_requires_exact_variant_guardrails_before_add_to_cart(self) -> None:
         prompt = _build_test_agent_prompt(
