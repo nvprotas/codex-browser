@@ -81,12 +81,17 @@ services:
       BUYER_TRACE_DIR: /workspace/.tmp/buyer-observability-cand
       EVAL_RUNS_DIR: /workspace/eval/runs-cand
       EVAL_CASES_DIR: /workspace/eval/cases
+      CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}
       EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
       EVAL_AUTH_SOURCE: ${EVAL_AUTH_SOURCE:-auth_profiles}
       EVAL_CALLBACK_BASE_URL: http://eval_service_cand:8090
       MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
     volumes:
       - ${CANDIDATE_WORKSPACE:?CANDIDATE_WORKSPACE must be set}:/workspace
+      - type: bind
+        source: ${CODEX_AUTH_JSON_PATH:-./buyer/docker/codex-auth.placeholder.json}
+        target: /run/codex/host-auth
+        read_only: true
       - type: bind
         source: ${EVAL_AUTH_PROFILES_HOST_DIR:-./eval/auth-profiles.local}
         target: /run/eval/auth-profiles
