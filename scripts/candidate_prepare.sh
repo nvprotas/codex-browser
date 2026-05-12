@@ -8,14 +8,28 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMPOSE_FILE="$REPO_ROOT/docker-compose.candidate.yml"
+WORKTREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT="codex-candidate"
 
 WORKTREE="${EVOLVE_CANDIDATE_WORKTREE:?EVOLVE_CANDIDATE_WORKTREE is not set}"
 
+# Основной репо = общий git-dir worktree минус /.git
+# git rev-parse --git-common-dir возвращает путь вида /path/to/main/.git
+GIT_COMMON="$(git -C "$WORKTREE_ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$GIT_COMMON" ] && [ -d "$GIT_COMMON" ]; then
+  MAIN_REPO="$(cd "$GIT_COMMON/.." && pwd)"
+else
+  # Fallback: ищем .env рядом с worktree или через EVOLVE_REPORTS_DIR
+  MAIN_REPO="$(cd "${EVOLVE_REPORTS_DIR:-$WORKTREE_ROOT}/../.." && pwd)"
+fi
+
+COMPOSE_FILE="$WORKTREE_ROOT/docker-compose.candidate.yml"
+ENV_FILE="$MAIN_REPO/.env"
+
 echo "[candidate_prepare] worktree: $WORKTREE"
+echo "[candidate_prepare] main_repo: $MAIN_REPO"
 echo "[candidate_prepare] compose file: $COMPOSE_FILE"
+echo "[candidate_prepare] env file: $ENV_FILE"
 
 # Остановить предыдущий candidate-стек если запущен
 docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" down --timeout 10 2>/dev/null || true
@@ -23,7 +37,7 @@ docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" down --timeout 10 2>
 # Поднять новый candidate-стек с worktree кандидата
 CANDIDATE_WORKSPACE="$WORKTREE" \
   docker compose \
-    --env-file "$REPO_ROOT/.env" \
+    --env-file "$ENV_FILE" \
     -f "$COMPOSE_FILE" \
     --project-name "$PROJECT" \
     up -d
