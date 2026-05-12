@@ -10,6 +10,8 @@
 - Для ожидания DOM milestone используй `wait-selector --selector <selector>`.
 - `wait-selector`, `exists` и `attr` принимают CSS-селектор Playwright. Не смешивай CSS с `text=...` внутри одного selector list; если нужен текст ошибки, проверь его отдельной командой `text`.
 - Если клик должен сразу привести к ожидаемому URL или DOM состоянию, используй `click --selector <selector> --wait-url-contains <text>` / `--wait-url-regex <pattern>` / `--wait-selector <selector>` вместо отдельного лишнего observe-step.
+- После `click --wait-selector <X>` или `--wait-url-contains <Y>` НЕ запускай дополнительный `snapshot`/`url`/`title` для подтверждения: успешный wait уже доказал переход. Делай новый observe только если нужно прочитать содержимое появившегося элемента.
+- Анти-паттерн: `click → snapshot → click → snapshot → ...`. Каждый промежуточный `snapshot` — лишний LLM-цикл. Замени на `click --wait-selector <next>`; `snapshot` оставь только перед действием, для которого нужен текст/атрибуты.
 - Для неизвестных селекторов используй короткий timeout.
 - Для чтения атрибута используй `attr --selector <css> --name <attr>`, например `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`; параметра `--attr` нет.
 - После state-changing действий проверяй milestone/evidence через `url`, `title`, `snapshot`, `exists` или `attr`, если сам результат команды не доказывает нужное состояние.

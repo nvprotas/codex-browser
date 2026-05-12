@@ -53,7 +53,11 @@ settings = get_settings()
 store = _build_session_store(settings)
 callback_client = CallbackClient(settings)
 runner = AgentRunner(settings)
-knowledge_analyzer = PostSessionKnowledgeAnalyzer(settings)
+knowledge_analyzer = (
+    PostSessionKnowledgeAnalyzer(settings)
+    if settings.buyer_knowledge_analysis_enabled
+    else None
+)
 auth_script_runner = SberIdScriptRunner(
     scripts_dir=settings.auth_scripts_dir,
     cdp_endpoint=settings.browser_cdp_endpoint,

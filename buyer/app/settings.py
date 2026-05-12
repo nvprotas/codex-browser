@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     buyer_prompt_preview_chars: int = Field(default=2000, ge=0)
     buyer_stream_tail_chars: int = Field(default=4000, ge=200)
     buyer_browser_actions_tail: int = Field(default=40, ge=1)
+    buyer_knowledge_analysis_enabled: bool = False
 
     callback_timeout_sec: float = 10.0
     callback_retries: int = 3
