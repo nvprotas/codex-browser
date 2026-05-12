@@ -1,0 +1,110 @@
+# Candidate eval stack — запускается поверх основного стека для оценки кандидата.
+# Использует те же образы, но другой workspace (worktree кандидата).
+# Требует переменной CANDIDATE_WORKSPACE — путь к worktree кандидата на хосте.
+#
+# Запуск:
+#   CANDIDATE_WORKSPACE=/path/to/worktree docker compose -f docker-compose.candidate.yml \
+#     --project-name codex-candidate up -d
+#
+# Остановка:
+#   docker compose -f docker-compose.candidate.yml --project-name codex-candidate down
+
+services:
+  buyer_cand:
+    image: codex-browser-buyer
+    restart: "no"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_ORG_ID: ${OPENAI_ORG_ID:-}
+      CODEX_AUTH_JSON_PATH: ${CODEX_AUTH_JSON_PATH:-}
+      BUYER_USER_INFO_PATH: /run/buyer/user-buyer-info.md
+      MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
+      NOVNC_PUBLIC_URL: http://localhost:6901/vnc.html?autoconnect=1&resize=scale
+      BROWSER_CDP_ENDPOINT: http://browser:9223
+      CDP_RECOVERY_WINDOW_SEC: ${CDP_RECOVERY_WINDOW_SEC:-20}
+      CDP_RECOVERY_INTERVAL_MS: ${CDP_RECOVERY_INTERVAL_MS:-500}
+      CODEX_BIN: codex
+      CODEX_MODEL: ${CODEX_MODEL:-}
+      CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
+      CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-low}
+      CODEX_REASONING_SUMMARY: ${CODEX_REASONING_SUMMARY:-none}
+      CODEX_WEB_SEARCH: ${CODEX_WEB_SEARCH:-disabled}
+      CODEX_IMAGE_GENERATION: ${CODEX_IMAGE_GENERATION:-disabled}
+      CODEX_WORKDIR: /workspace
+      BUYER_TRACE_DIR: /workspace/.tmp/buyer-observability-cand
+      BUYER_PROMPT_PREVIEW_CHARS: ${BUYER_PROMPT_PREVIEW_CHARS:-2000}
+      BUYER_STREAM_TAIL_CHARS: ${BUYER_STREAM_TAIL_CHARS:-4000}
+      BUYER_BROWSER_ACTIONS_TAIL: ${BUYER_BROWSER_ACTIONS_TAIL:-40}
+      SBERID_ALLOWLIST: ${SBERID_ALLOWLIST:-litres.ru,brandshop.ru}
+      SBER_AUTH_SOURCE: ${SBER_AUTH_SOURCE:-inline_only}
+      SBER_COOKIES_API_URL: ${SBER_COOKIES_API_URL:-}
+      SBER_COOKIES_API_SCOPE: ${SBER_COOKIES_API_SCOPE:-}
+      SBER_COOKIES_API_TIMEOUT_SEC: ${SBER_COOKIES_API_TIMEOUT_SEC:-5}
+      SBER_COOKIES_API_RETRIES: ${SBER_COOKIES_API_RETRIES:-1}
+      AUTH_SCRIPTS_DIR: ${AUTH_SCRIPTS_DIR:-/app/scripts}
+      AUTH_SCRIPT_TIMEOUT_SEC: ${AUTH_SCRIPT_TIMEOUT_SEC:-90}
+      STATE_BACKEND: ${STATE_BACKEND:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://buyer:buyer@postgres:5432/buyer}
+      POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
+      POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-5}
+      CALLBACK_RETRIES: "3"
+      CALLBACK_TIMEOUT_SEC: "10"
+      TRUSTED_CALLBACK_URLS: http://eval_service_cand:8090/callbacks/buyer
+      MAX_ACTIVE_SESSIONS: "1"
+    volumes:
+      - ${CANDIDATE_WORKSPACE:?CANDIDATE_WORKSPACE must be set}:/workspace
+      - type: bind
+        source: ${CODEX_AUTH_JSON_PATH:-./buyer/docker/codex-auth.placeholder.json}
+        target: /run/codex/host-auth
+        read_only: true
+      - type: bind
+        source: ${USER_BUYER_INFO_PATH:-./buyer/docker/user-buyer-info.placeholder.md}
+        target: /run/buyer/user-buyer-info.md
+        read_only: false
+    ports:
+      - "127.0.0.1:8001:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks:
+      - main
+
+  eval_service_cand:
+    image: codex-browser-eval_service
+    restart: "no"
+    environment:
+      BUYER_API_BASE_URL: http://buyer_cand:8000
+      BUYER_TRACE_DIR: /workspace/.tmp/buyer-observability-cand
+      EVAL_RUNS_DIR: /workspace/eval/runs-cand
+      EVAL_CASES_DIR: /workspace/eval/cases
+      EVAL_AUTH_PROFILES_DIR: ${EVAL_AUTH_PROFILES_DIR:-/run/eval/auth-profiles}
+      EVAL_AUTH_SOURCE: ${EVAL_AUTH_SOURCE:-auth_profiles}
+      MIDDLE_CALLBACK_URL: http://micro-ui:8080/callbacks
+    volumes:
+      - ${CANDIDATE_WORKSPACE:?CANDIDATE_WORKSPACE must be set}:/workspace
+      - type: bind
+        source: ${EVAL_AUTH_PROFILES_HOST_DIR:-./eval/auth-profiles.local}
+        target: /run/eval/auth-profiles
+        read_only: true
+    ports:
+      - "127.0.0.1:8091:8090"
+    depends_on:
+      buyer_cand:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8090/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - main
+
+networks:
+  main:
+    name: codex-browser_default
+    external: true
