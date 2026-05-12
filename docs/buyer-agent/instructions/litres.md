@@ -15,8 +15,9 @@
 
 - Если текущий URL уже содержит `/purchase/ppd/`, не возвращайся в корзину и не ищи товар заново.
 - Сначала проверь `exists --selector 'iframe[src*="payecom.ru/pay_ru"]'`; если iframe уже есть, извлеки `orderId` через `attr --name src` и завершай без дополнительных кликов.
+- Если текущий URL содержит `/purchase/ppd/`, `method=russian_card&system=sbercard` и параметры `offer-page`/`book-slug`/`author` уже указывают на целевую книгу, не делай `title`, `links`, `snapshot body` и не возвращайся на карточку товара: сразу нажми `[data-testid="paymentLayout__payment--button"]` с ожиданием PayEcom iframe.
 - Если на странице ошибка `Превышено время ожидания`, нажми `button:has-text("Попробовать снова")`: это повторная загрузка провайдера, а не финальная оплата. После клика жди только PayEcom iframe или checkout/error milestone.
-- Для проверки заказа используй компактный `snapshot --selector '[data-testid="ppd-checkout"]'`: должны совпасть название, автор и формат книги из задачи.
+- Для проверки заказа используй компактный `snapshot --selector '[data-testid="ppd-checkout"]' --limit 60` только если URL checkout не подтверждает целевую книгу или способ оплаты еще не выбран: должны совпасть название, автор и формат книги из задачи.
 - Если checkout открыт, но `Российская карта` еще не выбрана, нажми `[data-testid="payment__method--russian_card"]`.
 - Если checkout открыт и выбран способ `Российская карта` или URL содержит `method=russian_card&system=sbercard`, сразу нажми `[data-testid="paymentLayout__payment--button"]` с `--wait-selector 'iframe[src*="payecom.ru/pay_ru"]'`.
 - После нажатия проверяй только `attr --selector 'iframe[src*="payecom.ru/pay_ru"]' --name src`; не открывай и не управляй содержимым iframe.
